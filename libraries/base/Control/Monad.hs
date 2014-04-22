@@ -20,11 +20,8 @@ module Control.Monad
 
       Functor(fmap)
     , Monad((>>=), (>>), return, fail)
-
-    , MonadPlus (
-          mzero
-        , mplus
-        )
+    , Alternative(empty, (<|>), some, many)
+    , MonadPlus(mzero, mplus)
     -- * Functions
 
     -- ** Naming conventions
@@ -82,6 +79,7 @@ import GHC.List
 import GHC.Base
 
 infixr 1 =<<
+infixl 3 <|>
 
 -- -----------------------------------------------------------------------------
 -- Prelude monad functions
@@ -101,7 +99,7 @@ sequence ms = foldr k (return []) ms
 
 -- | Evaluate each action in the sequence from left to right,
 -- and ignore the results.
-sequence_        :: Monad m => [m a] -> m () 
+sequence_        :: Monad m => [m a] -> m ()
 {-# INLINE sequence_ #-}
 sequence_ ms     =  foldr (>>) (return ()) ms
 
@@ -116,18 +114,64 @@ mapM_           :: Monad m => (a -> m b) -> [a] -> m ()
 mapM_ f as      =  sequence_ (map f as)
 
 -- -----------------------------------------------------------------------------
+-- The Alternative class definition
+
+-- | A monoid on applicative functors.
+--
+-- Minimal complete definition: 'empty' and '<|>'.
+--
+-- If defined, 'some' and 'many' should be the least solutions
+-- of the equations:
+--
+-- * @some v = (:) '<$>' v '<*>' many v@
+--
+-- * @many v = some v '<|>' 'pure' []@
+class Applicative f => Alternative f where
+    -- | The identity of '<|>'
+    empty :: f a
+    -- | An associative binary operation
+    (<|>) :: f a -> f a -> f a
+
+    -- | One or more.
+    some :: f a -> f [a]
+    some v = some_v
+      where
+        many_v = some_v <|> pure []
+        some_v = (fmap (:) v) <*> many_v
+
+    -- | Zero or more.
+    many :: f a -> f [a]
+    many v = many_v
+      where
+        many_v = some_v <|> pure []
+        some_v = (fmap (:) v) <*> many_v
+
+instance Alternative Maybe where
+    empty = Nothing
+    Nothing <|> r = r
+    l       <|> _ = l
+
+instance Alternative [] where
+    empty = []
+    (<|>) = (++)
+
+
+-- -----------------------------------------------------------------------------
 -- The MonadPlus class definition
 
 -- | Monads that also support choice and failure.
-class Monad m => MonadPlus m where
+class (Alternative m, Monad m) => MonadPlus m where
    -- | the identity of 'mplus'.  It should also satisfy the equations
    --
    -- > mzero >>= f  =  mzero
    -- > v >> mzero   =  mzero
    --
-   mzero :: m a 
+   mzero :: m a
+   mzero = empty
+
    -- | an associative operation
    mplus :: m a -> m a -> m a
+   mplus = (<|>)
 
 instance MonadPlus [] where
    mzero = []
@@ -196,12 +240,6 @@ void = fmap (const ())
 
 -- -----------------------------------------------------------------------------
 -- Other monad functions
-
--- | The 'join' function is the conventional monad join operator. It is used to
--- remove one level of monadic structure, projecting its bound argument into the
--- outer level.
-join              :: (Monad m) => m (m a) -> m a
-join x            =  x >>= id
 
 -- | The 'mapAndUnzipM' function maps its first argument over a list, returning
 -- the result as a pair of lists. This function is mainly used with complicated

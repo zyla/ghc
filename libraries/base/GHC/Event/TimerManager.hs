@@ -42,7 +42,6 @@ import Control.Monad ((=<<), liftM, sequence_, when)
 import Data.IORef (IORef, atomicModifyIORef', mkWeakIORef, newIORef, readIORef,
                    writeIORef)
 import Data.Maybe (Maybe(..))
-import Data.Monoid (mempty)
 import GHC.Base
 import GHC.Conc.Signal (runHandlers)
 import GHC.Num (Num(..))

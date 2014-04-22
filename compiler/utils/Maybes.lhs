@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 %
 % (c) The University of Glasgow 2006
 % (c) The GRASP/AQUA Project, Glasgow University, 1992-1998
@@ -17,7 +18,9 @@ module Maybes (
 
         MaybeT(..)
     ) where
+#if __GLASGOW_HASKELL__ < 709
 import Control.Applicative
+#endif
 import Control.Monad
 import Data.Maybe
 
