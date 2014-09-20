@@ -23,6 +23,11 @@ try:
 except:
     pass
 
+PYTHON3 = sys.version_info >= (3, 0)
+if PYTHON3:
+    print("*** WARNING: running testsuite using Python 3.\n"
+          "*** Python 3 support is experimental. See Trac #9184.")
+
 from testutil import *
 from testglobals import *
 
@@ -253,9 +258,13 @@ t.start_time = time.localtime()
 
 print('Beginning test run at', time.strftime("%c %Z",t.start_time))
 
-# set stdout to unbuffered (is this the best way to do it?)
 sys.stdout.flush()
-sys.stdout = os.fdopen(sys.__stdout__.fileno(), "w", 0)
+if PYTHON3:
+    # in Python 3, we output text, which cannot be unbuffered
+    sys.stdout = os.fdopen(sys.__stdout__.fileno(), "w")
+else:
+    # set stdout to unbuffered (is this the best way to do it?)
+    sys.stdout = os.fdopen(sys.__stdout__.fileno(), "w", 0)
 
 # First collect all the tests to be run
 for file in t_files:
