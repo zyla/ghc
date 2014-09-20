@@ -54,7 +54,7 @@ opts, args = getopt.getopt(sys.argv[1:], "e:", long_options)
        
 for opt,arg in opts:
     if opt == '--config':
-        exec(compile(open(arg).read(), arg, 'exec'))
+        exec(open(arg).read())
 
     # -e is a string to execute from the command line.  For example:
     # testframe -e 'config.compiler=ghc-5.04'
@@ -262,7 +262,7 @@ for file in t_files:
     if_verbose(2, '====> Scanning %s' % file)
     newTestDir(os.path.dirname(file))
     try:
-        exec(compile(open(file).read(), arg, 'exec'))
+        exec(open(file).read())
     except:
         print('*** framework failure: found an error while executing ', file, ':')
         t.n_framework_failures = t.n_framework_failures + 1
