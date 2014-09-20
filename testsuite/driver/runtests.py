@@ -263,7 +263,7 @@ for file in t_files:
     newTestDir(os.path.dirname(file))
     try:
         exec(open(file).read())
-    except:
+    except Exception:
         print('*** framework failure: found an error while executing ', file, ':')
         t.n_framework_failures = t.n_framework_failures + 1
         traceback.print_exc()
