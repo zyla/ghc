@@ -24,7 +24,6 @@ try:
 except:
     print("Warning: subprocess not found, will fall back to spawnv")
 
-from string import join
 from testglobals import *
 from testutil import *
 
@@ -903,10 +902,10 @@ def ghci_script( name, way, script ):
     # We pass HC and HC_OPTS as environment variables, so that the
     # script can invoke the correct compiler by using ':! $HC $HC_OPTS'
     cmd = "HC='" + config.compiler + "' " + \
-          "HC_OPTS='" + join(flags,' ') + "' " + \
+          "HC_OPTS='" + ' '.join(flags) + "' " + \
           "'" + config.compiler + "'" + \
           ' --interactive -v0 -ignore-dot-ghci ' + \
-          join(flags,' ')
+          ' '.join(flags)
 
     getTestOpts().stdin = script
     return simple_run( name, way, cmd, getTestOpts().extra_run_opts )
@@ -1160,9 +1159,9 @@ def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link, addsuf, 
 
     cmd = 'cd ' + getTestOpts().testdir + " && " + cmd_prefix + "'" \
           + config.compiler + "' " \
-          + join(comp_flags,' ') + ' ' \
+          + ' '.join(comp_flags) + ' ' \
           + to_do + ' ' + srcname + ' ' \
-          + join(config.way_flags(name)[way],' ') + ' ' \
+          + ' '.join(config.way_flags(name)[way]) + ' ' \
           + extra_hc_opts + ' ' \
           + opts.extra_hc_opts + ' ' \
           + '>' + errname + ' 2>&1'
@@ -1287,7 +1286,7 @@ def rts_flags(way):
     if args == []:
         return ''
     else:
-        return '+RTS ' + join(args,' ') + ' -RTS'
+        return '+RTS ' + ' '.join(args) + ' -RTS'
 
 # -----------------------------------------------------------------------------
 # Run a program in the interpreter and check its output
@@ -1344,9 +1343,9 @@ def interpreter_run( name, way, extra_hc_opts, compile_only, top_mod ):
         flags.extend(["-outputdir", getTestOpts().outputdir])
 
     cmd = "'" + config.compiler + "' " \
-          + join(flags,' ') + ' ' \
+          + ' '.join(flags) + ' ' \
           + srcname + ' ' \
-          + join(config.way_flags(name)[way],' ') + ' ' \
+          + ' '.join(config.way_flags(name)[way]) + ' ' \
           + extra_hc_opts + ' ' \
           + getTestOpts().extra_hc_opts + ' ' \
           + '<' + scriptname +  ' 1>' + outname + ' 2>' + errname
@@ -2124,7 +2123,7 @@ def printPassingTestInfosSummary(file, testInfos):
         tests.sort()
         for test in tests:
            file.write('   ' + directory.ljust(maxDirLen + 2) + test + \
-                      ' (' + join(testInfos[directory][test],',') + ')\n')
+                      ' (' + ','.join(testInfos[directory][test]) + ')\n')
     file.write('\n')
 
 def printFailingTestInfosSummary(file, testInfos):
@@ -2139,7 +2138,7 @@ def printFailingTestInfosSummary(file, testInfos):
            for reason in reasons:
                file.write('   ' + directory.ljust(maxDirLen + 2) + test + \
                           ' [' + reason + ']' + \
-                          ' (' + join(testInfos[directory][test][reason],',') + ')\n')
+                          ' (' + ','.join(testInfos[directory][test][reason]) + ')\n')
     file.write('\n')
 
 def getStdout(cmd):
