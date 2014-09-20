@@ -3,7 +3,7 @@
 #
 
 # This allows us to use the "with X:" syntax with python 2.5:
-from __future__ import with_statement
+from __future__ import print_function, with_statement
 
 import shutil
 import sys
@@ -24,7 +24,7 @@ try:
     import subprocess
     have_subprocess = True
 except:
-    print "Warning: subprocess not found, will fall back to spawnv"
+    print("Warning: subprocess not found, will fall back to spawnv")
 
 from string import join
 from testglobals import *
@@ -671,8 +671,8 @@ def test_common_work (name, opts, func, args):
 
             if func == multi_compile or func == multi_compile_fail:
                     extra_mods = args[1]
-                    clean(map (lambda (f,x): replace_suffix(f, 'o'), extra_mods))
-                    clean(map (lambda (f,x): replace_suffix(f, 'hi'), extra_mods))
+                    clean(map (lambda fx: replace_suffix(fx[0],'o'), extra_mods))
+                    clean(map (lambda fx: replace_suffix(fx[0], 'hi'), extra_mods))
 
             clean(getTestOpts().clean_files)
 
@@ -712,7 +712,7 @@ def test_common_work (name, opts, func, args):
                         files_written_not_removed[name] = [f]
         except:
             pass
-    except Exception, e:
+    except Exception as e:
         framework_fail(name, 'runTest', 'Unhandled exception: ' + str(e))
 
 def clean(strs):
@@ -724,19 +724,19 @@ def clean_full_path(name):
         try:
             # Remove files...
             os.remove(name)
-        except OSError, e1:
+        except OSError as e1:
             try:
                 # ... and empty directories
                 os.rmdir(name)
-            except OSError, e2:
+            except OSError as e2:
                 # We don't want to fail here, but we do want to know
                 # what went wrong, so print out the exceptions.
                 # ENOENT isn't a problem, though, as we clean files
                 # that don't necessarily exist.
                 if e1.errno != errno.ENOENT:
-                    print e1
+                    print(e1)
                 if e2.errno != errno.ENOENT:
-                    print e2
+                    print(e2)
 
 def do_test(name, way, func, args):
     full_name = name + '(' + way + ')'
@@ -967,7 +967,7 @@ def do_compile( name, way, should_fail, top_mod, extra_mods, extra_hc_opts ):
     return passed()
 
 def compile_cmp_asm( name, way, extra_hc_opts ):
-    print 'Compile only, extra args = ', extra_hc_opts
+    print('Compile only, extra args = ', extra_hc_opts)
     pretest_cleanup(name)
     result = simple_build( name + '.cmm', way, '-keep-s-files -O ' + extra_hc_opts, 0, '', 0, 0, 0)
 
@@ -1049,7 +1049,7 @@ def checkStats(name, way, stats_file, range_fields):
         for (field, (expected, dev)) in range_fields.items():
             m = re.search('\("' + field + '", "([0-9]+)"\)', contents)
             if m == None:
-                print 'Failed to find field: ', field
+                print('Failed to find field: ', field)
                 result = failBecause('no such stats field')
             val = int(m.group(1))
 
@@ -1059,12 +1059,12 @@ def checkStats(name, way, stats_file, range_fields):
             deviation = round(((float(val) * 100)/ expected) - 100, 1)
 
             if val < lowerBound:
-                print field, 'value is too low:'
-                print '(If this is because you have improved GHC, please'
-                print 'update the test so that GHC doesn\'t regress again)'
+                print(field, 'value is too low:')
+                print('(If this is because you have improved GHC, please')
+                print('update the test so that GHC doesn\'t regress again)')
                 result = failBecause('stat too good')
             if val > upperBound:
-                print field, 'value is too high:'
+                print(field, 'value is too high:')
                 result = failBecause('stat not good enough')
 
             if val < lowerBound or val > upperBound or config.verbose >= 4:
@@ -1074,7 +1074,8 @@ def checkStats(name, way, stats_file, range_fields):
                 expectedLen = len(expectedStr)
                 length = max(map (lambda x : len(str(x)), [expected, lowerBound, upperBound, val]))
                 def display(descr, val, extra):
-                    print descr, string.rjust(str(val), length), extra
+                    print(descr, str(val).rjust(length), extra)
+
                 display('    Expected    ' + full_name + ' ' + field + ':', expected, '+/-' + str(dev) + '%')
                 display('    Lower bound ' + full_name + ' ' + field + ':', lowerBound, '')
                 display('    Upper bound ' + full_name + ' ' + field + ':', upperBound, '')
@@ -1166,7 +1167,7 @@ def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link, addsuf, 
 
     if result != 0 and not should_fail:
         actual_stderr = qualify(name, 'comp.stderr')
-        if_verbose(1,'Compile failed (status ' + `result` + ') errors were:')
+        if_verbose(1,'Compile failed (status ' + repr(result) + ') errors were:')
         if_verbose_dump(1,actual_stderr)
 
     # ToDo: if the sub-shell was killed by ^C, then exit
@@ -1250,7 +1251,7 @@ def simple_run( name, way, prog, args ):
 
     # check the exit code
     if exit_code != opts.exit_code:
-        print 'Wrong exit code (expected', opts.exit_code, ', actual', exit_code, ')'
+        print('Wrong exit code (expected', opts.exit_code, ', actual', exit_code, ')')
         dump_stdout(name)
         dump_stderr(name)
         return failBecause('bad exit code')
@@ -1366,7 +1367,7 @@ def interpreter_run( name, way, extra_hc_opts, compile_only, top_mod ):
 
     # check the exit code
     if exit_code != getTestOpts().exit_code:
-        print 'Wrong exit code (expected', getTestOpts().exit_code, ', actual', exit_code, ')'
+        print('Wrong exit code (expected', getTestOpts().exit_code, ', actual', exit_code, ')')
         dump_stdout(name)
         dump_stderr(name)
         return failBecause('bad exit code')
@@ -1428,8 +1429,8 @@ def check_stdout_ok( name ):
                           expected_stdout_file, actual_stdout_file)
 
 def dump_stdout( name ):
-   print 'Stdout:'
-   print read_no_crs(qualify(name, 'run.stdout'))
+   print('Stdout:')
+   print(read_no_crs(qualify(name, 'run.stdout')))
 
 def check_stderr_ok( name ):
    if getTestOpts().with_namebase == None:
@@ -1451,8 +1452,8 @@ def check_stderr_ok( name ):
                           expected_stderr_file, actual_stderr_file)
 
 def dump_stderr( name ):
-   print "Stderr:"
-   print read_no_crs(qualify(name, 'run.stderr'))
+   print("Stderr:")
+   print(read_no_crs(qualify(name, 'run.stderr')))
 
 def read_no_crs(file):
     str = ''
@@ -1487,13 +1488,13 @@ def check_hp_ok(name):
                 if (gsResult == 0):
                     return (True)
                 else:
-                    print "hp2ps output for " + name + "is not valid PostScript"
+                    print("hp2ps output for " + name + "is not valid PostScript")
             else: return (True) # assume postscript is valid without ghostscript
         else:
-            print "hp2ps did not generate PostScript for " + name
+            print("hp2ps did not generate PostScript for " + name)
             return (False)
     else:
-        print "hp2ps error when processing heap profile for " + name
+        print("hp2ps error when processing heap profile for " + name)
         return(False)
 
 def check_prof_ok(name):
@@ -1501,11 +1502,11 @@ def check_prof_ok(name):
     prof_file = qualify(name,'prof')
 
     if not os.path.exists(prof_file):
-        print prof_file + " does not exist"
+        print(prof_file + " does not exist")
         return(False)
 
     if os.path.getsize(qualify(name,'prof')) == 0:
-        print prof_file + " is empty"
+        print(prof_file + " is empty")
         return(False)
 
     if getTestOpts().with_namebase == None:
@@ -1667,16 +1668,16 @@ def normalise_asm( str ):
     out = '\n'.join(out)
     return out
 
-def if_verbose( n, str ):
+def if_verbose( n, s ):
     if config.verbose >= n:
-        print str
+        print(s)
 
 def if_verbose_dump( n, f ):
     if config.verbose >= n:
         try:
-            print open(f).read()
+            print(open(f).read())
         except:
-            print ''
+            print('')
 
 def rawSystem(cmd_and_args):
     # We prefer subprocess.call to os.spawnv as the latter
@@ -1931,7 +1932,7 @@ def genGSCmd(psfile):
 
 def gsNotWorking():
     global gs_working
-    print "GhostScript not available for hp2ps tests"
+    print("GhostScript not available for hp2ps tests")
 
 global gs_working
 gs_working = 0
@@ -1941,7 +1942,7 @@ if config.have_profiling:
     if resultGood == 0:
         resultBad = runCmdExitCode(genGSCmd(config.confdir + '/bad.ps'));
         if resultBad != 0:
-            print "GhostScript available for hp2ps tests"
+            print("GhostScript available for hp2ps tests")
             gs_working = 1;
         else:
             gsNotWorking();
@@ -2067,25 +2068,25 @@ def summary(t, file):
                + string.rjust(str(datetime.timedelta(seconds=
                     round(time.time() - time.mktime(t.start_time)))), 8)
                + ' spent to go through\n'
-               + string.rjust(`t.total_tests`, 8)
+               + string.rjust(repr(t.total_tests), 8)
                + ' total tests, which gave rise to\n'
-               + string.rjust(`t.total_test_cases`, 8)
+               + string.rjust(repr(t.total_test_cases), 8)
                + ' test cases, of which\n'
-               + string.rjust(`t.n_tests_skipped`, 8)
+               + string.rjust(repr(t.n_tests_skipped), 8)
                + ' were skipped\n'
                + '\n'
-               + string.rjust(`t.n_missing_libs`, 8)
+               + string.rjust(repr(t.n_missing_libs), 8)
                + ' had missing libraries\n'
-               + string.rjust(`t.n_expected_passes`, 8)
+               + string.rjust(repr(t.n_expected_passes), 8)
                + ' expected passes\n'
-               + string.rjust(`t.n_expected_failures`, 8)
+               + string.rjust(repr(t.n_expected_failures), 8)
                + ' expected failures\n'
                + '\n'
-               + string.rjust(`t.n_framework_failures`, 8)
+               + string.rjust(repr(t.n_framework_failures), 8)
                + ' caused framework failures\n'
-               + string.rjust(`t.n_unexpected_passes`, 8)
+               + string.rjust(repr(t.n_unexpected_passes), 8)
                + ' unexpected passes\n'
-               + string.rjust(`t.n_unexpected_failures`, 8)
+               + string.rjust(repr(t.n_unexpected_failures), 8)
                + ' unexpected failures\n'
                + '\n')
 
