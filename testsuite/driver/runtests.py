@@ -54,7 +54,7 @@ opts, args = getopt.getopt(sys.argv[1:], "e:", long_options)
        
 for opt,arg in opts:
     if opt == '--config':
-        execfile(arg)
+        exec(compile(open(arg).read(), arg, 'exec'))
 
     # -e is a string to execute from the command line.  For example:
     # testframe -e 'config.compiler=ghc-5.04'
@@ -85,9 +85,9 @@ for opt,arg in opts:
             sys.stderr.write("ERROR: requested way \'" +
                              arg + "\' does not exist\n")
             sys.exit(1)
-        config.other_ways = filter(neq(arg), config.other_ways)
-        config.run_ways = filter(neq(arg), config.run_ways)
-        config.compile_ways = filter(neq(arg), config.compile_ways)
+        config.other_ways = [w for w in config.other_ways if w != arg]
+        config.run_ways = [w for w in config.run_ways if w != arg]
+        config.compile_ways = [w for w in config.compile_ways if w != arg]
 
     if opt == '--threads':
         config.threads = int(arg)
@@ -119,9 +119,9 @@ if config.use_threads == 1:
     maj = int(re.sub('[^0-9].*', '', str(maj)))
     min = int(re.sub('[^0-9].*', '', str(min)))
     pat = int(re.sub('[^0-9].*', '', str(pat)))
-    if (maj, min, pat) < (2, 5, 2):
-        print("Warning: Ignoring request to use threads as python version < 2.5.2")
-        config.use_threads = 0
+    if (maj, min) < (2, 6):
+        print("Python < 2.6 is not supported")
+        sys.exit(1)
     # We also need to disable threads for python 2.7.2, because of
     # this bug: http://bugs.python.org/issue13817
     elif (maj, min, pat) == (2, 7, 2):
@@ -262,7 +262,7 @@ for file in t_files:
     if_verbose(2, '====> Scanning %s' % file)
     newTestDir(os.path.dirname(file))
     try:
-        execfile(file)
+        exec(compile(open(file).read(), arg, 'exec'))
     except:
         print('*** framework failure: found an error while executing ', file, ':')
         t.n_framework_failures = t.n_framework_failures + 1

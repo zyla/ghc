@@ -1,5 +1,6 @@
 # -----------------------------------------------------------------------------
 # Utils
+from functools import reduce
 
 def id(a):
     return a

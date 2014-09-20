@@ -2,8 +2,7 @@
 # (c) Simon Marlow 2002
 #
 
-# This allows us to use the "with X:" syntax with python 2.5:
-from __future__ import print_function, with_statement
+from __future__ import print_function
 
 import shutil
 import sys
@@ -16,7 +15,6 @@ import time
 import datetime
 import copy
 import glob
-import types
 from math import ceil, trunc
 
 have_subprocess = False
@@ -32,7 +30,10 @@ from testutil import *
 
 if config.use_threads:
     import threading
-    import thread
+    try:
+        import thread
+    except ImportError: # Python 3
+        import _thread as thread
 
 global wantToStop
 wantToStop = False
@@ -99,7 +100,7 @@ def reqlib( lib ):
 have_lib = {}
 
 def _reqlib( name, opts, lib ):
-    if have_lib.has_key(lib):
+    if lib in have_lib:
         got_it = have_lib[lib]
     else:
         if have_subprocess:
@@ -284,7 +285,7 @@ def _stats_num_field( name, opts, field, expecteds ):
     if field in opts.stats_range_fields:
         framework_fail(name, 'duplicate-numfield', 'Duplicate ' + field + ' num_field check')
 
-    if type(expecteds) is types.ListType:
+    if type(expecteds) is list:
         for (b, expected, dev) in expecteds:
             if b:
                 opts.stats_range_fields[field] = (expected, dev)
@@ -512,9 +513,10 @@ def two_normalisers(f, g):
 # Function for composing two opt-fns together
 
 def executeSetups(fs, name, opts):
-    if type(fs) is types.ListType:
+    if type(fs) is list:
         # If we have a list of setups, then execute each one
-        map (lambda f : executeSetups(f, name, opts), fs)
+        for f in fs:
+            executeSetups(f, name, opts)
     else:
         # fs is a single function, so just apply it
         fs(name, opts)
@@ -625,8 +627,7 @@ def test_common_work (name, opts, func, args):
             all_ways = ['normal']
 
         # A test itself can request extra ways by setting opts.extra_ways
-        all_ways = all_ways + filter(lambda way: way not in all_ways,
-                                     opts.extra_ways)
+        all_ways = all_ways + [way for way in opts.extra_ways if way not in all_ways]
 
         t.total_test_cases = t.total_test_cases + len(all_ways)
 
@@ -639,7 +640,7 @@ def test_common_work (name, opts, func, args):
             and way not in getTestOpts().omit_ways
 
         # Which ways we are asked to skip
-        do_ways = filter (ok_way,all_ways)
+        do_ways = list(filter (ok_way,all_ways))
 
         # In fast mode, we skip all but one way
         if config.fast and len(do_ways) > 0:
@@ -658,8 +659,8 @@ def test_common_work (name, opts, func, args):
 
         if getTestOpts().cleanup != '' and (config.clean_only or do_ways != []):
             pretest_cleanup(name)
-            clean(map (lambda suff: name + suff,
-                      ['', '.exe', '.exe.manifest', '.genscript',
+            clean([name + suff for suff in [
+                       '', '.exe', '.exe.manifest', '.genscript',
                        '.stderr.normalised',        '.stdout.normalised',
                        '.run.stderr.normalised',    '.run.stdout.normalised',
                        '.comp.stderr.normalised',   '.comp.stdout.normalised',
@@ -667,12 +668,13 @@ def test_common_work (name, opts, func, args):
                        '.stats', '.comp.stats',
                        '.hi', '.o', '.prof', '.exe.prof', '.hc',
                        '_stub.h', '_stub.c', '_stub.o',
-                       '.hp', '.exe.hp', '.ps', '.aux', '.hcr', '.eventlog']))
+                       '.hp', '.exe.hp', '.ps', '.aux', '.hcr', '.eventlog']])
 
             if func == multi_compile or func == multi_compile_fail:
                     extra_mods = args[1]
-                    clean(map (lambda fx: replace_suffix(fx[0],'o'), extra_mods))
-                    clean(map (lambda fx: replace_suffix(fx[0], 'hi'), extra_mods))
+                    clean([replace_suffix(fx[0],'o') for fx in extra_mods])
+                    clean([replace_suffix(fx[0], 'hi') for fx in extra_mods])
+
 
             clean(getTestOpts().clean_files)
 
@@ -761,7 +763,7 @@ def do_test(name, way, func, args):
             framework_fail(name, way, 'pre-command exception')
 
         try:
-            result = apply(func, [name,way] + args)
+            result = func(*[name,way] + args)
         finally:
             if config.use_threads:
                 t.lock.acquire()
@@ -892,7 +894,8 @@ def run_command( name, way, cmd ):
 def ghci_script( name, way, script ):
     # filter out -fforce-recomp from compiler_always_flags, because we're
     # actually testing the recompilation behaviour in the GHCi tests.
-    flags = filter(lambda f: f != '-fforce-recomp', getTestOpts().compiler_always_flags)
+    flags = [f for f in getTestOpts().compiler_always_flags if f != '-fforce-recomp']
+
     flags.append(getTestOpts().extra_hc_opts)
     if getTestOpts().outputdir != None:
         flags.extend(["-outputdir", getTestOpts().outputdir])
@@ -1072,7 +1075,8 @@ def checkStats(name, way, stats_file, range_fields):
                 valLen = len(valStr)
                 expectedStr = str(expected)
                 expectedLen = len(expectedStr)
-                length = max(map (lambda x : len(str(x)), [expected, lowerBound, upperBound, val]))
+                length = max(len(str(x)) for x in [expected, lowerBound, upperBound, val])
+
                 def display(descr, val, extra):
                     print(descr, str(val).rjust(length), extra)
 
@@ -1150,7 +1154,7 @@ def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link, addsuf, 
 
     comp_flags = copy.copy(getTestOpts().compiler_always_flags)
     if noforce:
-        comp_flags = filter(lambda f: f != '-fforce-recomp', comp_flags)
+        comp_flags = [f for f in comp_flags if f != '-fforce-recomp']
     if getTestOpts().outputdir != None:
         comp_flags.extend(["-outputdir", getTestOpts().outputdir])
 
@@ -1905,7 +1909,7 @@ def checkForFilesWrittenProblems(file):
     if len(files_written_not_removed) > 0:
         file.write("\n")
         file.write("\nSome files written but not removed:\n")
-        tests = files_written_not_removed.keys()
+        tests = list(files_written_not_removed.keys())
         tests.sort()
         for t in tests:
             for f in files_written_not_removed[t]:
@@ -1917,7 +1921,7 @@ def checkForFilesWrittenProblems(file):
     if len(bad_file_usages) > 0:
         file.write("\n")
         file.write("\nSome bad file usages:\n")
-        tests = bad_file_usages.keys()
+        tests = list(bad_file_usages.keys())
         tests.sort()
         for t in tests:
             for f in bad_file_usages[t]:
@@ -2009,7 +2013,7 @@ def platform_wordsize_qualify( name, suff ):
              for vers in ['-' + config.compiler_maj_version, '']]
 
     dir = glob.glob(basepath + '*')
-    dir = map (lambda d: normalise_slashes_(d), dir)
+    dir = [normalise_slashes_(d) for d in dir]
 
     for (platformSpecific, f) in paths:
        if f in dir:
@@ -2042,19 +2046,14 @@ def pretest_cleanup(name):
    # not interested in the return code
 
 # -----------------------------------------------------------------------------
-# Return a list of all the files ending in '.T' below the directory dir.
+# Return a list of all the files ending in '.T' below directories roots.
 
 def findTFiles(roots):
-    return concat(map(findTFiles_,roots))
-
-def findTFiles_(path):
-    if os.path.isdir(path):
-        paths = map(lambda x, p=path: p + '/' + x, os.listdir(path))
-        return findTFiles(paths)
-    elif path[-2:] == '.T':
-        return [path]
-    else:
-        return []
+    return [os.path.join(path, filename)
+            for root in roots
+            for path, dirs, files in os.walk(root)
+            for filename in files
+            if filename.endswith('.T')]
 
 # -----------------------------------------------------------------------------
 # Output a test summary to the specified file object
@@ -2065,28 +2064,28 @@ def summary(t, file):
     printUnexpectedTests(file, [t.unexpected_passes, t.unexpected_failures])
     file.write('OVERALL SUMMARY for test run started at '
                + time.strftime("%c %Z", t.start_time) + '\n'
-               + string.rjust(str(datetime.timedelta(seconds=
-                    round(time.time() - time.mktime(t.start_time)))), 8)
+               + str(datetime.timedelta(seconds=
+                    round(time.time() - time.mktime(t.start_time)))).rjust(8)
                + ' spent to go through\n'
-               + string.rjust(repr(t.total_tests), 8)
+               + repr(t.total_tests).rjust(8)
                + ' total tests, which gave rise to\n'
-               + string.rjust(repr(t.total_test_cases), 8)
+               + repr(t.total_test_cases).rjust(8)
                + ' test cases, of which\n'
-               + string.rjust(repr(t.n_tests_skipped), 8)
+               + repr(t.n_tests_skipped).rjust(8)
                + ' were skipped\n'
                + '\n'
-               + string.rjust(repr(t.n_missing_libs), 8)
+               + repr(t.n_missing_libs).rjust(8)
                + ' had missing libraries\n'
-               + string.rjust(repr(t.n_expected_passes), 8)
+               + repr(t.n_expected_passes).rjust(8)
                + ' expected passes\n'
-               + string.rjust(repr(t.n_expected_failures), 8)
+               + repr(t.n_expected_failures).rjust(8)
                + ' expected failures\n'
                + '\n'
-               + string.rjust(repr(t.n_framework_failures), 8)
+               + repr(t.n_framework_failures).rjust(8)
                + ' caused framework failures\n'
-               + string.rjust(repr(t.n_unexpected_passes), 8)
+               + repr(t.n_unexpected_passes).rjust(8)
                + ' unexpected passes\n'
-               + string.rjust(repr(t.n_unexpected_failures), 8)
+               + repr(t.n_unexpected_failures).rjust(8)
                + ' unexpected failures\n'
                + '\n')
 
@@ -2109,7 +2108,7 @@ def printUnexpectedTests(file, testInfoss):
     for testInfos in testInfoss:
         directories = testInfos.keys()
         for directory in directories:
-            tests = testInfos[directory].keys()
+            tests = list(testInfos[directory].keys())
             unexpected += tests
     if unexpected != []:
         file.write('Unexpected results from:\n')
@@ -2117,11 +2116,11 @@ def printUnexpectedTests(file, testInfoss):
         file.write('\n')
 
 def printPassingTestInfosSummary(file, testInfos):
-    directories = testInfos.keys()
+    directories = list(testInfos.keys())
     directories.sort()
-    maxDirLen = max(map ((lambda x : len(x)), directories))
+    maxDirLen = max(len(x) for x in directories)
     for directory in directories:
-        tests = testInfos[directory].keys()
+        tests = list(testInfos[directory].keys())
         tests.sort()
         for test in tests:
            file.write('   ' + directory.ljust(maxDirLen + 2) + test + \
@@ -2129,11 +2128,11 @@ def printPassingTestInfosSummary(file, testInfos):
     file.write('\n')
 
 def printFailingTestInfosSummary(file, testInfos):
-    directories = testInfos.keys()
+    directories = list(testInfos.keys())
     directories.sort()
-    maxDirLen = max(map ((lambda x : len(x)), directories))
+    maxDirLen = max(len(d) for d in directories)
     for directory in directories:
-        tests = testInfos[directory].keys()
+        tests = list(testInfos[directory].keys())
         tests.sort()
         for test in tests:
            reasons = testInfos[directory][test].keys()
