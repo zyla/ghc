@@ -2041,14 +2041,17 @@ def pretest_cleanup(name):
    # not interested in the return code
 
 # -----------------------------------------------------------------------------
-# Return a list of all the files ending in '.T' below the directory dir.
+# Return a list of all the files ending in '.T' below directories roots.
 
 def findTFiles(roots):
-    return concat(map(findTFiles_,roots))
+    # It would be better to use os.walk, but that
+    # gives backslashes on Windows, which trip the
+    # testsuite later :-(
+    return [filename for root in roots for filename in findTFiles_(root)]
 
 def findTFiles_(path):
     if os.path.isdir(path):
-        paths = map(lambda x, p=path: p + '/' + x, os.listdir(path))
+        paths = [path + '/' + x for x in os.listdir(path)]
         return findTFiles(paths)
     elif path[-2:] == '.T':
         return [path]
