@@ -77,12 +77,12 @@ ppLlvmGlobal (LMGlobal var@(LMGlobalVar _ _ link x a c) dat) =
             Nothing   -> ppr (pLower $ getVarType var)
 
         -- Position of linkage is different for aliases.
-        const_link = case c of
-          Global   -> ppr link <+> text "global"
-          Constant -> ppr link <+> text "constant"
-          Alias    -> ppr link <+> text "alias"
+        const = case c of
+          Global   -> text "global"
+          Constant -> text "constant"
+          Alias    -> text "alias"
 
-    in ppAssignment var $ const_link <+> rhs <> sect <> align
+    in ppAssignment var $ ppr link <+> const <+> rhs <> sect <> align
        $+$ newLine
 
 ppLlvmGlobal (LMGlobal var val) = sdocWithDynFlags $ \dflags ->
