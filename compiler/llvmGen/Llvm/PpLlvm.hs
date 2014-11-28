@@ -130,15 +130,18 @@ ppLlvmFunctions funcs = vcat $ map ppLlvmFunction funcs
 
 -- | Print out a function definition.
 ppLlvmFunction :: LlvmFunction -> SDoc
-ppLlvmFunction (LlvmFunction dec args attrs sec body) =
-    let attrDoc = ppSpaceJoin attrs
-        secDoc = case sec of
+ppLlvmFunction fun =
+    let attrDoc = ppSpaceJoin (funcAttrs fun)
+        secDoc = case funcSect fun of
                       Just s' -> text "section" <+> (doubleQuotes $ ftext s')
                       Nothing -> empty
-    in text "define" <+> ppLlvmFunctionHeader dec args
-        <+> attrDoc <+> secDoc
+        prefixDoc = case funcPrefix fun of
+                        Just v  -> text "prefix" <+> ppr v
+                        Nothing -> empty
+    in text "define" <+> ppLlvmFunctionHeader (funcDecl fun) (funcArgs fun)
+        <+> attrDoc <+> secDoc <+> prefixDoc
         $+$ lbrace
-        $+$ ppLlvmBlocks body
+        $+$ ppLlvmBlocks (funcBody fun)
         $+$ rbrace
         $+$ newLine
         $+$ newLine

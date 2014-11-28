@@ -27,8 +27,8 @@ module LlvmCodeGen.Base (
         freshSectionId,
 
         cmmToLlvmType, widthToLlvmFloat, widthToLlvmInt, llvmFunTy,
-        llvmFunSig, llvmStdFunAttrs, llvmFunAlign, llvmInfAlign,
-        llvmPtrBits, mkLlvmFunc, tysToParams,
+        llvmFunSig, llvmFunArgs, llvmStdFunAttrs, llvmFunAlign, llvmInfAlign,
+        llvmPtrBits, tysToParams,
 
         strCLabel_llvm, strDisplayName_llvm, strProcedureName_llvm,
         getGlobalPtr, generateExternDecls,
@@ -132,15 +132,6 @@ llvmFunSig' live lbl link
        return $ LlvmFunctionDecl lbl link (llvmGhcCC dflags) LMVoid FixedArgs
                                  (map (toParams . getVarType) (llvmFunArgs dflags live))
                                  (llvmFunAlign dflags)
-
--- | Create a Haskell function in LLVM.
-mkLlvmFunc :: LiveGlobalRegs -> CLabel -> LlvmLinkageType -> LMSection -> LlvmBlocks
-           -> LlvmM LlvmFunction
-mkLlvmFunc live lbl link sec blks
-  = do funDec <- llvmFunSig live lbl link
-       dflags <- getDynFlags
-       let funArgs = map (fsLit . Outp.showSDoc dflags . ppPlainName) (llvmFunArgs dflags live)
-       return $ LlvmFunction funDec funArgs llvmStdFunAttrs sec blks
 
 -- | Alignment to use for functions
 llvmFunAlign :: DynFlags -> LMAlign
