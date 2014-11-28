@@ -96,11 +96,11 @@ pprLlvmData (globals, types) =
 
 
 -- | Pretty print LLVM code
-pprLlvmCmmDecl :: Int -> LlvmCmmDecl -> LlvmM (SDoc, [LlvmVar])
-pprLlvmCmmDecl _ (CmmData _ lmdata)
+pprLlvmCmmDecl :: LlvmCmmDecl -> LlvmM (SDoc, [LlvmVar])
+pprLlvmCmmDecl (CmmData _ lmdata)
   = return (vcat $ map pprLlvmData lmdata, [])
 
-pprLlvmCmmDecl count (CmmProc mb_info entry_lbl live (ListGraph blks))
+pprLlvmCmmDecl (CmmProc mb_info entry_lbl live (ListGraph blks))
   = do let lbl = case mb_info of
                      Nothing                   -> entry_lbl
                      Just (Statics info_lbl _) -> info_lbl

@@ -24,7 +24,6 @@ module LlvmCodeGen.Base (
 
         getMetaUniqueId,
         setUniqMeta, getUniqMeta,
-        freshSectionId,
 
         cmmToLlvmType, widthToLlvmFloat, widthToLlvmInt, llvmFunTy,
         llvmFunSig, llvmFunArgs, llvmStdFunAttrs, llvmFunAlign, llvmInfAlign,
@@ -194,7 +193,6 @@ data LlvmEnv = LlvmEnv
   , envDynFlags :: DynFlags        -- ^ Dynamic flags
   , envOutput :: BufHandle         -- ^ Output buffer
   , envUniq :: UniqSupply          -- ^ Supply of unique values
-  , envNextSection :: Int          -- ^ Supply of fresh section IDs
   , envFreshMeta :: Int            -- ^ Supply of fresh metadata IDs
   , envUniqMeta :: UniqFM Int      -- ^ Global metadata nodes
   , envFunMap :: LlvmEnvMap        -- ^ Global functions so far, with type
@@ -248,7 +246,6 @@ runLlvm dflags ver out us m = do
                       , envUniq = us
                       , envFreshMeta = 0
                       , envUniqMeta = emptyUFM
-                      , envNextSection = 1
                       }
 
 -- | Get environment (internal)
@@ -352,10 +349,6 @@ setUniqMeta f m = modifyEnv $ \env -> env { envUniqMeta = addToUFM (envUniqMeta 
 -- | Gets metadata node for given unique
 getUniqMeta :: Unique -> LlvmM (Maybe Int)
 getUniqMeta s = getEnv (flip lookupUFM s . envUniqMeta)
-
--- | Returns a fresh section ID
-freshSectionId :: LlvmM Int
-freshSectionId = LlvmM $ \env -> return (envNextSection env, env { envNextSection = envNextSection env + 1})
 
 -- ----------------------------------------------------------------------------
 -- * Internal functions
