@@ -176,13 +176,13 @@ type LlvmVersion = Int
 
 -- | The LLVM Version we assume if we don't know
 defaultLlvmVersion :: LlvmVersion
-defaultLlvmVersion = 30
+defaultLlvmVersion = 36
 
 minSupportLlvmVersion :: LlvmVersion
-minSupportLlvmVersion = 28
+minSupportLlvmVersion = 36
 
 maxSupportLlvmVersion :: LlvmVersion
-maxSupportLlvmVersion = 35
+maxSupportLlvmVersion = 36
 
 -- ----------------------------------------------------------------------------
 -- * Environment Handling
