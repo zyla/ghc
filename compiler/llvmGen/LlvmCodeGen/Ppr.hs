@@ -117,7 +117,7 @@ pprLlvmCmmDecl (CmmProc mb_info entry_lbl live (ListGraph blks))
        -- generate the info table
        prefix <- case mb_info of
                      Nothing -> return Nothing
-                     Just (Statics info_lbl statics) -> do
+                     Just (Statics _ statics) -> do
                        infoStatics <- mapM genData statics
                        let infoTy = LMStruct $ map getStatType infoStatics
                        return $ Just $ LMStaticStruc infoStatics infoTy
