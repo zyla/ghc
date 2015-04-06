@@ -382,10 +382,10 @@ hsLitKey :: DynFlags -> HsLit -> Literal
 --      (and doesn't for strings)
 -- It only works for primitive types and strings;
 -- others have been removed by tidy
-hsLitKey dflags (HsIntPrim    _ i) = mkMachInt  dflags i
-hsLitKey dflags (HsWordPrim   _ w) = mkMachWord dflags w
-hsLitKey _      (HsInt64Prim  _ i) = mkMachInt64  i
-hsLitKey _      (HsWord64Prim _ w) = mkMachWord64 w
+hsLitKey dflags (HsIntPrim    _ i) = mkMachInt  dflags (toIntRange dflags i)
+hsLitKey dflags (HsWordPrim   _ w) = mkMachWord dflags (toWordRange dflags w)
+hsLitKey dflags (HsInt64Prim  _ i) = mkMachInt64       (toInt64Range dflags i)
+hsLitKey dflags (HsWord64Prim _ w) = mkMachWord64      (toWord64Range dflags w)
 hsLitKey _      (HsCharPrim   _ c) = MachChar   c
 hsLitKey _      (HsStringPrim _ s) = MachStr    s
 hsLitKey _      (HsFloatPrim    f) = MachFloat  (fl_value f)

@@ -130,6 +130,7 @@ module DynFlags (
         tAG_MASK,
         mAX_PTR_TAG,
         tARGET_MIN_INT, tARGET_MAX_INT, tARGET_MAX_WORD,
+        toIntRange, toInt64Range, toWordRange, toWord64Range,
 
         unsafeGlobalDynFlags, setUnsafeGlobalDynFlags,
 
@@ -4129,6 +4130,29 @@ tARGET_MAX_WORD dflags
       4 -> toInteger (maxBound :: Word32)
       8 -> toInteger (maxBound :: Word64)
       w -> panic ("tARGET_MAX_WORD: Unknown platformWordSize: " ++ show w)
+
+toIntRange :: DynFlags -> Integer -> Integer
+toIntRange dflags i
+    = case platformWordSize (targetPlatform dflags) of
+      4 -> toInteger (fromIntegral i :: Int32)
+      8 -> toInteger (fromIntegral i :: Int64)
+      w -> panic ("toIntRange: Unknown platformWordSize: " ++ show w)
+
+toInt64Range :: DynFlags -> Integer -> Integer
+toInt64Range _dflags i -- DynFlags parameter just for consistency
+    = toInteger (fromIntegral i :: Int64)
+
+toWordRange :: DynFlags -> Integer -> Integer
+toWordRange dflags i
+    = case platformWordSize (targetPlatform dflags) of
+      4 -> toInteger (fromIntegral i :: Word32)
+      8 -> toInteger (fromIntegral i :: Word64)
+      w -> panic ("toWordRange: Unknown platformWordSize: " ++ show w)
+
+toWord64Range :: DynFlags -> Integer -> Integer
+toWord64Range _dflags i -- DynFlags parameter just for consistency
+    = toInteger (fromIntegral i :: Word64)
+
 
 -- Whenever makeDynFlagsConsistent does anything, it starts over, to
 -- ensure that a later change doesn't invalidate an earlier check.
