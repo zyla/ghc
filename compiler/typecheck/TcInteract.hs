@@ -2131,6 +2131,50 @@ matchLiftedCoercible args = pprPanic "matchLiftedCoercible" (ppr args)
 *                                                                     *
 ***********************************************************************-}
 
+{-
+Note [HasField instances]
+~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose we have
+
+    data T y = MkT { foo :: [y] }
+
+and `foo` is in scope.  Then GHC will automatically solve a constraint like
+
+    HasField "foo" (T Int) b
+
+by emitting a new wanted ([Int] ~# b) and building a HasField dictionary
+out of the selector function `foo`.  The HasField class is defined (in
+GHC.Records) thus:
+
+    class HasField (x :: Symbol) r a | x r -> a where
+      getField :: Proxy# x -> r -> a
+
+Since this is a one-method class, it is represented as a newtype.
+Hence we can solve `HasField "foo" (T Int) b` by taking an expression
+of type `Proxy# "foo" -> T Int -> b` and coercing it appropriately.
+Note that
+
+    foo :: forall y . T y -> [y]
+
+so the expression we construct is
+
+    \ (_ :: Proxy# "foo") -> foo @Int |> co
+
+where
+
+    co :: (T Int -> [Int]) ~# (T Int -> b)
+
+is built from the new wanted ([Int] ~# b).
+
+If `foo` is not in scope, higher-rank or existentially quantified then
+the constraint is not solved automatically, but may be solved by a
+user-supplied HasField instance.  Similarly, if we encounter a
+HasField constraint where the field is not a literal string, or does
+not belong to the type, then we fall back on the normal constraint
+solver behaviour.
+-}
+
+-- See Note [HasField instances]
 matchHasField :: DynFlags -> Class -> [Type] -> CtLoc -> TcS LookupInstResult
 matchHasField dflags clas tys@[x_ty, r_ty, a_ty] loc
   | Just x <- isStrLitTy x_ty
@@ -2138,32 +2182,44 @@ matchHasField dflags clas tys@[x_ty, r_ty, a_ty] loc
   , Just fl <- lookupFsEnv (tyConFieldLabelEnv tycon) x
   , Just (_, ax) <- tcInstNewTyCon_maybe (classTyCon clas) tys
   = do { env <- getGlobalRdrEnvTcS
-       ; let gres = lookupGRE_Field_Name env (flSelector fl) (flLabel fl)
-       ; case gres of
+         -- Check that the field selector is in scope
+       ; case lookupGRE_Field_Name env (flSelector fl) (flLabel fl) of
            []      -> matchInstEnv dflags clas tys loc
            (gre:_) -> do {
-       ; addUsedGRE True gre
        ; sel_id <- tcLookupId (flSelector fl)
 
+         -- We've already looked up the field label in this tycon, so
+         -- there must be at least one data con with the field: find
+         -- it and hence the field's type.
        ; let data_cons_with_field = [ (dc, ty)
                                     | dc <- tyConDataCons tycon
                                     , Just ty <- [dataConFieldType_maybe dc x]
                                     ]
-             (data_con, field_ty) = ASSERT( not (null data_cons_with_field) ) head data_cons_with_field
+             (data_con, field_ty) = ASSERT( not (null data_cons_with_field) )
+                                    head data_cons_with_field
+
+         -- Calculate the new wanted constraint by equating the actual
+         -- type of the field (instantiated appropriately) with the
+         -- type in the third parameter of the HasField constraint.
              tenv = mkTopTCvSubst (dataConUnivTyVars data_con `zip` r_args)
              inst_field_ty = substTy tenv field_ty
              theta = mkTyConApp eqPrimTyCon [liftedTypeKind, liftedTypeKind, inst_field_ty, a_ty ]
 
+         -- Give up if the selector is "naughty" (i.e. this is an
+         -- existentially quantified type) or has a higher-rank type.
        ; if isNaughtyRecordSelector sel_id || not (isTauTy inst_field_ty)
          then matchInstEnv dflags clas tys loc
          else do {
 
+         -- Record usage of the selector, as we need it to build an instance
+       ; addUsedGRE True gre
+
+         -- Build evidence term as described in Note [HasField instances]
        ; let mk_ev [ev] = EvCast (EvExpr (mkHsLamConst proxy_ty (mkFunTy r_ty a_ty) body)) (mkTcSymCo ax)
                where
                 proxy_ty = mkProxyPrimTy typeSymbolKind x_ty
                 co = mkTcFunCo Nominal (mkTcReflCo Nominal r_ty) (evTermCoercion ev)
                 body = mkHsWrap (mkWpCastN co <.> mkWpTyApps r_args) (HsVar (noLoc sel_id))
-
              mk_ev _ = panic "matchHasField.mk_ev"
 
        ; return (GenInst { lir_new_theta = [ theta ]
@@ -2173,6 +2229,9 @@ matchHasField dflags clas tys@[x_ty, r_ty, a_ty] loc
        } } }
 matchHasField dflags clas tys loc = matchInstEnv dflags clas tys loc
 
+-- | Make a constant lambda-expression
+--
+-- > \ (_ :: arg_ty) -> (body :: res_ty)
 mkHsLamConst :: Type -> Type -> HsExpr Id -> HsExpr Id
 mkHsLamConst arg_ty res_ty body = HsLam mg
   where
