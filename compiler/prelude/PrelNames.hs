@@ -326,6 +326,9 @@ basicKnownKeyNames
         -- Overloaded labels
         isLabelClassName,
 
+        -- Overloaded record fields
+        hasFieldClassName,
+
         -- Source locations
         callStackDataConName, callStackTyConName,
         srcLocDataConName,
@@ -502,6 +505,9 @@ gHC_FINGERPRINT_TYPE = mkBaseModule (fsLit "GHC.Fingerprint.Type")
 
 gHC_OVER_LABELS :: Module
 gHC_OVER_LABELS = mkBaseModule (fsLit "GHC.OverloadedLabels")
+
+gHC_RECORDS :: Module
+gHC_RECORDS = mkBaseModule (fsLit "GHC.Records")
 
 mAIN, rOOT_MAIN :: Module
 mAIN            = mkMainModule_ mAIN_NAME
@@ -1349,6 +1355,11 @@ isLabelClassName :: Name
 isLabelClassName
  = clsQual gHC_OVER_LABELS (fsLit "IsLabel") isLabelClassNameKey
 
+-- Overloaded record fields
+hasFieldClassName :: Name
+hasFieldClassName
+ = clsQual gHC_RECORDS (fsLit "HasField") hasFieldClassNameKey
+
 -- Source Locations
 callStackDataConName, callStackTyConName, srcLocDataConName :: Name
 callStackDataConName
@@ -1500,6 +1511,9 @@ isLabelClassNameKey = mkPreludeClassUnique 45
 semigroupClassKey, monoidClassKey :: Unique
 semigroupClassKey = mkPreludeClassUnique 46
 monoidClassKey    = mkPreludeClassUnique 47
+
+hasFieldClassNameKey :: Unique
+hasFieldClassNameKey = mkPreludeClassUnique 48
 
 ---------------- Template Haskell -------------------
 --      THNames.hs: USES ClassUniques 200-299
