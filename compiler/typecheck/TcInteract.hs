@@ -1801,7 +1801,7 @@ match_class_inst dflags clas tys loc
   | cls_name == typeableClassName     = matchTypeable        clas tys
   | clas `hasKey` heqTyConKey         = matchLiftedEquality       tys
   | clas `hasKey` coercibleTyConKey   = matchLiftedCoercible      tys
-  | cls_name == hasFieldClassName     = matchHasField        clas tys
+  | cls_name == hasFieldClassName     = matchHasField dflags clas tys loc
   | otherwise                         = matchInstEnv dflags clas tys loc
   where
     cls_name = className clas
@@ -2131,8 +2131,8 @@ matchLiftedCoercible args = pprPanic "matchLiftedCoercible" (ppr args)
 *                                                                     *
 ***********************************************************************-}
 
-matchHasField :: Class -> [Type] -> TcS LookupInstResult
-matchHasField clas tys@[x_ty, r_ty, a_ty]
+matchHasField :: DynFlags -> Class -> [Type] -> CtLoc -> TcS LookupInstResult
+matchHasField dflags clas tys@[x_ty, r_ty, a_ty] loc
   | Just x <- isStrLitTy x_ty
   , Just (tycon, r_args) <- tcSplitTyConApp_maybe r_ty
   , Just fl <- lookupFsEnv (tyConFieldLabelEnv tycon) x
@@ -2140,7 +2140,7 @@ matchHasField clas tys@[x_ty, r_ty, a_ty]
   = do { env <- getGlobalRdrEnvTcS
        ; let gres = lookupGRE_Field_Name env (flSelector fl) (flLabel fl)
        ; case gres of
-           []      -> return NoInstance
+           []      -> matchInstEnv dflags clas tys loc
            (gre:_) -> do {
        ; addUsedGRE True gre
        ; sel_id <- tcLookupId (flSelector fl)
@@ -2155,7 +2155,7 @@ matchHasField clas tys@[x_ty, r_ty, a_ty]
              theta = mkTyConApp eqPrimTyCon [liftedTypeKind, liftedTypeKind, inst_field_ty, a_ty ]
 
        ; if isNaughtyRecordSelector sel_id || not (isTauTy inst_field_ty)
-         then return NoInstance
+         then matchInstEnv dflags clas tys loc
          else do {
 
        ; let mk_ev [ev] = EvCast (EvExpr (mkHsLamConst proxy_ty (mkFunTy r_ty a_ty) body)) (mkTcSymCo ax)
@@ -2171,7 +2171,7 @@ matchHasField clas tys@[x_ty, r_ty, a_ty]
                          , lir_safe_over = True
                          })
        } } }
-matchHasField _ _ = return NoInstance
+matchHasField dflags clas tys loc = matchInstEnv dflags clas tys loc
 
 mkHsLamConst :: Type -> Type -> HsExpr Id -> HsExpr Id
 mkHsLamConst arg_ty res_ty body = HsLam mg
