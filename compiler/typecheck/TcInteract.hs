@@ -29,7 +29,7 @@ import PrelNames ( knownNatClassName, knownSymbolClassName,
 import TysWiredIn ( ipClass, typeNatKind, typeSymbolKind, heqDataCon,
                     coercibleDataCon )
 import TysPrim    ( eqPrimTyCon, eqReprPrimTyCon, mkProxyPrimTy )
-import Id( idType )
+import Id( idType, isNaughtyRecordSelector )
 import CoAxiom ( Eqn, CoAxiom(..), CoAxBranch(..), fromBranches )
 import Class
 import TyCon
@@ -2154,6 +2154,10 @@ matchHasField clas tys@[x_ty, r_ty, a_ty]
              inst_field_ty = substTy tenv field_ty
              theta = mkTyConApp eqPrimTyCon [liftedTypeKind, liftedTypeKind, inst_field_ty, a_ty ]
 
+       ; if isNaughtyRecordSelector sel_id || not (isTauTy inst_field_ty)
+         then return NoInstance
+         else do {
+
        ; let mk_ev [ev] = EvCast (EvExpr (mkHsLamConst proxy_ty (mkFunTy r_ty a_ty) body)) (mkTcSymCo ax)
                where
                 proxy_ty = mkProxyPrimTy typeSymbolKind x_ty
@@ -2166,7 +2170,7 @@ matchHasField clas tys@[x_ty, r_ty, a_ty]
                          , lir_mk_ev     = mk_ev
                          , lir_safe_over = True
                          })
-       } }
+       } } }
 matchHasField _ _ = return NoInstance
 
 mkHsLamConst :: Type -> Type -> HsExpr Id -> HsExpr Id

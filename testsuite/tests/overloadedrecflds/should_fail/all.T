@@ -33,3 +33,4 @@ test('T11167_ambiguous_fixity',
 test('hasfieldfail01',
      extra_clean(['HasFieldFail01_A.hi', 'HasFieldFail01_A.o']),
      multimod_compile_fail, ['hasfieldfail01', ''])
+test('hasfieldfail02', normal, compile_fail, [''])
