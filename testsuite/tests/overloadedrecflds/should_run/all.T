@@ -15,3 +15,4 @@ test('overloadedlabelsrun03', normal, compile_and_run, [''])
 test('overloadedlabelsrun04',
      extra_clean(['OverloadedLabelsRun04_A.hi', 'OverloadedLabelsRun04_A.o']),
      multimod_compile_and_run, ['overloadedlabelsrun04', ''])
+test('hasfieldrun01', normal, compile_and_run, [''])
