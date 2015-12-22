@@ -18,7 +18,7 @@ module DsBinds ( dsTopLHsBinds, dsLHsBinds, decomposeRuleLhs, dsSpec,
 
 #include "HsVersions.h"
 
-import {-# SOURCE #-}   DsExpr( dsLExpr )
+import {-# SOURCE #-}   DsExpr( dsExpr, dsLExpr )
 import {-# SOURCE #-}   Match( matchWrapper )
 
 import DsMonad
@@ -1007,6 +1007,7 @@ dsEvTerm (EvCallStack cs)   = dsEvCallStack cs
 dsEvTerm (EvTypeable ty ev) = dsEvTypeable ty ev
 dsEvTerm (EvLit (EvNum n))  = mkIntegerExpr n
 dsEvTerm (EvLit (EvStr s))  = mkStringExprFS s
+dsEvTerm (EvExpr e)         = dsExpr e
 
 dsEvTerm (EvCast tm co)
   = do { tm' <- dsEvTerm tm

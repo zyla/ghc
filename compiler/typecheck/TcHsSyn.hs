@@ -1278,6 +1278,9 @@ zonkEvTerm env (EvDFunApp df tys tms)
 zonkEvTerm env (EvDelayedError ty msg)
   = do { ty' <- zonkTcTypeToType env ty
        ; return (EvDelayedError ty' msg) }
+zonkEvTerm env (EvExpr e)
+  = do { e' <- zonkExpr env e
+       ; return (EvExpr e') }
 
 zonkEvTypeable :: ZonkEnv -> EvTypeable -> TcM EvTypeable
 zonkEvTypeable env (EvTypeableTyCon ts)
