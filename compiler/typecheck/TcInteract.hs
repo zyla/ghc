@@ -9,7 +9,7 @@ module TcInteract (
 
 #include "HsVersions.h"
 
-import BasicTypes ( infinity, IntWithInf, intGtLimit )
+import BasicTypes ( infinity, IntWithInf, intGtLimit, Origin(Generated) )
 import HsTypes ( HsIPName(..) )
 import FastString
 import TcCanonical
@@ -22,21 +22,28 @@ import CoAxiom( sfInteractTop, sfInteractInert )
 import Var
 import TcType
 import Name
+import RdrName ( lookupGRE_Field_Name )
 import PrelNames ( knownNatClassName, knownSymbolClassName,
                    typeableClassName, coercibleTyConKey,
-                   heqTyConKey )
+                   heqTyConKey, hasFieldClassName )
 import TysWiredIn ( ipClass, typeNatKind, typeSymbolKind, heqDataCon,
                     coercibleDataCon )
-import TysPrim    ( eqPrimTyCon, eqReprPrimTyCon )
+import TysPrim    ( eqPrimTyCon, eqReprPrimTyCon, mkProxyPrimTy )
 import Id( idType )
 import CoAxiom ( Eqn, CoAxiom(..), CoAxBranch(..), fromBranches )
 import Class
 import TyCon
-import DataCon( dataConWrapId )
+import DataCon( dataConWrapId, dataConFieldType_maybe, dataConUnivTyVars )
+import FieldLabel
 import FunDeps
 import FamInst
 import FamInstEnv
 import Unify ( tcUnifyTyWithTFs )
+
+import HsBinds ( emptyLocalBinds )
+import HsExpr
+import HsPat ( Pat(WildPat) )
+import HsUtils ( mkHsWrap )
 
 import TcEvidence
 import Outputable
@@ -1794,6 +1801,7 @@ match_class_inst dflags clas tys loc
   | cls_name == typeableClassName     = matchTypeable        clas tys
   | clas `hasKey` heqTyConKey         = matchLiftedEquality       tys
   | clas `hasKey` coercibleTyConKey   = matchLiftedCoercible      tys
+  | cls_name == hasFieldClassName     = matchHasField        clas tys
   | otherwise                         = matchInstEnv dflags clas tys loc
   where
     cls_name = className clas
@@ -2115,3 +2123,63 @@ matchLiftedCoercible args@[k, t1, t2]
   where
     args' = [k, k, t1, t2]
 matchLiftedCoercible args = pprPanic "matchLiftedCoercible" (ppr args)
+
+
+{- ********************************************************************
+*                                                                     *
+              Class lookup for overloaded record fields
+*                                                                     *
+***********************************************************************-}
+
+matchHasField :: Class -> [Type] -> TcS LookupInstResult
+matchHasField clas tys@[x_ty, r_ty, a_ty]
+  | Just x <- isStrLitTy x_ty
+  , Just (tycon, r_args) <- tcSplitTyConApp_maybe r_ty
+  , Just fl <- lookupFsEnv (tyConFieldLabelEnv tycon) x
+  , Just (_, ax) <- tcInstNewTyCon_maybe (classTyCon clas) tys
+  = do { env <- getGlobalRdrEnvTcS
+       ; let gres = lookupGRE_Field_Name env (flSelector fl) (flLabel fl)
+       ; case gres of
+           []      -> return NoInstance
+           (gre:_) -> do {
+       ; addUsedGRE True gre
+       ; sel_id <- tcLookupId (flSelector fl)
+
+       ; let data_cons_with_field = [ (dc, ty)
+                                    | dc <- tyConDataCons tycon
+                                    , Just ty <- [dataConFieldType_maybe dc x]
+                                    ]
+             (data_con, field_ty) = ASSERT( not (null data_cons_with_field) ) head data_cons_with_field
+             tenv = mkTopTCvSubst (dataConUnivTyVars data_con `zip` r_args)
+             inst_field_ty = substTy tenv field_ty
+             theta = mkTyConApp eqPrimTyCon [liftedTypeKind, liftedTypeKind, inst_field_ty, a_ty ]
+
+       ; let mk_ev [ev] = EvCast (EvExpr (mkHsLamConst proxy_ty (mkFunTy r_ty a_ty) body)) (mkTcSymCo ax)
+               where
+                proxy_ty = mkProxyPrimTy typeSymbolKind x_ty
+                co = mkTcFunCo Nominal (mkTcReflCo Nominal r_ty) (evTermCoercion ev)
+                body = mkHsWrap (mkWpCastN co <.> mkWpTyApps r_args) (HsVar (noLoc sel_id))
+
+             mk_ev _ = panic "matchHasField.mk_ev"
+
+       ; return (GenInst { lir_new_theta = [ theta ]
+                         , lir_mk_ev     = mk_ev
+                         , lir_safe_over = True
+                         })
+       } }
+matchHasField _ _ = return NoInstance
+
+mkHsLamConst :: Type -> Type -> HsExpr Id -> HsExpr Id
+mkHsLamConst arg_ty res_ty body = HsLam mg
+  where
+    m  = Match { m_fixity = NonFunBindMatch
+               , m_pats   = [noLoc (WildPat arg_ty)]
+               , m_type   = Nothing
+               , m_grhss  = GRHSs { grhssGRHSs = [noLoc (GRHS [] (noLoc body))]
+                                  , grhssLocalBinds = noLoc emptyLocalBinds }
+               }
+    mg = MG { mg_alts = noLoc [noLoc m]
+            , mg_arg_tys = [arg_ty]
+            , mg_res_ty  = res_ty
+            , mg_origin  = Generated
+            }
