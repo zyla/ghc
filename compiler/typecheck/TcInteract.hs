@@ -2180,7 +2180,6 @@ matchHasField dflags clas tys@[x_ty, r_ty, a_ty] loc
   | Just x <- isStrLitTy x_ty
   , Just (tycon, r_args) <- tcSplitTyConApp_maybe r_ty
   , Just fl <- lookupFsEnv (tyConFieldLabelEnv tycon) x
-  , Just (_, ax) <- tcInstNewTyCon_maybe (classTyCon clas) tys
   = do { env <- getGlobalRdrEnvTcS
          -- Check that the field selector is in scope
        ; case lookupGRE_Field_Name env (flSelector fl) (flLabel fl) of
@@ -2203,7 +2202,8 @@ matchHasField dflags clas tys@[x_ty, r_ty, a_ty] loc
          -- type in the third parameter of the HasField constraint.
              tenv = mkTopTCvSubst (dataConUnivTyVars data_con `zip` r_args)
              inst_field_ty = substTy tenv field_ty
-             theta = mkTyConApp eqPrimTyCon [liftedTypeKind, liftedTypeKind, inst_field_ty, a_ty ]
+             theta = mkTyConApp eqPrimTyCon [liftedTypeKind, liftedTypeKind
+                                            , inst_field_ty, a_ty ]
 
          -- Give up if the selector is "naughty" (i.e. this is an
          -- existentially quantified type) or has a higher-rank type.
@@ -2215,11 +2215,17 @@ matchHasField dflags clas tys@[x_ty, r_ty, a_ty] loc
        ; addUsedGRE True gre
 
          -- Build evidence term as described in Note [HasField instances]
-       ; let mk_ev [ev] = EvCast (EvExpr (mkHsLamConst proxy_ty (mkFunTy r_ty a_ty) body)) (mkTcSymCo ax)
+       ; let mk_ev [ev] = EvExpr lam `EvCast` mkTcSymCo ax
                where
+                lam      = mkHsLamConst proxy_ty (mkFunTy r_ty a_ty) body
                 proxy_ty = mkProxyPrimTy typeSymbolKind x_ty
-                co = mkTcFunCo Nominal (mkTcReflCo Nominal r_ty) (evTermCoercion ev)
-                body = mkHsWrap (mkWpCastN co <.> mkWpTyApps r_args) (HsVar (noLoc sel_id))
+                co       = mkTcFunCo Nominal (mkTcReflCo Nominal r_ty)
+                                             (evTermCoercion ev)
+                body     = mkHsWrap (mkWpCastN co <.> mkWpTyApps r_args)
+                                    (HsVar (noLoc sel_id))
+                ax       = case tcInstNewTyCon_maybe (classTyCon clas) tys of
+                             Just x  -> snd x
+                             Nothing -> panic "HasField not a newtype"
              mk_ev _ = panic "matchHasField.mk_ev"
 
        ; return (GenInst { lir_new_theta = [ theta ]
