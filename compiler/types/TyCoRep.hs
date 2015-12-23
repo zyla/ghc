@@ -57,7 +57,7 @@ module TyCoRep (
 
         -- Free variables
         tyCoVarsOfType, tyCoVarsOfTypeDSet, tyCoVarsOfTypes, tyCoVarsOfTypesDSet,
-        tyCoVarsOfTypeAcc, tyCoVarsOfTypeList,
+        tyCoVarsBndrAcc, tyCoVarsOfTypeAcc, tyCoVarsOfTypeList,
         tyCoVarsOfTypesAcc, tyCoVarsOfTypesList,
         closeOverKindsDSet, closeOverKindsAcc,
         coVarsOfType, coVarsOfTypes,
@@ -880,11 +880,12 @@ role and kind, which is done in the UnivCo constructor.
 
 -- | For simplicity, we have just one UnivCo that represents a coercion from
 -- some type to some other type, with (in general) no restrictions on the
--- type. To make better sense of these, we tag a UnivCo with a
--- UnivCoProvenance. This provenance is rarely consulted and is more
--- for debugging info than anything else.
--- An important exception to this rule is that we also use a UnivCo
--- for coercion holes. See Note [Coercion holes].
+-- type. The UnivCoProvenance specifies more exactly what the coercion really
+-- is and why a program should (or shouldn't!) trust the coercion.
+-- It is reasonable to consider each constructor of 'UnivCoProvenance'
+-- as a totally independent coercion form; their only commonality is
+-- that they don't tell you what types they coercion between. (That info
+-- is in the 'UnivCo' constructor of 'Coercion'.
 data UnivCoProvenance
   = UnsafeCoerceProv   -- ^ From @unsafeCoerce#@. These are unsound.
 
@@ -929,10 +930,11 @@ Consider
      data T a = T1 | T2
 Then we have
      T s ~R T t
-for any old s,t. The witness for this is a phantom coercion built with
-PhantomProv.  The role ofthe UnivCo is always representational.  The
-Coercion stored is the (nominal) kind coercion between the types
-   kind(T s) ~ kind (T t)
+for any old s,t. The witness for this is (TyConAppCo T Rep co),
+where (co :: s ~P t) is a phantom coercion built with PhantomProv.
+The role of the UnivCo is always Phantom.  The Coercion stored is the
+(nominal) kind coercion between the types
+   kind(s) ~N kind (t)
 
 Note [Coercion holes]
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -947,14 +949,14 @@ During typechecking, constraint solving for type classes works by
 For equality constraints we use a different strategy.  See Note [The
 equality types story] in TysPrim for background on equality constraints.
   - For boxed equality constraints, (t1 ~N t2) and (t1 ~R t2), it's just
-    liek type classes above
-  - But for /unxboxed/ equality constraints (t1 ~R# t2) and (t1 ~N# t2)
+    like type classes above. (Indeed, boxed equality constraints *are* classes.)
+  - But for /unboxed/ equality constraints (t1 ~R# t2) and (t1 ~N# t2)
     we use a different plan
 
 For unboxed equalities:
   - Generate a CoercionHole, a mutable variable just like a unification
     variable
-  - Wrap the CoercionHole in a Wanted constraint; see TcRnType.TcEvDest
+  - Wrap the CoercionHole in a Wanted constraint; see TcRnTypes.TcEvDest
   - Use the CoercionHole in a Coercion, via HoleProv
   - Solve the constraint later
   - When solved, fill in the CoercionHole by side effect, instead of
@@ -992,7 +994,7 @@ Other notes about HoleCo:
 
 Note [ProofIrrelProv]
 ~~~~~~~~~~~~~~~~~~~~~
-A ProofIreelProv is a coercion between coercions. For example:
+A ProofIrrelProv is a coercion between coercions. For example:
 
   data G a where
     MkG :: G Bool
@@ -1049,19 +1051,24 @@ tyCoVarsOfTypeList ty = runFVList $ tyCoVarsOfTypeAcc ty
 -- | The worker for `tyVarsOfType` and `tyVarsOfTypeList`.
 -- The previous implementation used `unionVarSet` which is O(n+m) and can
 -- make the function quadratic.
--- It's exported, so that it can be composed with other functions that compute
--- free variables.
+-- It's exported, so that it can be composed with
+-- other functions that compute free variables.
 -- See Note [FV naming conventions] in FV.
+--
+-- Eta-expanded because that makes it run faster (apparently)
 tyCoVarsOfTypeAcc :: Type -> FV
-tyCoVarsOfTypeAcc (TyVarTy v)         fv_cand in_scope acc = (oneVar v `unionFV` tyCoVarsOfTypeAcc (tyVarKind v)) fv_cand in_scope acc
-tyCoVarsOfTypeAcc (TyConApp _ tys)    fv_cand in_scope acc = tyCoVarsOfTypesAcc tys fv_cand in_scope acc
-tyCoVarsOfTypeAcc (LitTy {})          fv_cand in_scope acc = noVars fv_cand in_scope acc
-tyCoVarsOfTypeAcc (AppTy fun arg)     fv_cand in_scope acc = (tyCoVarsOfTypeAcc fun `unionFV` tyCoVarsOfTypeAcc arg) fv_cand in_scope acc
-tyCoVarsOfTypeAcc (ForAllTy bndr ty) fv_cand in_scope acc
-  = (delBinderVarFV bndr (tyCoVarsOfTypeAcc ty)
-     `unionFV` tyCoVarsOfTypeAcc (binderType bndr)) fv_cand in_scope acc
-tyCoVarsOfTypeAcc (CastTy ty co)      fv_cand in_scope acc = (tyCoVarsOfTypeAcc ty `unionFV` tyCoVarsOfCoAcc co) fv_cand in_scope acc
-tyCoVarsOfTypeAcc (CoercionTy co)     fv_cand in_scope acc = tyCoVarsOfCoAcc co fv_cand in_scope acc
+tyCoVarsOfTypeAcc (TyVarTy v)        a b c = (oneVar v `unionFV` tyCoVarsOfTypeAcc (tyVarKind v)) a b c
+tyCoVarsOfTypeAcc (TyConApp _ tys)   a b c = tyCoVarsOfTypesAcc tys a b c
+tyCoVarsOfTypeAcc (LitTy {})         a b c = noVars a b c
+tyCoVarsOfTypeAcc (AppTy fun arg)    a b c = (tyCoVarsOfTypeAcc fun `unionFV` tyCoVarsOfTypeAcc arg) a b c
+tyCoVarsOfTypeAcc (ForAllTy bndr ty) a b c = tyCoVarsBndrAcc bndr (tyCoVarsOfTypeAcc ty)  a b c
+tyCoVarsOfTypeAcc (CastTy ty co)     a b c = (tyCoVarsOfTypeAcc ty `unionFV` tyCoVarsOfCoAcc co) a b c
+tyCoVarsOfTypeAcc (CoercionTy co)    a b c = tyCoVarsOfCoAcc co a b c
+
+tyCoVarsBndrAcc :: TyBinder -> FV -> FV
+-- Free vars of (forall b. <thing with fvs>)
+tyCoVarsBndrAcc bndr fvs = delBinderVarFV bndr fvs
+                           `unionFV` tyCoVarsOfTypeAcc (binderType bndr)
 
 -- | Returns free variables of types, including kind variables as
 -- a non-deterministic set. For type synonyms it does /not/ expand the

@@ -665,9 +665,9 @@ repBangTy ty = do
 
 repDerivs :: HsDeriving Name -> DsM (Core TH.CxtQ)
 repDerivs deriv = do
-    let clauses
-          | Just (L _ ctxt) <- deriv = ctxt
-          | otherwise                = []
+    let clauses = case deriv of
+                    Nothing         -> []
+                    Just (L _ ctxt) -> ctxt
     tys <- repList typeQTyConName
                    (rep_deriv . hsSigType)
                    clauses
@@ -965,9 +965,6 @@ repTy (HsTyLit lit) = do
                         lit' <- repTyLit lit
                         repTLit lit'
 repTy (HsWildCardTy (AnonWildCard _)) = repTWildCard
-repTy (HsWildCardTy (NamedWildCard (L _ n))) = do
-                                           nwc <- lookupOcc n
-                                           repTNamedWildCard nwc
 
 repTy ty                      = notHandled "Exotic form of type" (ppr ty)
 
@@ -2044,10 +2041,6 @@ repTLit (MkC lit) = rep2 litTName [lit]
 
 repTWildCard :: DsM (Core TH.TypeQ)
 repTWildCard = rep2 wildCardTName []
-
-repTNamedWildCard :: Core TH.Name -> DsM (Core TH.TypeQ)
-repTNamedWildCard (MkC s) = rep2 namedWildCardTName [s]
-
 
 --------- Type constructors --------------
 

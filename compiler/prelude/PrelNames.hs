@@ -331,6 +331,7 @@ basicKnownKeyNames
 
         -- Source locations
         callStackDataConName, callStackTyConName,
+        emptyCallStackName, pushCallStackName,
         srcLocDataConName,
 
         -- Annotation type checking
@@ -1361,11 +1362,16 @@ hasFieldClassName
  = clsQual gHC_RECORDS (fsLit "HasField") hasFieldClassNameKey
 
 -- Source Locations
-callStackDataConName, callStackTyConName, srcLocDataConName :: Name
+callStackDataConName, callStackTyConName, emptyCallStackName, pushCallStackName,
+  srcLocDataConName :: Name
 callStackDataConName
   = dcQual gHC_STACK_TYPES  (fsLit "CallStack") callStackDataConKey
 callStackTyConName
   = tcQual gHC_STACK_TYPES  (fsLit "CallStack") callStackTyConKey
+emptyCallStackName
+  = varQual gHC_STACK_TYPES (fsLit "emptyCallStack") emptyCallStackKey
+pushCallStackName
+  = varQual gHC_STACK_TYPES (fsLit "pushCallStack") pushCallStackKey
 srcLocDataConName
   = dcQual gHC_STACK_TYPES  (fsLit "SrcLoc")    srcLocDataConKey
 
@@ -2176,6 +2182,9 @@ memptyClassOpKey  = mkPreludeMiscIdUnique 514
 mappendClassOpKey = mkPreludeMiscIdUnique 515
 mconcatClassOpKey = mkPreludeMiscIdUnique 516
 
+emptyCallStackKey, pushCallStackKey :: Unique
+emptyCallStackKey = mkPreludeMiscIdUnique 517
+pushCallStackKey  = mkPreludeMiscIdUnique 518
 
 {-
 ************************************************************************
