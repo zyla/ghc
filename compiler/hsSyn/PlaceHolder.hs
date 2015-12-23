@@ -15,7 +15,7 @@ import RdrName
 import Var
 import Coercion
 import {-# SOURCE #-} ConLike (ConLike)
-import TcEvidence (HsWrapper)
+import {-# SOURCE #-} TcEvidence (HsWrapper)
 import FieldLabel
 import SrcLoc (Located)
 

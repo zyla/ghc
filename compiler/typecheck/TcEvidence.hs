@@ -53,7 +53,7 @@ import VarEnv
 import VarSet
 import Name
 import Pair
-import HsExpr ( HsExpr )
+import {-# SOURCE #-} HsExpr ( HsExpr )
 
 import Util
 import Bag
