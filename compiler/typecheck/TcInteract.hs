@@ -2179,8 +2179,19 @@ matchHasField :: DynFlags -> Class -> [Type] -> CtLoc -> TcS LookupInstResult
 matchHasField dflags clas tys@[x_ty, r_ty, a_ty] loc
   | Just x <- isStrLitTy x_ty
   , Just (tycon, r_args) <- tcSplitTyConApp_maybe r_ty
-  , Just fl <- lookupFsEnv (tyConFieldLabelEnv tycon) x
-  = do { env <- getGlobalRdrEnvTcS
+  = do { fam_inst_envs <- getFamInstEnvs
+         -- Look up the representation tycon if this is a data family,
+         -- because that's where the datacons and fields live
+       ; let (rep_tycon, rep_tc_args, _) = tcLookupDataFamInst fam_inst_envs
+                                                               tycon r_args
+
+         -- Check that the field belongs to the tycon, and get its
+         -- selector name from the FieldLabel
+       ; case lookupFsEnv (tyConFieldLabelEnv rep_tycon) x of
+           Nothing -> matchInstEnv dflags clas tys loc
+           Just fl -> do {
+
+       ; env <- getGlobalRdrEnvTcS
          -- Check that the field selector is in scope
        ; case lookupGRE_Field_Name env (flSelector fl) (flLabel fl) of
            []      -> matchInstEnv dflags clas tys loc
@@ -2191,7 +2202,7 @@ matchHasField dflags clas tys@[x_ty, r_ty, a_ty] loc
          -- there must be at least one data con with the field: find
          -- it and hence the field's type.
        ; let data_cons_with_field = [ (dc, ty)
-                                    | dc <- tyConDataCons tycon
+                                    | dc <- tyConDataCons rep_tycon
                                     , Just ty <- [dataConFieldType_maybe dc x]
                                     ]
              (data_con, field_ty) = ASSERT( not (null data_cons_with_field) )
@@ -2200,7 +2211,7 @@ matchHasField dflags clas tys@[x_ty, r_ty, a_ty] loc
          -- Calculate the new wanted constraint by equating the actual
          -- type of the field (instantiated appropriately) with the
          -- type in the third parameter of the HasField constraint.
-             tenv = mkTopTCvSubst (dataConUnivTyVars data_con `zip` r_args)
+             tenv = mkTopTCvSubst (dataConUnivTyVars data_con `zip` rep_tc_args)
              inst_field_ty = substTy tenv field_ty
              theta = mkTyConApp eqPrimTyCon [liftedTypeKind, liftedTypeKind
                                             , inst_field_ty, a_ty ]
@@ -2221,7 +2232,7 @@ matchHasField dflags clas tys@[x_ty, r_ty, a_ty] loc
                 proxy_ty = mkProxyPrimTy typeSymbolKind x_ty
                 co       = mkTcFunCo Nominal (mkTcReflCo Nominal r_ty)
                                              (evTermCoercion ev)
-                body     = mkHsWrap (mkWpCastN co <.> mkWpTyApps r_args)
+                body     = mkHsWrap (mkWpCastN co <.> mkWpTyApps rep_tc_args)
                                     (HsVar (noLoc sel_id))
                 ax       = case tcInstNewTyCon_maybe (classTyCon clas) tys of
                              Just x  -> snd x
@@ -2232,7 +2243,7 @@ matchHasField dflags clas tys@[x_ty, r_ty, a_ty] loc
                          , lir_mk_ev     = mk_ev
                          , lir_safe_over = True
                          })
-       } } }
+       } } } }
 matchHasField dflags clas tys loc = matchInstEnv dflags clas tys loc
 
 -- | Make a constant lambda-expression
