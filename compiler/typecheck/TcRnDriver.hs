@@ -71,7 +71,7 @@ import TcType
 import MkIface
 import TcSimplify
 import TcTyClsDecls
-import TcTypeable( mkModIdBindings, mkPrimTypeableBinds )
+import TcTypeable( mkModIdBindings, mkTypeableBinds, mkPrimTypeableBinds )
 import LoadIface
 import TidyPgm    ( mkBootModDetailsTc )
 import RnNames
@@ -485,7 +485,12 @@ tcRnSrcDecls explicit_mod_hdr decls
         -- Do this before processing any data type declarations,
         -- which need tcg_tr_module to be initialised
       ; tcg_env <- mkModIdBindings
+        -- Now we can generate the TyCon representations
       ; tcg_env <- setGblEnv tcg_env mkPrimTypeableBinds
+      ; tcg_env <- setGblEnv tcg_env $
+            let tycons = typeEnvTyCons $ tcg_type_env tcg_env
+            in mkTypeableBinds tycons
+
       ; setGblEnv tcg_env $ do {
 
 #ifdef GHCI
