@@ -57,7 +57,7 @@ module TyCoRep (
         pprThetaArrowTy, pprClassPred,
         pprKind, pprParendKind, pprTyLit,
         TyPrec(..), maybeParen, pprTcAppCo, pprTcAppTy,
-        pprPrefixApp, pprArrowChain, ppr_type,
+        pprPrefixApp, pprArrowChain,
         pprDataCons, ppSuggestExplicitKinds,
 
         -- * Free variables
@@ -72,6 +72,7 @@ module TyCoRep (
         tyCoFVsOfCo, tyCoFVsOfCos,
         tyCoVarsOfCoList, tyCoVarsOfProv,
         closeOverKinds,
+        tyCoVarsOfTelescope,
 
         -- * Substitutions
         TCvSubst(..), TvSubstEnv, CvSubstEnv,
@@ -2573,11 +2574,11 @@ eliminateRuntimeRep f ty = sdocWithDynFlags $ \dflags ->
       else f (defaultRuntimeRepVars ty)
 
 pprType, pprParendType :: Type -> SDoc
-pprType       ty = eliminateRuntimeRep (ppr_type TopPrec) ty
-pprParendType ty = eliminateRuntimeRep (ppr_type TyConPrec) ty
+pprType       ty = eliminateRuntimeRep (pprIfaceType . toIfaceType) ty
+pprParendType ty = eliminateRuntimeRep (pprParendIfaceType . toIfaceType) ty
 
 pprTyLit :: TyLit -> SDoc
-pprTyLit = ppr_tylit TopPrec
+pprTyLit = pprIfaceTyLit . toIfaceTyLit
 
 pprKind, pprParendKind :: Kind -> SDoc
 pprKind       = pprType
@@ -2589,38 +2590,10 @@ pprClassPred clas tys = pprTypeApp (classTyCon clas) tys
 
 ------------
 pprTheta :: ThetaType -> SDoc
-pprTheta [pred] = ppr_type TopPrec pred     -- I'm in two minds about this
-pprTheta theta  = parens (sep (punctuate comma (map (ppr_type TopPrec) theta)))
+pprTheta = pprIfaceContext . map toIfaceType
 
 pprThetaArrowTy :: ThetaType -> SDoc
-pprThetaArrowTy []     = empty
-pprThetaArrowTy [pred] = ppr_type TyOpPrec pred <+> darrow
-                         -- TyOpPrec:  Num a     => a -> a  does not need parens
-                         --      bug   (a :~: b) => a -> b  currently does
-                         -- Trac # 9658
-pprThetaArrowTy preds  = parens (fsep (punctuate comma (map (ppr_type TopPrec) preds)))
-                            <+> darrow
-    -- Notice 'fsep' here rather that 'sep', so that
-    -- type contexts don't get displayed in a giant column
-    -- Rather than
-    --  instance (Eq a,
-    --            Eq b,
-    --            Eq c,
-    --            Eq d,
-    --            Eq e,
-    --            Eq f,
-    --            Eq g,
-    --            Eq h,
-    --            Eq i,
-    --            Eq j,
-    --            Eq k,
-    --            Eq l) =>
-    --           Eq (a, b, c, d, e, f, g, h, i, j, k, l)
-    -- we get
-    --
-    --  instance (Eq a, Eq b, Eq c, Eq d, Eq e, Eq f, Eq g, Eq h, Eq i,
-    --            Eq j, Eq k, Eq l) =>
-    --           Eq (a, b, c, d, e, f, g, h, i, j, k, l)
+pprThetaArrowTy = pprIfaceContextArr . map toIfaceType
 
 ------------------
 instance Outputable Type where
@@ -2630,52 +2603,6 @@ instance Outputable TyLit where
    ppr = pprTyLit
 
 ------------------
-        -- OK, here's the main printer
-
-ppr_type :: TyPrec -> Type -> SDoc
-ppr_type _ (TyVarTy tv)       = ppr_tvar tv
-
-ppr_type p (TyConApp tc tys)  = pprTyTcApp p tc tys
-ppr_type p (LitTy l)          = ppr_tylit p l
-ppr_type p ty@(ForAllTy {})   = ppr_forall_type p ty
-
-ppr_type p (AppTy t1 t2)
-  = if_print_coercions
-      ppr_app_ty
-      (case split_app_tys t1 [t2] of
-          (CastTy head _, args) -> ppr_type p (mk_app_tys head args)
-          _                     -> ppr_app_ty)
-  where
-    ppr_app_ty = maybeParen p TyConPrec $
-                 ppr_type FunPrec t1 <+> ppr_type TyConPrec t2
-
-    split_app_tys (AppTy ty1 ty2) args = split_app_tys ty1 (ty2:args)
-    split_app_tys head            args = (head, args)
-
-    mk_app_tys (TyConApp tc tys1) tys2 = TyConApp tc (tys1 ++ tys2)
-    mk_app_tys ty1                tys2 = foldl AppTy ty1 tys2
-
-ppr_type p (CastTy ty co)
-  = if_print_coercions
-      (parens (ppr_type TopPrec ty <+> text "|>" <+> ppr co))
-      (ppr_type p ty)
-
-ppr_type _ (CoercionTy co)
-  = if_print_coercions
-      (parens (ppr co))
-      (text "<>")
-
-ppr_forall_type :: TyPrec -> Type -> SDoc
-ppr_forall_type p ty
-  = maybeParen p FunPrec $
-    sdocWithDynFlags $ \dflags ->
-    ppr_sigma_type dflags True ty
-    -- True <=> we always print the foralls on *nested* quantifiers
-    -- Opt_PrintExplicitForalls only affects top-level quantifiers
-
-ppr_tvar :: TyVar -> SDoc
-ppr_tvar tv  -- Note [Infix type variables]
-  = parenSymOcc (getOccName tv) (ppr tv)
 
 ppr_tylit :: TyPrec -> TyLit -> SDoc
 ppr_tylit _ tl =
@@ -2695,111 +2622,25 @@ if_print_coercions yes no
     else no
 
 -------------------
-ppr_sigma_type :: DynFlags
-               -> Bool -- ^ True <=> Show the foralls unconditionally
-               -> Type -> SDoc
--- Suppose we have (forall a. Show a => forall b. a -> b). When we're not
--- printing foralls, we want to drop both the (forall a) and the (forall b).
--- This logic does so.
-ppr_sigma_type dflags False orig_ty
-  | not (gopt Opt_PrintExplicitForalls dflags)
-  , all (isEmptyVarSet . tyCoVarsOfType . binderType) named
-      -- See Note [When to print foralls]
-  = sep [ pprThetaArrowTy (map binderType ctxt)
-        , pprArrowChain TopPrec (ppr_fun_tail tau) ]
-  where
-    (invis_bndrs, tau) = split [] orig_ty
-    (named, ctxt)      = partition isNamedBinder invis_bndrs
-
-    split acc (ForAllTy bndr ty) | isInvisibleBinder bndr = split (bndr:acc) ty
-    split acc ty                                          = (reverse acc, ty)
-
-ppr_sigma_type _ _ ty
-  = sep [ pprForAll bndrs
-        , pprThetaArrowTy ctxt
-        , pprArrowChain TopPrec (ppr_fun_tail tau) ]
-  where
-    (bndrs, rho) = split1 [] ty
-    (ctxt, tau)  = split2 [] rho
-
-    split1 bndrs (ForAllTy bndr@(Named {}) ty) = split1 (bndr:bndrs) ty
-    split1 bndrs ty                            = (reverse bndrs, ty)
-
-    split2 ps (ForAllTy (Anon ty1) ty2) | isPredTy ty1 = split2 (ty1:ps) ty2
-    split2 ps ty                                       = (reverse ps, ty)
-
-    -- We don't want to lose synonyms, so we mustn't use splitFunTys here.
-ppr_fun_tail :: Type -> [SDoc]
-ppr_fun_tail (ForAllTy (Anon ty1) ty2)
-  | not (isPredTy ty1) = ppr_type FunPrec ty1 : ppr_fun_tail ty2
-ppr_fun_tail other_ty = [ppr_type TopPrec other_ty]
 
 pprSigmaType :: Type -> SDoc
-pprSigmaType ty = sdocWithDynFlags $ \dflags ->
-    eliminateRuntimeRep (ppr_sigma_type dflags False) ty
+pprSigmaType = pprIfaceSigmaType . toIfaceType
 
+-- | Print a user-level forall; see Note [When to print foralls]
 pprUserForAll :: [TyBinder] -> SDoc
--- Print a user-level forall; see Note [When to print foralls]
-pprUserForAll bndrs
-  = sdocWithDynFlags $ \dflags ->
-    ppWhen (any bndr_has_kind_var bndrs || gopt Opt_PrintExplicitForalls dflags) $
-    pprForAll bndrs
-  where
-    bndr_has_kind_var bndr
-      = not (isEmptyVarSet (tyCoVarsOfType (binderType bndr)))
+pprUserForAll = pprUserIfaceForAll . toDegenerateBinders
 
 pprForAllImplicit :: [TyVar] -> SDoc
-pprForAllImplicit tvs = pprForAll (zipWith Named tvs (repeat Specified))
-
--- | Render the "forall ... ." or "forall ... ->" bit of a type.
--- Do not pass in anonymous binders!
-pprForAll :: [TyBinder] -> SDoc
-pprForAll [] = empty
-pprForAll bndrs@(Named _ vis : _)
-  = add_separator (forAllLit <+> doc) <+> pprForAll bndrs'
-  where
-    (bndrs', doc) = ppr_tv_bndrs bndrs vis
-
-    add_separator stuff = case vis of
-                            Visible   -> stuff <+> arrow
-                            _inv      -> stuff <>  dot
-pprForAll bndrs = pprPanic "pprForAll: anonymous binder" (ppr bndrs)
+pprForAllImplicit tvs = pprIfaceForAll (zipIfaceBinders tvs $ zipWith Named tvs (repeat Specified))
 
 pprTvBndrs :: [TyVar] -> SDoc
 pprTvBndrs tvs = sep (map pprTvBndr tvs)
 
--- | Render the ... in @(forall ... .)@ or @(forall ... ->)@.
--- Returns both the list of not-yet-rendered binders and the doc.
--- No anonymous binders here!
-ppr_tv_bndrs :: [TyBinder]
-             -> VisibilityFlag  -- ^ visibility of the first binder in the list
-             -> ([TyBinder], SDoc)
-ppr_tv_bndrs all_bndrs@(Named tv vis : bndrs) vis1
-  | vis `sameVis` vis1 = let (bndrs', doc) = ppr_tv_bndrs bndrs vis1
-                             pp_tv = sdocWithDynFlags $ \dflags ->
-                                     if Invisible == vis &&
-                                        gopt Opt_PrintExplicitForalls dflags
-                                     then braces (pprTvBndrNoParens tv)
-                                     else pprTvBndr tv
-                         in
-                         (bndrs', pp_tv <+> doc)
-  | otherwise   = (all_bndrs, empty)
-ppr_tv_bndrs [] _ = ([], empty)
-ppr_tv_bndrs bndrs _ = pprPanic "ppr_tv_bndrs: anonymous binder" (ppr bndrs)
-
 pprTvBndr :: TyVar -> SDoc
-pprTvBndr tv
-  | isLiftedTypeKind kind = ppr_tvar tv
-  | otherwise             = parens (ppr_tvar tv <+> dcolon <+> pprKind kind)
-             where
-               kind = tyVarKind tv
+pprTvBndr = pprIfaceTvBndr True . toDegenerateBinders
 
 pprTvBndrNoParens :: TyVar -> SDoc
-pprTvBndrNoParens tv
-  | isLiftedTypeKind kind = ppr_tvar tv
-  | otherwise             = ppr_tvar tv <+> dcolon <+> pprKind kind
-             where
-               kind = tyVarKind tv
+pprTvBndrNoParens = pprTvBndr' False
 
 instance Outputable TyBinder where
   ppr (Named v Visible)   = ppr v
@@ -2866,186 +2707,23 @@ pprDataCons = sepWithVBars . fmap pprDataConWithArgs . tyConDataCons
 pprDataConWithArgs :: DataCon -> SDoc
 pprDataConWithArgs dc = sep [forAllDoc, thetaDoc, ppr dc <+> argsDoc]
   where
-    (_univ_tvs, _ex_tvs, eq_spec, theta, arg_tys, _res_ty) = dataConFullSig dc
-    univ_bndrs = dataConUnivTyBinders dc
-    ex_bndrs   = dataConExTyBinders dc
-    forAllDoc = pprUserForAll $ (filterEqSpec eq_spec univ_bndrs ++ ex_bndrs)
+    (univ_tvs, ex_tvs, eq_spec, theta, arg_tys, _res_ty) = dataConFullSig dc
+    forAllDoc = pprUserForAll $ map (\tv -> Named tv Specified) $
+                ((univ_tvs `minusList` map eqSpecTyVar eq_spec) ++ ex_tvs)
     thetaDoc  = pprThetaArrowTy theta
     argsDoc   = hsep (fmap pprParendType arg_tys)
 
 
 pprTypeApp :: TyCon -> [Type] -> SDoc
-pprTypeApp tc tys = pprTyTcApp TopPrec tc tys
-        -- We have to use ppr on the TyCon (not its name)
-        -- so that we get promotion quotes in the right place
+pprTypeApp = pprTcAppTy TopPrec
 
-pprTyTcApp :: TyPrec -> TyCon -> [Type] -> SDoc
--- Used for types only; so that we can make a
--- special case for type-level lists
-pprTyTcApp p tc tys
-  | tc `hasKey` ipClassKey
-  , [LitTy (StrTyLit n),ty] <- tys
-  = maybeParen p FunPrec $
-    char '?' <> ftext n <> text "::" <> ppr_type TopPrec ty
+pprTcAppTy :: TyPrec -> TyCon -> [Type] -> SDoc
+pprTcAppTy p tc tys
+  = pprTyTcApp p (toIfaceTyCon tc) (map toIfaceType tys)
 
-  | tc `hasKey` consDataConKey
-  , [_kind,ty1,ty2] <- tys
-  = sdocWithDynFlags $ \dflags ->
-    if gopt Opt_PrintExplicitKinds dflags then ppr_deflt
-                                          else pprTyList p ty1 ty2
-
-  | not opt_PprStyle_Debug
-  , tc `hasKey` errorMessageTypeErrorFamKey
-  = text "(TypeError ...)"   -- Suppress detail unles you _really_ want to see
-
-  | tc `hasKey` tYPETyConKey
-  , [TyConApp ptr_rep []] <- tys
-  , ptr_rep `hasKey` ptrRepLiftedDataConKey
-  = unicodeSyntax (char '★') (char '*')
-
-  | tc `hasKey` tYPETyConKey
-  , [TyConApp ptr_rep []] <- tys
-  , ptr_rep `hasKey` ptrRepUnliftedDataConKey
-  = char '#'
-
-  | otherwise
-  = ppr_deflt
-  where
-    ppr_deflt = pprTcAppTy p ppr_type tc tys
-
-pprTcAppTy :: TyPrec -> (TyPrec -> Type -> SDoc) -> TyCon -> [Type] -> SDoc
-pprTcAppTy p pp tc tys
-  = getPprStyle $ \style -> pprTcApp style id p pp tc tys
-
-pprTcAppCo :: TyPrec -> (TyPrec -> Coercion -> SDoc)
-           -> TyCon -> [Coercion] -> SDoc
-pprTcAppCo p pp tc cos
-  = getPprStyle $ \style ->
-    pprTcApp style (pFst . coercionKind) p pp tc cos
-
-pprTcApp :: PprStyle
-         -> (a -> Type) -> TyPrec -> (TyPrec -> a -> SDoc) -> TyCon -> [a] -> SDoc
--- Used for both types and coercions, hence polymorphism
-pprTcApp _ _ _ pp tc [ty]
-  | tc `hasKey` listTyConKey = pprPromotionQuote tc <> brackets   (pp TopPrec ty)
-  | tc `hasKey` parrTyConKey = pprPromotionQuote tc <> paBrackets (pp TopPrec ty)
-
-pprTcApp style to_type p pp tc tys
-  | not (debugStyle style)
-  , Just sort <- tyConTuple_maybe tc
-  , let arity = tyConArity tc
-  , arity == length tys
-  , let num_to_drop = case sort of UnboxedTuple -> arity `div` 2
-                                   _            -> 0
-  = pprTupleApp p pp tc sort (drop num_to_drop tys)
-
-  | not (debugStyle style)
-  , Just dc <- isPromotedDataCon_maybe tc
-  , let dc_tc = dataConTyCon dc
-  , Just tup_sort <- tyConTuple_maybe dc_tc
-  , let arity = tyConArity dc_tc    -- E.g. 3 for (,,) k1 k2 k3 t1 t2 t3
-        ty_args = drop arity tys    -- Drop the kind args
-  , ty_args `lengthIs` arity        -- Result is saturated
-  = pprPromotionQuote tc <>
-    (tupleParens tup_sort $ pprWithCommas (pp TopPrec) ty_args)
-
-  | otherwise
-  = sdocWithDynFlags $ \dflags ->
-    pprTcApp_help to_type p pp tc tys dflags style
-  where
-
-pprTupleApp :: TyPrec -> (TyPrec -> a -> SDoc)
-            -> TyCon -> TupleSort -> [a] -> SDoc
--- Print a saturated tuple
-pprTupleApp p pp tc sort tys
-  | null tys
-  , ConstraintTuple <- sort
-  = if opt_PprStyle_Debug then text "(%%)"
-                          else maybeParen p FunPrec $
-                               text "() :: Constraint"
-  | otherwise
-  = pprPromotionQuote tc <>
-    tupleParens sort (pprWithCommas (pp TopPrec) tys)
-
-pprTcApp_help :: (a -> Type) -> TyPrec -> (TyPrec -> a -> SDoc)
-              -> TyCon -> [a] -> DynFlags -> PprStyle -> SDoc
--- This one has accss to the DynFlags
-pprTcApp_help to_type p pp tc tys dflags style
-  | is_equality
-  = print_equality
-
-  | print_prefix
-  = pprPrefixApp p pp_tc (map (pp TyConPrec) tys_wo_kinds)
-
-  | [ty1,ty2] <- tys_wo_kinds  -- Infix, two arguments;
-                               -- we know nothing of precedence though
-  = pprInfixApp p pp pp_tc ty1 ty2
-
-  |  tc_name `hasKey` starKindTyConKey
-  || tc_name `hasKey` unicodeStarKindTyConKey
-  || tc_name `hasKey` unliftedTypeKindTyConKey
-  = pp_tc   -- Do not wrap *, # in parens
-
-  | otherwise
-  = pprPrefixApp p (parens (pp_tc)) (map (pp TyConPrec) tys_wo_kinds)
-  where
-    tc_name = tyConName tc
-
-    is_equality = tc `hasKey` eqPrimTyConKey ||
-                  tc `hasKey` heqTyConKey ||
-                  tc `hasKey` eqReprPrimTyConKey ||
-                  tc `hasKey` eqTyConKey
-                  -- don't include Coercible here, which should be printed
-                  -- normally
-
-      -- This is all a bit ad-hoc, trying to print out the best representation
-      -- of equalities. If you see a better design, go for it.
-    print_equality = case either_op_msg of
-      Left op ->
-        sep [ parens (pp TyOpPrec ty1 <+> dcolon <+> pp TyOpPrec ki1)
-            , op
-            , parens (pp TyOpPrec ty2 <+> dcolon <+> pp TyOpPrec ki2)]
-      Right msg ->
-        msg
-      where
-        hetero_tc =  tc `hasKey` eqPrimTyConKey
-                  || tc `hasKey` eqReprPrimTyConKey
-                  || tc `hasKey` heqTyConKey
-
-        print_kinds   = gopt Opt_PrintExplicitKinds dflags
-        print_eqs     = gopt Opt_PrintEqualityRelations dflags ||
-                        dumpStyle style ||
-                        debugStyle style
-
-        (ki1, ki2, ty1, ty2)
-          | hetero_tc
-          , [k1, k2, t1, t2] <- tys
-          = (k1, k2, t1, t2)
-          | [k, t1, t2] <- tys  -- we must have (~)
-          = (k, k, t1, t2)
-          | otherwise
-          = pprPanic "print_equality" pp_tc
-
-         -- if "Left", print hetero equality; if "Right" just print that msg
-        either_op_msg
-          | print_eqs
-          = Left pp_tc
-
-          | hetero_tc
-          , print_kinds || not (to_type ki1 `eqType` to_type ki2)
-          = Left $ if tc `hasKey` eqPrimTyConKey
-                   then text "~~"
-                   else pp_tc
-
-          | otherwise
-          = Right $ if tc `hasKey` eqReprPrimTyConKey
-                    then text "Coercible" <+> (sep [ pp TyConPrec ty1
-                                                   , pp TyConPrec ty2 ])
-                    else sep [pp TyOpPrec ty1, text "~", pp TyOpPrec ty2]
-
-    print_prefix = not (isSymOcc (nameOccName tc_name))
-    tys_wo_kinds = suppressInvisibles to_type dflags tc tys
-    pp_tc        = ppr tc
+pprTcAppCo :: TyPrec -> TyCon -> [Coercion] -> SDoc
+pprTcAppCo p tc cos
+  = pprIfaceCoTcApp p (toIfaceTyCon tc) (map toIfaceCoercion cos)
 
 ------------------
 -- | Given a 'TyCon',and the args to which it is applied,
@@ -3053,37 +2731,6 @@ pprTcApp_help to_type p pp tc tys dflags style
 suppressInvisibles :: (a -> Type) -> DynFlags -> TyCon -> [a] -> [a]
 suppressInvisibles to_type dflags tc xs
   | gopt Opt_PrintExplicitKinds dflags = xs
-  | otherwise                          = snd $ partitionInvisibles tc to_type xs
-
-----------------
-pprTyList :: TyPrec -> Type -> Type -> SDoc
--- Given a type-level list (t1 ': t2), see if we can print
--- it in list notation [t1, ...].
-pprTyList p ty1 ty2
-  = case gather ty2 of
-      (arg_tys, Nothing) -> char '\'' <> brackets (fsep (punctuate comma
-                                            (map (ppr_type TopPrec) (ty1:arg_tys))))
-      (arg_tys, Just tl) -> maybeParen p FunPrec $
-                            hang (ppr_type FunPrec ty1)
-                               2 (fsep [ colon <+> ppr_type FunPrec ty | ty <- arg_tys ++ [tl]])
-  where
-    gather :: Type -> ([Type], Maybe Type)
-     -- (gather ty) = (tys, Nothing) means ty is a list [t1, .., tn]
-     --             = (tys, Just tl) means ty is of form t1:t2:...tn:tl
-    gather (TyConApp tc tys)
-      | tc `hasKey` consDataConKey
-      , [_kind, ty1,ty2] <- tys
-      , (args, tl) <- gather ty2
-      = (ty1:args, tl)
-      | tc `hasKey` nilDataConKey
-      = ([], Nothing)
-    gather ty = ([], Just ty)
-
-----------------
-pprInfixApp :: TyPrec -> (TyPrec -> a -> SDoc) -> SDoc -> a -> a -> SDoc
-pprInfixApp p pp pp_tc ty1 ty2
-  = maybeParen p TyOpPrec $
-    sep [pp TyOpPrec ty1, pprInfixVar True pp_tc <+> pp TyOpPrec ty2]
 
 pprPrefixApp :: TyPrec -> SDoc -> [SDoc] -> SDoc
 pprPrefixApp p pp_fun pp_tys
