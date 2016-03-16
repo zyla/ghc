@@ -1152,7 +1152,12 @@ ty_co_match menv subst ty1 (AppCo co2 arg2) _lkco _rkco
 ty_co_match menv subst (TyConApp tc1 tys) (TyConAppCo _ tc2 cos) _lkco _rkco
   = ty_co_match_tc menv subst tc1 tys tc2 cos
 ty_co_match menv subst (ForAllTy (Anon ty1) ty2) (TyConAppCo _ tc cos) _lkco _rkco
-  = ty_co_match_tc menv subst funTyCon [ty1, ty2] tc cos
+  | Just rep1 <- kindRuntimeRep_maybe ty1
+  , Just rep2 <- kindRuntimeRep_maybe ty2
+  = ty_co_match_tc menv subst funTyCon [rep1, rep2, ty1, ty2] tc cos
+  | otherwise
+  = pprPanic "ty_co_match" (ppr ty1 <+> arrow <+> ppr ty2
+                            $$ ppr tc <+> hsep (map ppr cos))
 
 ty_co_match menv subst (ForAllTy (Named tv1 _) ty1)
                        (ForAllCo tv2 kind_co2 co2)

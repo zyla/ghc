@@ -48,6 +48,8 @@ module Type (
         mkNumLitTy, isNumLitTy,
         mkStrLitTy, isStrLitTy,
 
+        tyRuntimeRep_maybe, kindRuntimeRep_maybe,
+
         mkCastTy, mkCoercionTy, splitCastTy_maybe,
 
         userTypeError_maybe, pprUserTypeErrorTy,
@@ -211,7 +213,7 @@ import Class
 import TyCon
 import TysPrim
 import {-# SOURCE #-} TysWiredIn ( listTyCon, typeNatKind
-                                 , typeSymbolKind, liftedTypeKind )
+                                 , typeSymbolKind, runtimeRepTy, liftedTypeKind )
 import PrelNames
 import CoAxiom
 import {-# SOURCE #-} Coercion
@@ -657,8 +659,10 @@ repSplitAppTy_maybe :: Type -> Maybe (Type,Type)
 -- ^ Does the AppTy split as in 'splitAppTy_maybe', but assumes that
 -- any Core view stuff is already done
 repSplitAppTy_maybe (ForAllTy (Anon ty1) ty2)
-                                      = Just (TyConApp funTyCon [ty1], ty2)
-repSplitAppTy_maybe (AppTy ty1 ty2)   = Just (ty1, ty2)
+  | Just rep1 <- kindRuntimeRep_maybe ty1
+  , Just rep2 <- kindRuntimeRep_maybe ty2 = Just (TyConApp funTyCon [rep1, rep2, ty1], ty2)
+  | otherwise                             = pprPanic "repSplitAppTy_maybe" (ppr ty1 $$ ppr ty2)
+repSplitAppTy_maybe (AppTy ty1 ty2)       = Just (ty1, ty2)
 repSplitAppTy_maybe (TyConApp tc tys)
   | mightBeUnsaturatedTyCon tc || tys `lengthExceeds` tyConArity tc
   , Just (tys', ty') <- snocView tys
@@ -672,9 +676,11 @@ tcRepSplitAppTy_maybe :: Type -> Maybe (Type,Type)
 -- ^ Does the AppTy split as in 'tcSplitAppTy_maybe', but assumes that
 -- any coreView stuff is already done. Refuses to look through (c => t)
 tcRepSplitAppTy_maybe (ForAllTy (Anon ty1) ty2)
-  | isConstraintKind (typeKind ty1)     = Nothing  -- See Note [Decomposing fat arrow c=>t]
-  | otherwise                           = Just (TyConApp funTyCon [ty1], ty2)
-tcRepSplitAppTy_maybe (AppTy ty1 ty2)   = Just (ty1, ty2)
+  | isConstraintKind (typeKind ty1)       = Nothing  -- See Note [Decomposing fat arrow c=>t]
+  | Just rep1 <- kindRuntimeRep_maybe ty1
+  , Just rep2 <- kindRuntimeRep_maybe ty2 = Just (TyConApp funTyCon [rep1, rep2, ty1], ty2)
+  | otherwise                             = pprPanic "repSplitAppTy_maybe" (ppr ty1 $$ ppr ty2)
+tcRepSplitAppTy_maybe (AppTy ty1 ty2)     = Just (ty1, ty2)
 tcRepSplitAppTy_maybe (TyConApp tc tys)
   | mightBeUnsaturatedTyCon tc || tys `lengthExceeds` tyConArity tc
   , Just (tys', ty') <- snocView tys
@@ -704,9 +710,12 @@ splitAppTys ty = split ty ty []
             (tc_args1, tc_args2) = splitAt n tc_args
         in
         (TyConApp tc tc_args1, tc_args2 ++ args)
-    split _   (ForAllTy (Anon ty1) ty2) args = ASSERT( null args )
-                                               (TyConApp funTyCon [], [ty1,ty2])
-    split orig_ty _                     args = (orig_ty, args)
+    split _   (ForAllTy (Anon ty1) ty2) args
+      | Just rep1 <- kindRuntimeRep_maybe ty1
+      , Just rep2 <- kindRuntimeRep_maybe ty2 = ASSERT( null args )
+                                               (TyConApp funTyCon [], [rep1, rep2, ty1, ty2])
+      | otherwise                             = pprPanic "splitAppTys" (ppr ty1 $$ ppr ty2 $$ ppr args)
+    split orig_ty _                     args  = (orig_ty, args)
 
 -- | Like 'splitAppTys', but doesn't look through type synonyms
 repSplitAppTys :: Type -> (Type, [Type])
@@ -719,8 +728,13 @@ repSplitAppTys ty = split ty []
             (tc_args1, tc_args2) = splitAt n tc_args
         in
         (TyConApp tc tc_args1, tc_args2 ++ args)
-    split (ForAllTy (Anon ty1) ty2) args = ASSERT( null args )
-                                           (TyConApp funTyCon [], [ty1, ty2])
+    split (ForAllTy (Anon ty1) ty2) args
+      | Just rep1 <- kindRuntimeRep_maybe ty1
+      , Just rep2 <- kindRuntimeRep_maybe ty2 =
+            ASSERT( null args )
+            (TyConApp funTyCon [], [rep1, rep2, ty1, ty2])
+      | otherwise                             =
+            pprPanic "repSplitAppTys" (ppr ty1 $$ ppr ty2 $$ ppr args)
     split ty args = (ty, args)
 
 {-
@@ -793,7 +807,33 @@ pprUserTypeErrorTy ty =
                                 FunTy
                                 ~~~~~
 
-Function types are represented with (ForAllTy (Anon ...) ...)
+Note [Representation of function types]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Functions (e.g. Int -> Char) are can be thought of as being applications
+of funTyCon (known in Haskell surface syntax as (->)),
+
+    (->) :: forall (r1 :: RuntimeRep) (r2 :: RuntimeRep)
+                   (a :: TYPE r1) (b :: Type r2).
+            a -> b -> *
+
+However, for efficiency's sake we represent saturated applications of (->)
+with ForAllTy. For instance, the type,
+
+    (->) r1 r2 a b
+
+is equivalent to,
+
+    ForAllTy (Anon a) b
+
+Note how the RuntimeReps are implied in the ForAllTy representation. For this
+reason we must be careful when recontructing the TyConApp representation (see,
+for instance, splitTyConApp_maybe).
+
+In the compiler we maintain the invariant that all saturated applications of
+(->) are represented with ForAllTy.
+
+See #11714.
 -}
 
 isFunTy :: Type -> Bool
@@ -935,7 +975,7 @@ applyTysX tvs body_ty arg_tys
 -- its arguments.  Applies its arguments to the constructor from left to right.
 mkTyConApp :: TyCon -> [Type] -> Type
 mkTyConApp tycon tys
-  | isFunTyCon tycon, [ty1,ty2] <- tys
+  | isFunTyCon tycon, [_rep1,_rep2,ty1,ty2] <- tys
   = ForAllTy (Anon ty1) ty2
 
   | otherwise
@@ -980,6 +1020,18 @@ tyConAppArgN n ty
       Just tys -> ASSERT2( n < length tys, ppr n <+> ppr tys ) tys `getNth` n
       Nothing  -> pprPanic "tyConAppArgN" (ppr n <+> ppr ty)
 
+-- | If given a type @TYPE (rr :: RuntimeRep)@ then returns @Just rr@
+-- otherwise @Nothing@.
+tyRuntimeRep_maybe :: Type -> Maybe Type
+tyRuntimeRep_maybe (TyConApp tc [rr])
+  | tc == tYPETyCon       = ASSERT(typeKind rr `eqType` runtimeRepTy)
+                            Just rr
+tyRuntimeRep_maybe _      = Nothing
+
+-- | If given a type @a :: TYPE (rr :: RuntimeRep)@ then returns @Just rr@.
+kindRuntimeRep_maybe :: Type -> Maybe Type
+kindRuntimeRep_maybe = tyRuntimeRep_maybe . typeKind
+
 -- | Attempts to tease a type apart into a type constructor and the application
 -- of a number of arguments to that constructor. Panics if that is not possible.
 -- See also 'splitTyConApp_maybe'
@@ -998,7 +1050,12 @@ splitTyConApp_maybe ty                           = repSplitTyConApp_maybe ty
 -- assumes the synonyms have already been dealt with.
 repSplitTyConApp_maybe :: Type -> Maybe (TyCon, [Type])
 repSplitTyConApp_maybe (TyConApp tc tys)         = Just (tc, tys)
-repSplitTyConApp_maybe (ForAllTy (Anon arg) res) = Just (funTyCon, [arg,res])
+repSplitTyConApp_maybe (ForAllTy (Anon arg) res)
+  | Just rep1 <- kindRuntimeRep_maybe arg
+  , Just rep2 <- kindRuntimeRep_maybe res        =
+      Just (funTyCon, [rep1, rep2, arg, res])
+  | otherwise                                    =
+      pprPanic "repSplitTyConApp_maybe" (ppr arg $$ ppr res)
 repSplitTyConApp_maybe _                         = Nothing
 
 -- | Attempts to tease a list type apart and gives the type of the elements if

@@ -1896,9 +1896,16 @@ unifyWanted loc role orig_ty1 orig_ty2
     go ty1 ty2 | Just ty2' <- coreView ty2 = go ty1 ty2'
 
     go (ForAllTy (Anon s1) t1) (ForAllTy (Anon s2) t2)
+      | Just rep_s1 <- kindRuntimeRep_maybe s1
+      , Just rep_s2 <- kindRuntimeRep_maybe s2
+      , Just rep_t1 <- kindRuntimeRep_maybe t1
+      , Just rep_t2 <- kindRuntimeRep_maybe t2
       = do { co_s <- unifyWanted loc role s1 s2
            ; co_t <- unifyWanted loc role t1 t2
-           ; return (mkTyConAppCo role funTyCon [co_s,co_t]) }
+           ; co_rep_s <- unifyWanted loc role rep_s1 rep_s2
+           ; co_rep_t <- unifyWanted loc role rep_t1 rep_t2
+           ; let args = [co_rep_s, co_rep_t, co_s, co_t]
+           ; return (mkTyConAppCo role funTyCon args) }
     go (TyConApp tc1 tys1) (TyConApp tc2 tys2)
       | tc1 == tc2, tys1 `equalLength` tys2
       , isInjectiveTyCon tc1 role -- don't look under newtypes at Rep equality

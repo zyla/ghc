@@ -1181,7 +1181,13 @@ tcSplitTyConApp_maybe ty                           = tcRepSplitTyConApp_maybe ty
 
 tcRepSplitTyConApp_maybe :: Type -> Maybe (TyCon, [Type])
 tcRepSplitTyConApp_maybe (TyConApp tc tys)          = Just (tc, tys)
-tcRepSplitTyConApp_maybe (ForAllTy (Anon arg) res)  = Just (funTyCon, [arg,res])
+tcRepSplitTyConApp_maybe (ForAllTy (Anon arg) res)
+  | Just arg_rep <- kindRuntimeRep_maybe arg
+  , Just res_rep <- kindRuntimeRep_maybe res
+  = Just (funTyCon, [arg_rep, res_rep, arg, res])
+
+  | otherwise
+  = pprPanic "tcRepSplitTyConApp_maybe" (ppr arg $$ ppr res)
 tcRepSplitTyConApp_maybe _                          = Nothing
 
 

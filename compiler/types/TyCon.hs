@@ -1197,7 +1197,7 @@ mkFunTyCon name binders rep_nm
         tyConBinders = binders,
         tyConResKind = liftedTypeKind,
         tyConKind    = mkForAllTys binders liftedTypeKind,
-        tyConArity   = 2,
+        tyConArity   = length binders,
         tcRepName    = rep_nm
     }
 

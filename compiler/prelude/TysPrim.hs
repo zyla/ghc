@@ -20,7 +20,7 @@ module TysPrim(
         kKiVar,
 
         -- Kind constructors...
-        tYPETyConName, unliftedTypeKindTyConName,
+        tYPETyCon, tYPETyConName, unliftedTypeKindTyConName,
 
         -- Kinds
         tYPE,
@@ -269,19 +269,20 @@ kKiVar = (mkTemplateTyVars $ repeat liftedTypeKind) !! 10
 funTyConName :: Name
 funTyConName = mkPrimTyConName (fsLit "(->)") funTyConKey funTyCon
 
+-- | The @(->)@ type constructor.
+--
+-- @
+-- (->) :: forall (rep1 :: RuntimeRep) (rep2 :: RuntimeRep).
+--         TYPE rep1 -> TYPE rep2 -> *
+-- @
 funTyCon :: TyCon
-funTyCon = mkFunTyCon funTyConName (map Anon [liftedTypeKind, liftedTypeKind])
-                                   tc_rep_nm
+funTyCon = mkFunTyCon funTyConName tyvars tc_rep_nm
   where
-        -- You might think that (->) should have type (?? -> ? -> *), and you'd be right
-        -- But if we do that we get kind errors when saying
-        --      instance Control.Arrow (->)
-        -- because the expected kind is (*->*->*).  The trouble is that the
-        -- expected/actual stuff in the unifier does not go contra-variant, whereas
-        -- the kind sub-typing does.  Sigh.  It really only matters if you use (->) in
-        -- a prefix way, thus:  (->) Int# Int#.  And this is unusual.
-        -- because they are never in scope in the source
-
+    tyvars = [ Named runtimeRep1TyVar Invisible
+             , Named runtimeRep2TyVar Invisible
+             , Anon (tYPE runtimeRep1Ty)
+             , Anon (tYPE runtimeRep2Ty)
+             ]
     tc_rep_nm = mkPrelTyConRepName funTyConName
 
 {-
