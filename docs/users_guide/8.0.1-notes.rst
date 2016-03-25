@@ -24,8 +24,6 @@ Highlights
 
 The highlights, since the 7.10 branch, are:
 
-- TODO FIXME
-
 - The new :ghc-flag:`-XTypeInType` allows promotion of all types into
   kinds, allowing kind synonyms, kind families, promoted GADTs, and other
   goodies.
@@ -77,8 +75,6 @@ Full details
 
 Language
 ~~~~~~~~
-
--  TODO FIXME.
 
 -  :ghc-flag:`-XTypeInType` supports universal type promotion and merges
    the type and kind language. This allows, for example, higher-rank
