@@ -63,7 +63,7 @@ import Coercion
 import DataCon ( isTupleDataCon )
 import TcType
 import DynFlags
-import TyCoRep  -- needs to convert core types to iface types
+import {-# SOURCE #-}TyCoRep  -- needs to convert core types to iface types
 import TyCon hiding ( pprPromotionQuote )
 import CoAxiom
 import Id

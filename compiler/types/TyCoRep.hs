@@ -137,6 +137,7 @@ import {-# SOURCE #-} Type( isPredTy, isCoercionTy, mkAppTy
 import {-# SOURCE #-} Coercion
 import {-# SOURCE #-} ConLike ( ConLike(..), conLikeName )
 import {-# SOURCE #-} TysWiredIn ( ptrRepLiftedTy )
+import {-# SOURCE #-} IfaceType
 
 -- friends:
 import Var

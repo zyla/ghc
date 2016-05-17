@@ -10,6 +10,7 @@ data Coercion
 data LeftOrRight
 data UnivCoProvenance
 data TCvSubst
+data TyLit
 
 mkForAllTys :: [TyBinder] -> Type -> Type
 
