@@ -1539,7 +1539,12 @@ addModFinalizersWithLclEnv mod_finalizers
   = do lcl_env <- getLclEnv
        th_modfinalizers_var <- fmap tcg_th_modfinalizers getGblEnv
        updTcRef th_modfinalizers_var $ \fins ->
-         setLclEnv lcl_env (runRemoteModFinalizers mod_finalizers)
+         -- We extend the current local type environment with the local type
+         -- environment at the end of type-checking which contains all the
+         -- top-level Ids.
+         updLclEnv (\env -> lcl_env
+                      { tcl_env = plusNameEnv (tcl_env env) (tcl_env lcl_env) })
+                   (runRemoteModFinalizers mod_finalizers)
          : fins
 #else
 addModFinalizersWithLclEnv :: ThModFinalizers -> TcM ()
