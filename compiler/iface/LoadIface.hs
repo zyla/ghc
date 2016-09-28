@@ -141,8 +141,10 @@ importDecl name
         -- Now look it up again; this time we should find it
         { eps <- getEps
         ; case lookupTypeEnv (eps_PTE eps) name of
-            Just thing -> return (Succeeded thing)
-            Nothing    -> return $ Failed (ifPprDebug (found_things_msg eps $$ empty) $$ not_found_msg)
+            Just thing -> return $ Succeeded thing
+            Nothing    -> let doc = ifPprDebug (found_things_msg eps $$ empty)
+                                    $$ not_found_msg
+                          in return $ Failed doc
     }}}
   where
     nd_doc = text "Need decl for" <+> ppr name

@@ -369,7 +369,8 @@ ifaceConDeclFields x = case x of
     IfDataTyCon cons is_over labels -> map (help cons  is_over) labels
     IfNewTyCon  con  is_over labels -> map (help [con] is_over) labels
   where
-    help (dc:_) is_over lbl = mkFieldLabelOccs lbl (occName $ ifConName dc) is_over
+    help (dc:_) is_over lbl =
+        mkFieldLabelOccs lbl (occName $ ifConName dc) is_over
     help [] _ _ = error "ifaceConDeclFields: data type has no constructors!"
 
 ifaceDeclImplicitBndrs :: IfaceDecl -> [OccName]
