@@ -1,8 +1,11 @@
 {-# LANGUAGE AllowAmbiguousTypes
-           , NoImplicitPrelude
-           , MultiParamTypeClasses
-           , KindSignatures
            , DataKinds
+           , FlexibleInstances
+           , KindSignatures
+           , MultiParamTypeClasses
+           , NoImplicitPrelude
+           , ScopedTypeVariables
+           , TypeApplications
   #-}
 
 -----------------------------------------------------------------------------
@@ -42,6 +45,10 @@ module GHC.OverloadedLabels
        ) where
 
 import GHC.Base ( Symbol )
+import qualified GHC.Records
 
 class IsLabel (x :: Symbol) a where
   fromLabel :: a
+
+instance GHC.Records.HasField x r a => IsLabel x (r -> a) where
+  fromLabel = GHC.Records.fromLabel @x
