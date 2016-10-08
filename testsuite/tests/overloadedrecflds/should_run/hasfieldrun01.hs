@@ -1,7 +1,10 @@
-{-# LANGUAGE DataKinds, FlexibleInstances, MagicHash,
-             MultiParamTypeClasses, TypeFamilies #-}
+{-# LANGUAGE DataKinds
+           , FlexibleInstances
+           , MultiParamTypeClasses
+           , TypeFamilies
+           , TypeApplications
+  #-}
 
-import GHC.Prim (Proxy#, proxy#)
 import GHC.Records (HasField(..))
 
 type family B where B = Bool
@@ -22,10 +25,10 @@ v = MkVInt (42, 'x', True, False)
 
 -- A virtual foo field for U
 instance HasField "foo" (U a b) [Char] where
-  getField _ _ = "virtual"
+  fromLabel _ = "virtual"
 
-main = do print (getField (proxy# :: Proxy# "foo") t)
-          print (getField (proxy# :: Proxy# "bar") t)
-          print (getField (proxy# :: Proxy# "baf") u)
-          print (getField (proxy# :: Proxy# "foo") u)
-          print (getField (proxy# :: Proxy# "baz") v)
+main = do print (fromLabel @"foo" t)
+          print (fromLabel @"bar" t)
+          print (fromLabel @"baf" u)
+          print (fromLabel @"foo" u)
+          print (fromLabel @"baz" v)

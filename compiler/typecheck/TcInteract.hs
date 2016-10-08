@@ -2154,19 +2154,19 @@ by emitting a new wanted ([Int] ~# b) and building a HasField dictionary
 out of the selector function `foo`.  The HasField class is defined (in
 GHC.Records) thus:
 
-    class HasField (x :: Symbol) r a | x r -> a where
-      getField :: Proxy# x -> r -> a
+    class HasField (x :: k) r a | x r -> a where
+      fromLabel :: r -> a
 
 Since this is a one-method class, it is represented as a newtype.
 Hence we can solve `HasField "foo" (T Int) b` by taking an expression
-of type `Proxy# "foo" -> T Int -> b` and coercing it appropriately.
+of type `T Int -> b` and coercing it appropriately.
 Note that
 
     foo :: forall y . T y -> [y]
 
 so the expression we construct is
 
-    \ (_ :: Proxy# "foo") -> foo @Int |> co
+    \ foo @Int |> co
 
 where
 
@@ -2184,7 +2184,7 @@ solver behaviour.
 
 -- See Note [HasField instances]
 matchHasField :: DynFlags -> Class -> [Type] -> CtLoc -> TcS LookupInstResult
-matchHasField dflags clas tys@[x_ty, r_ty, a_ty] loc
+matchHasField dflags clas tys@[_k_ty, x_ty, r_ty, a_ty] loc
   | Just x <- isStrLitTy x_ty
   , Just (tycon, r_args) <- tcSplitTyConApp_maybe r_ty
   = do { fam_inst_envs <- getFamInstEnvs
@@ -2233,10 +2233,8 @@ matchHasField dflags clas tys@[x_ty, r_ty, a_ty] loc
        ; addUsedGRE True gre
 
          -- Build evidence term as described in Note [HasField instances]
-       ; let mk_ev [ev] = EvExpr lam `EvCast` mkTcSymCo ax
+       ; let mk_ev [ev] = EvExpr body `EvCast` mkTcSymCo ax
                where
-                lam      = mkHsLamConst proxy_ty (mkFunTy r_ty a_ty) body
-                proxy_ty = mkProxyPrimTy typeSymbolKind x_ty
                 co       = mkTcFunCo Nominal (mkTcReflCo Nominal r_ty)
                                              (evTermCoercion ev)
                 body     = mkHsWrap (mkWpCastN co <.> mkWpTyApps rep_tc_args)
@@ -2252,21 +2250,3 @@ matchHasField dflags clas tys@[x_ty, r_ty, a_ty] loc
                          })
        } } } }
 matchHasField dflags clas tys loc = matchInstEnv dflags clas tys loc
-
--- | Make a constant lambda-expression
---
--- > \ (_ :: arg_ty) -> (body :: res_ty)
-mkHsLamConst :: Type -> Type -> HsExpr Id -> HsExpr Id
-mkHsLamConst arg_ty res_ty body = HsLam mg
-  where
-    m  = Match { m_ctxt   = LambdaExpr
-               , m_pats   = [noLoc (WildPat arg_ty)]
-               , m_type   = Nothing
-               , m_grhss  = GRHSs { grhssGRHSs = [noLoc (GRHS [] (noLoc body))]
-                                  , grhssLocalBinds = noLoc emptyLocalBinds }
-               }
-    mg = MG { mg_alts = noLoc [noLoc m]
-            , mg_arg_tys = [arg_ty]
-            , mg_res_ty  = res_ty
-            , mg_origin  = Generated
-            }

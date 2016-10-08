@@ -1,9 +1,13 @@
-{-# LANGUAGE NoImplicitPrelude
-           , MultiParamTypeClasses
-           , MagicHash
-           , KindSignatures
+{-# LANGUAGE AllowAmbiguousTypes
            , DataKinds
+           , ExplicitForAll
            , FunctionalDependencies
+           , KindSignatures
+           , MultiParamTypeClasses
+           , NoImplicitPrelude
+           , PolyKinds
+           , ScopedTypeVariables
+           , TypeApplications
   #-}
 
 -----------------------------------------------------------------------------
@@ -24,7 +28,6 @@ module GHC.Records
        ) where
 
 import GHC.Base ( Symbol )
-import GHC.Exts ( Proxy# )
 
-class HasField (x :: Symbol) r a | x r -> a where
-  getField :: Proxy# x -> r -> a
+class HasField (x :: k) r a | x r -> a where
+  fromLabel :: r -> a
