@@ -19,3 +19,4 @@ test('overloadedlabelsrun04',
      ['overloadedlabelsrun04', config.ghc_th_way_flags])
 test('hasfieldrun01', normal, compile_and_run, [''])
 test('hasfieldrun02', normal, compile_and_run, [''])
+test('T12243', normal, compile_and_run, [''])

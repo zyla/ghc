@@ -33,6 +33,7 @@ import TcSimplify       ( simplifyInfer, InferMode(..) )
 import FamInst          ( tcGetFamInstEnvs, tcLookupDataFamInst )
 import FamInstEnv       ( FamInstEnvs )
 import RnEnv            ( addUsedGRE, addNameClashErrRn
+                        , lookupOccRn
                         , unknownSubordinateErr )
 import TcEnv
 import TcArrows
@@ -217,16 +218,21 @@ tcExpr e@(HsIPVar x) res_ty
                           unwrapIP $ mkClassPred ipClass [x,ty]
   origin = IPOccOrigin x
 
-tcExpr e@(HsOverLabel l) res_ty  -- See Note [Type-checking overloaded labels]
+tcExpr e@(HsOverLabel mb_fromLabel l) res_ty  -- See Note [Type-checking overloaded labels]
   = do { dflags <- getDynFlags
-       ; if xopt LangExt.OverloadedLabels dflags
-              then do { isLabelClass <- tcLookupClass isLabelClassName
+       ; loc <- getSrcSpanM
+       ; case mb_fromLabel of
+           Just fromLabel -> tcExpr (applyFromLabel loc fromLabel) res_ty
+           Nothing
+             | xopt LangExt.OverloadedLabels dflags
+                -> do { isLabelClass <- tcLookupClass isLabelClassName
                       ; alpha <- newFlexiTyVarTy liftedTypeKind
                       ; let pred = mkClassPred isLabelClass [lbl, alpha]
                       ; loc <- getSrcSpanM
                       ; var <- emitWantedEvVar origin pred
                       ; tcWrapResult e (fromDict pred (HsVar (L loc var))) alpha res_ty }
-              else do { -- must be OverloadedRecordFields alone
+             | otherwise
+                -> do { -- must be OverloadedRecordFields alone
                         hasFieldClass <- tcLookupClass hasFieldClassName
                       ; alpha <- newFlexiTyVarTy liftedTypeKind
                       ; beta  <- newFlexiTyVarTy liftedTypeKind
@@ -241,6 +247,10 @@ tcExpr e@(HsOverLabel l) res_ty  -- See Note [Type-checking overloaded labels]
   fromDict pred = HsWrap $ mkWpCastR $ unwrapIP pred
   origin = OverLabelOrigin l
   lbl = mkStrLitTy l
+
+  applyFromLabel loc fromLabel =
+    L loc (HsVar (L loc fromLabel)) `HsAppType`
+      mkEmptyWildCardBndrs (L loc (HsTyLit (HsStrTy (unpackFS l) l)))
 
 tcExpr (HsLam match) res_ty
   = do  { (match', wrap) <- tcMatchLambda herald match_ctxt match res_ty
@@ -285,16 +295,24 @@ Recall that we have
 
 We translate `#foo` to `fromLabel @"foo"`, where we use
 
- * `GHC.OverloadedLabels.fromLabel` if `OverloadedLabels` is enabled
- * `GHC.Records.fromLabel` otherwise (`OverloadedRecordFields` must be enabled)
+ * the in-scope `fromLabel` if `RebindableSyntax` is enabled; or if not
+ * `GHC.OverloadedLabels.fromLabel` if `OverloadedLabels` is enabled; or if not
+ * `GHC.Records.fromLabel` otherwise (`OverloadedRecordFields` will be enabled)
 
-In the first case, when we see an overloaded label like `#foo`, we
-generate a fresh variable `alpha` for the type and emit an
+In the `RebindableSyntax` case, the renamer will have filled in the
+first field of `HsOverLabel` with the `fromLabel` function to use, and
+we simply apply it to the appropriate visible type argument.
+
+In the `OverloadedLabels` case, when we see an overloaded label like
+`#foo`, we generate a fresh variable `alpha` for the type and emit an
 `IsLabel "foo" alpha` constraint.  Because the `IsLabel` class has a
 single method, it is represented by a newtype, so we can coerce
 `IsLabel "foo" alpha` to `alpha` (just like for implicit parameters).
-The second case is similar, but we generate two fresh variables and
-emit a `HasField` constraint.
+
+The `OverloadedRecordFields` case is similar to the `OverloadedLabels`
+case, but we generate two fresh variables and emit a `HasField`
+constraint.
+
 -}
 
 
