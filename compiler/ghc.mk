@@ -177,11 +177,6 @@ compiler/stage1/$(PLATFORM_H) : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo "#define BUILD_OS \"$(BuildOS_CPP)\""               >> $@
 	@echo "#define HOST_OS \"$(HostOS_CPP)\""                 >> $@
 	@echo "#define TARGET_OS \"$(TargetOS_CPP)\""             >> $@
-ifeq "$(TargetOS_CPP)" "irix"
-	@echo "#ifndef $(IRIX_MAJOR)_TARGET_OS"                   >> $@
-	@echo "#define $(IRIX_MAJOR)_TARGET_OS 1"                 >> $@
-	@echo "#endif"                                            >> $@
-endif
 	@echo                                                     >> $@
 	@echo "#define $(BuildVendor_CPP)_BUILD_VENDOR 1"         >> $@
 	@echo "#define $(HostVendor_CPP)_HOST_VENDOR 1"           >> $@
@@ -223,11 +218,6 @@ compiler/stage2/$(PLATFORM_H) : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo "#define BUILD_OS \"$(HostOS_CPP)\""                >> $@
 	@echo "#define HOST_OS \"$(TargetOS_CPP)\""               >> $@
 	@echo "#define TARGET_OS \"$(TargetOS_CPP)\""             >> $@
-ifeq "$(TargetOS_CPP)" "irix"
-	@echo "#ifndef $(IRIX_MAJOR)_TARGET_OS"                   >> $@
-	@echo "#define $(IRIX_MAJOR)_TARGET_OS 1"                 >> $@
-	@echo "#endif"                                            >> $@
-endif
 	@echo                                                     >> $@
 	@echo "#define $(HostVendor_CPP)_BUILD_VENDOR 1"          >> $@
 	@echo "#define $(TargetVendor_CPP)_HOST_VENDOR 1"         >> $@
@@ -268,6 +258,11 @@ PRIMOP_BITS_STAGE3 = $(addprefix compiler/stage3/build/,$(PRIMOP_BITS_NAMES))
 
 compiler_CPP_OPTS += $(addprefix -I,$(GHC_INCLUDE_DIRS))
 compiler_CPP_OPTS += ${GhcCppOpts}
+
+# We add these paths to the Haskell compiler's #include search path list since
+# we must avoid #including files by paths relative to the source file as Hadrian
+# moves the build artifacts out of the source tree. See #8040.
+compiler_HC_OPTS += $(addprefix -I,$(GHC_INCLUDE_DIRS))
 
 define preprocessCompilerFiles
 # $0 = stage
@@ -370,33 +365,14 @@ endif
 # at it, because that takes too long and doesn't buy much, but we do want
 # to inline certain key external functions, so we instruct GHC not to
 # throw away inlinings as it would normally do in -O0 mode.
-compiler/stage1/build/Parser_HC_OPTS += -O0 -fno-ignore-interface-pragmas
-# If we're bootstrapping the compiler during stage2, or we're being
-# built by a GHC whose version is > 7.8, we need -fcmm-sink to be
+# Since GHC version 7.8, we need -fcmm-sink to be
 # passed to the compiler. This is required on x86 to avoid the
 # register allocator running out of stack slots when compiling this
 # module with -fPIC -dynamic.
 # See #8182 for all the details
-ifeq "$(CMM_SINK_BOOTSTRAP_IS_NEEDED)" "YES"
-compiler/stage1/build/Parser_HC_OPTS += -fcmm-sink
-endif
-# We also pass -fcmm-sink to every stage != 1
+compiler/stage1/build/Parser_HC_OPTS += -O0 -fno-ignore-interface-pragmas -fcmm-sink
 compiler/stage2/build/Parser_HC_OPTS += -O0 -fno-ignore-interface-pragmas -fcmm-sink
 compiler/stage3/build/Parser_HC_OPTS += -O0 -fno-ignore-interface-pragmas -fcmm-sink
-
-# On IBM AIX we need to wrokaround XCOFF's TOC limitations (see also
-# comment in `aclocal.m4` about `-mminimal-toc` for more details)
-# However, Parser.hc defines so many symbols that `-mminimal-toc`
-# generates instructions with offsets exceeding the PPC offset
-# addressing limits.  So we need to counter-act this via `-mfull-toc`
-# which disables a preceding `-mminimal-toc` again.
-ifeq "$(HostOS_CPP)" "aix"
-compiler/stage1/build/Parser_HC_OPTS += -optc-mfull-toc
-endif
-ifeq "$(TargetOS_CPP)" "aix"
-compiler/stage2/build/Parser_HC_OPTS += -optc-mfull-toc
-compiler/stage3/build/Parser_HC_OPTS += -optc-mfull-toc
-endif
 
 ifeq "$(GhcProfiled)" "YES"
 # If we're profiling GHC then we want SCCs.  However, adding -auto-all
@@ -437,42 +413,6 @@ compiler/stage3/package-data.mk : compiler/ghc.mk
 
 compiler_PACKAGE = ghc
 
-# Note [fiddle-stage1-version]
-# The version of the GHC package changes every day, since the
-# patchlevel is the current date.  We don't want to force
-# recompilation of the entire compiler when this happens, so for stage
-# 1 we omit the patchlevel from the version number.  For stage 2 we
-# have to include the patchlevel since this is the package we install,
-# however.
-#
-# Note: we also have to tweak the version number of the package itself
-# when it gets registered; see Note [munge-stage1-package-config]
-# below.
-# The ProjectPatchLevel > 20000000 iff it's a date. If it's e.g. 6.12.1
-# then we don't want to remove it
-ifneq "$(CLEANING)" "YES"
-ifeq "$(shell [ $(ProjectPatchLevel) -gt 20000000 ] && echo YES)" "YES"
-compiler_stage1_VERSION_MUNGED = YES
-endif
-endif
-
-ifeq "$(compiler_stage1_VERSION_MUNGED)" "YES"
-compiler_stage1_MUNGED_VERSION = $(subst .$(ProjectPatchLevel),,$(ProjectVersion))
-define compiler_PACKAGE_MAGIC
-compiler_stage1_VERSION = $(compiler_stage1_MUNGED_VERSION)
-compiler_stage1_COMPONENT_ID = $(subst .$(ProjectPatchLevel),,$(compiler_stage1_COMPONENT_ID))
-endef
-
-# NB: the COMPONENT_ID munging has no effect for new-style unit ids
-# (which indeed, have nothing version like in them, but are important for
-# old-style unit ids which do.)  The subst operation is idempotent, so
-# as long as we do it at least once we should be good.
-
-# Don't register the non-munged package
-compiler_stage1_REGISTER_PACKAGE = NO
-
-endif
-
 # Don't do splitting for the GHC package, it takes too long and
 # there's not much benefit.
 compiler_stage1_SplitObjs = NO
@@ -482,9 +422,10 @@ compiler_stage1_SplitSections = NO
 compiler_stage2_SplitSections = NO
 compiler_stage3_SplitSections = NO
 
-# There are too many symbols in the ghc package for a Windows DLL.
-# We therefore need to split some of the modules off into a separate
-# DLL. This clump are the modules reachable from DynFlags:
+# There are too many symbols in the ghc package for a Windows DLL
+# (due to a limitation of bfd ld, see Trac #5987). We therefore need to split
+# some of the modules off into a separate DLL. This clump are the modules
+# reachable from DynFlags:
 compiler_stage2_dll0_START_MODULE = DynFlags
 compiler_stage2_dll0_MODULES = \
 	Annotations \
@@ -494,7 +435,6 @@ compiler_stage2_dll0_MODULES = \
 	BasicTypes \
 	Binary \
 	BooleanFormula \
-	BreakArray \
 	BufWrite \
 	Class \
 	CmdLineParser \
@@ -582,6 +522,7 @@ compiler_stage2_dll0_MODULES = \
 	PrelRules \
 	Pretty \
 	PrimOp \
+	RepType \
 	RdrName \
 	Rules \
 	SrcLoc \
@@ -706,23 +647,6 @@ compiler/prelude/PrimOp_HC_OPTS  += -fforce-recomp
 
 ifeq "$(DYNAMIC_GHC_PROGRAMS)" "YES"
 compiler/utils/Util_HC_OPTS += -DDYNAMIC_GHC_PROGRAMS
-endif
-
-# Note [munge-stage1-package-config]
-# Strip the date/patchlevel from the version of stage1.  See Note
-# [fiddle-stage1-version] above.
-# NB: The sed expression for hs-libraries is a bit weird to be POSIX-compliant.
-ifeq "$(compiler_stage1_VERSION_MUNGED)" "YES"
-compiler/stage1/inplace-pkg-config-munged: compiler/stage1/inplace-pkg-config
-	sed -e 's/^\(version: .*\)\.$(ProjectPatchLevel)$$/\1/' \
-	    -e 's/^\(id: .*\)\.$(ProjectPatchLevel)$$/\1/' \
-	    -e 's/^\(hs-libraries: HSghc-.*\)\.$(ProjectPatchLevel)\(-[A-Za-z0-9][A-Za-z0-9]*\)*$$/\1\2/' \
-	  < $< > $@
-	"$(compiler_stage1_GHC_PKG)" update --force $(compiler_stage1_GHC_PKG_OPTS) $@
-
-# We need to make sure the munged config is in the database before we
-# try to configure ghc-bin
-ghc/stage1/package-data.mk : compiler/stage1/inplace-pkg-config-munged
 endif
 
 endif

@@ -17,7 +17,7 @@ module StgCmmLayout (
 
         slowCall, directCall,
 
-        mkVirtHeapOffsets, mkVirtConstrOffsets, getHpRelOffset,
+        mkVirtHeapOffsets, mkVirtConstrOffsets, mkVirtConstrSizes, getHpRelOffset,
 
         ArgRep(..), toArgRep, argRepSizeW -- re-exported from StgCmmArgRep
   ) where
@@ -25,9 +25,7 @@ module StgCmmLayout (
 
 #include "HsVersions.h"
 
-#if __GLASGOW_HASKELL__ >= 709
 import Prelude hiding ((<*>))
-#endif
 
 import StgCmmClosure
 import StgCmmEnv
@@ -76,7 +74,7 @@ emitReturn results
        ; sequel    <- getSequel
        ; updfr_off <- getUpdFrameOff
        ; case sequel of
-           Return _ ->
+           Return ->
              do { adjustHpBackwards
                 ; let e = CmmLoad (CmmStackSlot Old updfr_off) (gcWord dflags)
                 ; emit (mkReturn dflags (entryCode dflags e) results updfr_off)
@@ -111,7 +109,7 @@ emitCallWithExtraStack (callConv, retConv) fun args extra_stack
         ; sequel <- getSequel
         ; updfr_off <- getUpdFrameOff
         ; case sequel of
-            Return _ -> do
+            Return -> do
               emit $ mkJumpExtra dflags callConv fun args updfr_off extra_stack
               return AssignedDirectly
             AssignTo res_regs _ -> do
@@ -390,8 +388,8 @@ getHpRelOffset virtual_offset
 
 mkVirtHeapOffsets
   :: DynFlags
-  -> Bool                -- True <=> is a thunk
-  -> [(PrimRep,a)]        -- Things to make offsets for
+  -> Bool                     -- True <=> is a thunk
+  -> [NonVoid (PrimRep,a)]    -- Things to make offsets for
   -> (WordOff,                -- _Total_ number of words allocated
       WordOff,                -- Number of words allocated for *pointers*
       [(NonVoid a, ByteOff)])
@@ -400,14 +398,12 @@ mkVirtHeapOffsets
 -- increasing offset; BUT THIS MAY BE DIFFERENT TO INPUT ORDER
 -- First in list gets lowest offset, which is initial offset + 1.
 --
--- Void arguments are removed, so output list may be shorter than
--- input list
---
 -- mkVirtHeapOffsets always returns boxed things with smaller offsets
 -- than the unboxed things
 
 mkVirtHeapOffsets dflags is_thunk things
-  = ( bytesToWordsRoundUp dflags tot_bytes
+  = ASSERT(not (any (isVoidRep . fst . fromNonVoid) things))
+    ( bytesToWordsRoundUp dflags tot_bytes
     , bytesToWordsRoundUp dflags bytes_of_ptrs
     , ptrs_w_offsets ++ non_ptrs_w_offsets
     )
@@ -416,24 +412,34 @@ mkVirtHeapOffsets dflags is_thunk things
               | otherwise  = fixedHdrSizeW dflags
     hdr_bytes = wordsToBytes dflags hdr_words
 
-    non_void_things    = filterOut (isVoidRep . fst)  things
-    (ptrs, non_ptrs)   = partition (isGcPtrRep . fst) non_void_things
+    (ptrs, non_ptrs) = partition (isGcPtrRep . fst . fromNonVoid) things
 
     (bytes_of_ptrs, ptrs_w_offsets) =
        mapAccumL computeOffset 0 ptrs
     (tot_bytes, non_ptrs_w_offsets) =
        mapAccumL computeOffset bytes_of_ptrs non_ptrs
 
-    computeOffset bytes_so_far (rep, thing)
+    computeOffset bytes_so_far nv_thing
       = (bytes_so_far + wordsToBytes dflags (argRepSizeW dflags (toArgRep rep)),
          (NonVoid thing, hdr_bytes + bytes_so_far))
+           where (rep,thing) = fromNonVoid nv_thing
 
 -- | Just like mkVirtHeapOffsets, but for constructors
 mkVirtConstrOffsets
-  :: DynFlags -> [(PrimRep,a)]
+  :: DynFlags -> [NonVoid (PrimRep, a)]
   -> (WordOff, WordOff, [(NonVoid a, ByteOff)])
 mkVirtConstrOffsets dflags = mkVirtHeapOffsets dflags False
 
+-- | Just like mkVirtConstrOffsets, but used when we don't have the actual
+-- arguments. Useful when e.g. generating info tables; we just need to know
+-- sizes of pointer and non-pointer fields.
+mkVirtConstrSizes :: DynFlags -> [NonVoid PrimRep] -> (WordOff, WordOff)
+mkVirtConstrSizes dflags field_reps
+  = (tot_wds, ptr_wds)
+  where
+    (tot_wds, ptr_wds, _) =
+       mkVirtConstrOffsets dflags
+         (map (\nv_rep -> NonVoid (fromNonVoid nv_rep, ())) field_reps)
 
 -------------------------------------------------------------------------
 --

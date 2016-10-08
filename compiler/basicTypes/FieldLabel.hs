@@ -56,7 +56,6 @@ Of course, datatypes with no constructors cannot have any fields.
 
 -}
 
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DeriveFoldable #-}
@@ -74,22 +73,18 @@ import OccName
 import Name
 
 import FastString
+import FastStringEnv
 import Outputable
 import Binary
 
 import Data.Data
-
-#if __GLASGOW_HASKELL__ < 709
-import Data.Foldable ( Foldable )
-import Data.Traversable ( Traversable )
-#endif
 
 -- | Field labels are just represented as strings;
 -- they are not necessarily unique (even within a module)
 type FieldLabelString = FastString
 
 -- | A map from labels to all the auxiliary information
-type FieldLabelEnv = FastStringEnv FieldLabel
+type FieldLabelEnv = DFastStringEnv FieldLabel
 
 
 type FieldLabel = FieldLbl Name
@@ -101,7 +96,7 @@ data FieldLbl a = FieldLabel {
                                           --   in the defining module for this datatype?
       flSelector     :: a                 -- ^ Record selector function
     }
-  deriving (Eq, Functor, Foldable, Traversable, Typeable)
+  deriving (Eq, Functor, Foldable, Traversable)
 deriving instance Data a => Data (FieldLbl a)
 
 instance Outputable a => Outputable (FieldLbl a) where
@@ -125,7 +120,8 @@ instance Binary a => Binary (FieldLbl a) where
 -- See Note [Why selector names include data constructors].
 mkFieldLabelOccs :: FieldLabelString -> OccName -> Bool -> FieldLbl OccName
 mkFieldLabelOccs lbl dc is_overloaded
-  = FieldLabel lbl is_overloaded sel_occ
+  = FieldLabel { flLabel = lbl, flIsOverloaded = is_overloaded
+               , flSelector = sel_occ }
   where
     str     = ":" ++ unpackFS lbl ++ ":" ++ occNameString dc
     sel_occ | is_overloaded = mkRecFldSelOcc str

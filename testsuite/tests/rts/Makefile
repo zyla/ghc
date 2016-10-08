@@ -6,14 +6,14 @@ outofmem-prep::
 	'$(TEST_HC)' $(TEST_HC_OPTS) -v0 --make -fforce-recomp outofmem.hs -o outofmem
 
 outofmem::
-	@$(MAKE) outofmem-prep
+	$(MAKE) -s --no-print-directory outofmem-prep
 	@ulimit -m 10000000 2>/dev/null; ./outofmem || echo "exit($$?)"
 
 outofmem2-prep::
 	'$(TEST_HC)' $(TEST_HC_OPTS) -v0 -rtsopts --make -fforce-recomp outofmem2.hs -o outofmem2
 
 outofmem2::
-	@$(MAKE) outofmem2-prep
+	$(MAKE) -s --no-print-directory outofmem2-prep
 	@ulimit -m 1000000 2>/dev/null; ./outofmem2 +RTS -M5m -RTS || echo "exit($$?)"
 
 T2615-prep:
@@ -45,6 +45,15 @@ T5423:
 	"$(TEST_HC)" $(TEST_HC_OPTS) -v0 T5423.o T5423_cmm.o -o T5423$(exeext)
 	./T5423
 
+.PHONY: T9405
+T9405:
+	@'$(TEST_HC)' $(TEST_HC_OPTS) -ticky -rtsopts T9405.hs; \
+    ./T9405 +RTS -rT9405.ticky & \
+    sleep 0.2; \
+    kill -2 $$!; \
+    wait $$!; \
+    [ -s T9405.ticky ] && echo Ticky-Ticky
+
 # Naming convention: 'T5423_' obj-way '_' obj-src
 # obj-way ::= v | dyn
 # obj-src ::= gcc // using __attribute__(constructor)
@@ -53,14 +62,14 @@ T5423:
 
 define run_T5435_v
 $(RM) T5435_load_v_$(1) T5435_v_$(1)$(exeext)
-'$(TEST_HC)' $(TEST_HC_OPTS) -optc-D$(HostOS)_HOST_OS=1 -v0 -c T5435_$(1).c -o T5435_load_v_$(1).o
+'$(TEST_HC)' $(TEST_HC_OPTS) -optc-D$(HostOS)_HOST_OS -v0 -c T5435_$(1).c -o T5435_load_v_$(1).o
 '$(TEST_HC)' $(TEST_HC_OPTS) -v0 T5435.hs -osuf main_v_$(1)_o -o T5435_v_$(1)$(exeext)
 ./T5435_v_$(1) v ./T5435_load_v_$(1).o
 endef
 
 define run_T5435_dyn
 $(RM) T5435_load_dyn_$(1) T5435_dyn_$(1)$(exeext)
-'$(TEST_HC)' $(filter-out -rtsopts, $(TEST_HC_OPTS)) -optc-D$(HostOS)_HOST_OS=1 -v0 -fPIC -shared -c T5435_$(1).c -osuf dyn_$(1)_o -o T5435_load_dyn_$(1)$(dllext)
+'$(TEST_HC)' $(filter-out -rtsopts, $(TEST_HC_OPTS)) -optc-D$(HostOS)_HOST_OS -v0 -fPIC -shared -c T5435_$(1).c -osuf dyn_$(1)_o -o T5435_load_dyn_$(1)$(dllext)
 '$(TEST_HC)' $(TEST_HC_OPTS) -v0 T5435.hs -osuf main_dyn_$(1)_o -o T5435_dyn_$(1)$(exeext)
 ./T5435_dyn_$(1) dyn ./T5435_load_dyn_$(1)$(dllext)
 endef
@@ -101,6 +110,12 @@ T7037:
 
 T7040_ghci_setup :
 	'$(TEST_HC)' $(TEST_HC_OPTS) $(ghciWayFlags) -c T7040_ghci_c.c
+
+.PHONY: T10296a
+T10296a:
+	$(RM) T10296a_c.o T10296a.o T10296a.hi T10296a_stub.h
+	'$(TEST_HC)' $(TEST_HC_OPTS) -v0 -threaded T10296a.hs T10296a_c.c -o T10296a
+	./T10296a +RTS -N2
 
 .PHONY: linker_unload
 linker_unload:
@@ -147,3 +162,13 @@ linker_error3:
 	"$(TEST_HC)" -c linker_error3.c -o linker_error3_o.o
 	"$(TEST_HC)" linker_error3.o -o linker_error3 -no-hs-main -optc-g -debug -threaded
 	./linker_error3 linker_error3_o.o
+
+ .PHONY: T11788
+T11788:
+	"$(TEST_HC)" -c T11788.c -o T11788_obj.o
+	"$(AR)" rsT libT11788.a T11788_obj.o 2> /dev/null
+	echo main | "$(TEST_HC)" $(filter-out -rtsopts, $(TEST_HC_OPTS_INTERACTIVE)) T11788.hs -lT11788 -L"$(PWD)"
+
+ .PHONY: T12497
+T12497:
+	echo main | "$(TEST_HC)" $(filter-out -rtsopts, $(TEST_HC_OPTS_INTERACTIVE)) T12497.hs

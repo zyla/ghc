@@ -9,24 +9,32 @@ This module is an extension of @HsSyn@ syntax, for use in the type
 checker.
 -}
 
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP, TupleSections #-}
 
 module TcHsSyn (
-        mkHsConApp, mkHsDictLet, mkHsApp,
+        mkHsDictLet, mkHsApp,
         hsLitType, hsLPatType, hsPatType,
-        mkHsAppTy, mkSimpleHsAlt,
+        mkHsAppTy, mkHsCaseAlt,
         nlHsIntLit,
         shortCutLit, hsOverLitName,
         conLikeResTy,
 
-        -- re-exported from TcMonad
+        -- * re-exported from TcMonad
         TcId, TcIdSet,
 
+        -- * Zonking
+        -- | For a description of "zonking", see Note [What is zonking?]
+        -- in TcMType
         zonkTopDecls, zonkTopExpr, zonkTopLExpr,
         zonkTopBndrs, zonkTyBndrsX,
+        zonkTyConBinders,
         emptyZonkEnv, mkEmptyZonkEnv,
         zonkTcTypeToType, zonkTcTypeToTypes, zonkTyVarOcc,
-        zonkCoToCo
+        zonkCoToCo,
+        zonkEvBinds,
+
+        -- * Validity checking
+        checkForRepresentationPolymorphism
   ) where
 
 #include "HsVersions.h"
@@ -41,10 +49,13 @@ import TcEvidence
 import TysPrim
 import TysWiredIn
 import Type
+import TyCon
 import Coercion
 import ConLike
 import DataCon
+import HscTypes
 import Name
+import NameEnv
 import Var
 import VarSet
 import VarEnv
@@ -56,13 +67,11 @@ import SrcLoc
 import Bag
 import Outputable
 import Util
-import qualified GHC.LanguageExtensions as LangExt
+import UniqFM
 
-#if __GLASGOW_HASKELL__ < 709
-import Data.Traversable ( traverse )
-#endif
 import Control.Monad
 import Data.List  ( partition )
+import Control.Arrow ( second )
 
 {-
 ************************************************************************
@@ -91,11 +100,12 @@ hsPatType (ListPat _ ty Nothing)      = mkListTy ty
 hsPatType (ListPat _ _ (Just (ty,_))) = ty
 hsPatType (PArrPat _ ty)              = mkPArrTy ty
 hsPatType (TuplePat _ bx tys)         = mkTupleTy bx tys
+hsPatType (SumPat _ _ _ tys)          = mkSumTy tys
 hsPatType (ConPatOut { pat_con = L _ con, pat_arg_tys = tys })
                                       = conLikeResTy con tys
 hsPatType (SigPatOut _ ty)            = ty
-hsPatType (NPat (L _ lit) _ _)        = overLitType lit
-hsPatType (NPlusKPat id _ _ _)        = idType (unLoc id)
+hsPatType (NPat _ _ _ ty)             = ty
+hsPatType (NPlusKPat _ _ _ _ _ ty)    = ty
 hsPatType (CoPat _ _ ty)              = ty
 hsPatType p                           = pprPanic "hsPatType" (ppr p)
 
@@ -174,6 +184,7 @@ It's all pretty boring stuff, because HsSyn is such a large type, and
 the environment manipulation is tiresome.
 -}
 
+-- Confused by zonking? See Note [What is zonking?] in TcMType.
 type UnboundTyVarZonker = TcTyVar -> TcM Type
         -- How to zonk an unbound type variable
         -- Note [Zonking the LHS of a RULE]
@@ -181,14 +192,20 @@ type UnboundTyVarZonker = TcTyVar -> TcM Type
 -- | A ZonkEnv carries around several bits.
 -- The UnboundTyVarZonker just zaps unbouned meta-tyvars to Any (as
 -- defined in zonkTypeZapping), except on the LHS of rules. See
--- Note [Zonking the LHS of a RULE]. The (TyCoVarEnv TyVar) and is just
--- an optimisation: when binding a tyvar or covar, we zonk the kind right away
--- and add a mapping to the env. This prevents re-zonking the kind at
--- every occurrence. But this is *just* an optimisation.
--- The final (IdEnv Var) optimises zonking for
--- Ids. It is knot-tied. We must be careful never to put coercion variables
--- (which are Ids, after all) in the knot-tied env, because coercions can
--- appear in types, and we sometimes inspect a zonked type in this module.
+-- Note [Zonking the LHS of a RULE].
+--
+-- The (TyCoVarEnv TyVar) and is just an optimisation: when binding a
+-- tyvar or covar, we zonk the kind right away and add a mapping to
+-- the env. This prevents re-zonking the kind at every occurrence. But
+-- this is *just* an optimisation.
+--
+-- The final (IdEnv Var) optimises zonking for Ids. It is
+-- knot-tied. We must be careful never to put coercion variables
+-- (which are Ids, after all) in the knot-tied env, because coercions
+-- can appear in types, and we sometimes inspect a zonked type in this
+-- module.
+--
+-- Confused by zonking? See Note [What is zonking?] in TcMType.
 data ZonkEnv
   = ZonkEnv
       UnboundTyVarZonker
@@ -201,7 +218,7 @@ data ZonkEnv
         -- Is only consulted lazily; hence knot-tying
 
 instance Outputable ZonkEnv where
-  ppr (ZonkEnv _ _ty_env var_env) = vcat (map ppr (varEnvElts var_env))
+  ppr (ZonkEnv _ _ty_env var_env) = pprUFM var_env (vcat . map ppr)
 
 
 -- The EvBinds have to already be zonked, but that's usually the case.
@@ -242,8 +259,11 @@ setZonkType :: ZonkEnv -> UnboundTyVarZonker -> ZonkEnv
 setZonkType (ZonkEnv _ ty_env id_env) zonk_ty
   = ZonkEnv zonk_ty ty_env id_env
 
-zonkEnvIds :: ZonkEnv -> [Id]
-zonkEnvIds (ZonkEnv _ _ id_env) = varEnvElts id_env
+zonkEnvIds :: ZonkEnv -> TypeEnv
+zonkEnvIds (ZonkEnv _ _ id_env) =
+  mkNameEnv [(getName id, AnId id) | id <- nonDetEltsUFM id_env]
+  -- It's OK to use nonDetEltsUFM here because we forget the ordering
+  -- immediately by creating a TypeEnv
 
 zonkIdOcc :: ZonkEnv -> TcId -> Id
 -- Ids defined in this module should be in the envt;
@@ -274,6 +294,8 @@ zonkIdOccs env ids = map (zonkIdOcc env) ids
 zonkIdBndr :: ZonkEnv -> TcId -> TcM Id
 zonkIdBndr env id
   = do ty' <- zonkTcTypeToType env (idType id)
+       ensureNotRepresentationPolymorphic ty'
+         (text "In the type of binder" <+> quotes (ppr id))
        return (setIdType id ty')
 
 zonkIdBndrs :: ZonkEnv -> [TcId] -> TcM [Id]
@@ -320,8 +342,17 @@ zonkTyBndrX :: ZonkEnv -> TyVar -> TcM (ZonkEnv, TyVar)
 zonkTyBndrX env tv
   = ASSERT( isImmutableTyVar tv )
     do { ki <- zonkTcTypeToType env (tyVarKind tv)
+               -- Internal names tidy up better, for iface files.
        ; let tv' = mkTyVar (tyVarName tv) ki
        ; return (extendTyZonkEnv1 env tv', tv') }
+
+zonkTyConBinders :: ZonkEnv -> [TyConBinder] -> TcM (ZonkEnv, [TyConBinder])
+zonkTyConBinders = mapAccumLM zonkTyConBinderX
+
+zonkTyConBinderX :: ZonkEnv -> TyConBinder -> TcM (ZonkEnv, TyConBinder)
+zonkTyConBinderX env (TvBndr tv vis)
+  = do { (env', tv') <- zonkTyBndrX env tv
+       ; return (env', TvBndr tv' vis) }
 
 zonkTopExpr :: HsExpr TcId -> TcM (HsExpr Id)
 zonkTopExpr e = zonkExpr emptyZonkEnv e
@@ -332,7 +363,7 @@ zonkTopLExpr e = zonkLExpr emptyZonkEnv e
 zonkTopDecls :: Bag EvBind
              -> LHsBinds TcId
              -> [LRuleDecl TcId] -> [LVectDecl TcId] -> [LTcSpecPrag] -> [LForeignDecl TcId]
-             -> TcM ([Id],
+             -> TcM (TypeEnv,
                      Bag EvBind,
                      LHsBinds Id,
                      [LForeignDecl Id],
@@ -433,14 +464,54 @@ zonk_bind env (AbsBinds { abs_tvs = tyvars, abs_ev_vars = evs
                           , abs_ev_binds = new_ev_binds
                           , abs_exports = new_exports, abs_binds = new_val_bind }) }
   where
-    zonkExport env (ABE{ abe_wrap = wrap, abe_poly = poly_id
+    zonkExport env (ABE{ abe_wrap = wrap
+                       , abe_poly = poly_id
                        , abe_mono = mono_id, abe_prags = prags })
         = do new_poly_id <- zonkIdBndr env poly_id
              (_, new_wrap) <- zonkCoFn env wrap
              new_prags <- zonkSpecPrags env prags
-             return (ABE{ abe_wrap = new_wrap, abe_poly = new_poly_id
+             return (ABE{ abe_wrap = new_wrap
+                        , abe_poly = new_poly_id
                         , abe_mono = zonkIdOcc env mono_id
                         , abe_prags = new_prags })
+
+zonk_bind env outer_bind@(AbsBindsSig { abs_tvs         = tyvars
+                                      , abs_ev_vars     = evs
+                                      , abs_sig_export  = poly
+                                      , abs_sig_prags   = prags
+                                      , abs_sig_ev_bind = ev_bind
+                                      , abs_sig_bind    = lbind })
+  | L bind_loc bind@(FunBind { fun_id      = L loc local
+                             , fun_matches = ms
+                             , fun_co_fn   = co_fn }) <- lbind
+  = ASSERT( all isImmutableTyVar tyvars )
+    do { (env0, new_tyvars)  <- zonkTyBndrsX env  tyvars
+       ; (env1, new_evs)     <- zonkEvBndrsX env0 evs
+       ; (env2, new_ev_bind) <- zonkTcEvBinds env1 ev_bind
+           -- Inline zonk_bind (FunBind ...) because we wish to skip
+           -- the check for representation-polymorphic binders. The
+           -- local binder in the FunBind in an AbsBindsSig is never actually
+           -- bound in Core -- indeed, that's the whole point of AbsBindsSig.
+           -- just calling zonk_bind causes #11405.
+       ; new_local           <- updateVarTypeM (zonkTcTypeToType env2) local
+       ; (env3, new_co_fn)   <- zonkCoFn env2 co_fn
+       ; new_ms              <- zonkMatchGroup env3 zonkLExpr ms
+           -- If there is a representation polymorphism problem, it will
+           -- be caught here:
+       ; new_poly_id         <- zonkIdBndr env2 poly
+       ; new_prags           <- zonkSpecPrags env2 prags
+       ; let new_val_bind = L bind_loc (bind { fun_id      = L loc new_local
+                                             , fun_matches = new_ms
+                                             , fun_co_fn   = new_co_fn })
+       ; return (AbsBindsSig { abs_tvs         = new_tyvars
+                             , abs_ev_vars     = new_evs
+                             , abs_sig_export  = new_poly_id
+                             , abs_sig_prags   = new_prags
+                             , abs_sig_ev_bind = new_ev_bind
+                             , abs_sig_bind    = new_val_bind  }) }
+
+  | otherwise
+  = pprPanic "zonk_bind" (ppr outer_bind)
 
 zonk_bind env (PatSynBind bind@(PSB { psb_id = L loc id
                                     , psb_args = details
@@ -562,15 +633,19 @@ zonkExpr env (HsLam matches)
   = do new_matches <- zonkMatchGroup env zonkLExpr matches
        return (HsLam new_matches)
 
-zonkExpr env (HsLamCase arg matches)
-  = do new_arg <- zonkTcTypeToType env arg
-       new_matches <- zonkMatchGroup env zonkLExpr matches
-       return (HsLamCase new_arg new_matches)
+zonkExpr env (HsLamCase matches)
+  = do new_matches <- zonkMatchGroup env zonkLExpr matches
+       return (HsLamCase new_matches)
 
 zonkExpr env (HsApp e1 e2)
   = do new_e1 <- zonkLExpr env e1
        new_e2 <- zonkLExpr env e2
        return (HsApp new_e1 new_e2)
+
+zonkExpr env (HsAppTypeOut e t)
+  = do new_e <- zonkLExpr env e
+       return (HsAppTypeOut new_e t)
+       -- NB: the type is an HsType; can't zonk that!
 
 zonkExpr _ e@(HsRnBracketOut _ _)
   = pprPanic "zonkExpr: HsRnBracketOut" (ppr e)
@@ -592,8 +667,8 @@ zonkExpr env (OpApp e1 op fixity e2)
        return (OpApp new_e1 new_op fixity new_e2)
 
 zonkExpr env (NegApp expr op)
-  = do new_expr <- zonkLExpr env expr
-       new_op <- zonkExpr env op
+  = do (env', new_op) <- zonkSyntaxExpr env op
+       new_expr <- zonkLExpr env' expr
        return (NegApp new_expr new_op)
 
 zonkExpr env (HsPar e)
@@ -619,17 +694,28 @@ zonkExpr env (ExplicitTuple tup_args boxed)
     zonk_tup_arg (L l (Missing t)) = do { t' <- zonkTcTypeToType env t
                                         ; return (L l (Missing t')) }
 
+zonkExpr env (ExplicitSum alt arity expr args)
+  = do new_args <- mapM (zonkTcTypeToType env) args
+       new_expr <- zonkLExpr env expr
+       return (ExplicitSum alt arity new_expr new_args)
+
 zonkExpr env (HsCase expr ms)
   = do new_expr <- zonkLExpr env expr
        new_ms <- zonkMatchGroup env zonkLExpr ms
        return (HsCase new_expr new_ms)
 
-zonkExpr env (HsIf e0 e1 e2 e3)
-  = do { new_e0 <- fmapMaybeM (zonkExpr env) e0
-       ; new_e1 <- zonkLExpr env e1
-       ; new_e2 <- zonkLExpr env e2
-       ; new_e3 <- zonkLExpr env e3
-       ; return (HsIf new_e0 new_e1 new_e2 new_e3) }
+zonkExpr env (HsIf Nothing e1 e2 e3)
+  = do new_e1 <- zonkLExpr env e1
+       new_e2 <- zonkLExpr env e2
+       new_e3 <- zonkLExpr env e3
+       return (HsIf Nothing new_e1 new_e2 new_e3)
+
+zonkExpr env (HsIf (Just fun) e1 e2 e3)
+  = do (env1, new_fun) <- zonkSyntaxExpr env fun
+       new_e1 <- zonkLExpr env1 e1
+       new_e2 <- zonkLExpr env1 e2
+       new_e3 <- zonkLExpr env1 e3
+       return (HsIf (Just new_fun) new_e1 new_e2 new_e3)
 
 zonkExpr env (HsMultiIf ty alts)
   = do { alts' <- mapM (wrapLocM zonk_alt) alts
@@ -651,13 +737,12 @@ zonkExpr env (HsDo do_or_lc (L l stmts) ty)
        return (HsDo do_or_lc (L l new_stmts) new_ty)
 
 zonkExpr env (ExplicitList ty wit exprs)
-  = do new_ty <- zonkTcTypeToType env ty
-       new_wit <- zonkWit env wit
-       new_exprs <- zonkLExprs env exprs
+  = do (env1, new_wit) <- zonkWit env wit
+       new_ty <- zonkTcTypeToType env1 ty
+       new_exprs <- zonkLExprs env1 exprs
        return (ExplicitList new_ty new_wit new_exprs)
-   where zonkWit _ Nothing = return Nothing
-         zonkWit env (Just fln) = do new_fln <- zonkExpr env fln
-                                     return (Just new_fln)
+   where zonkWit env Nothing    = return (env, Nothing)
+         zonkWit env (Just fln) = second Just <$> zonkSyntaxExpr env fln
 
 zonkExpr env (ExplicitPArr ty exprs)
   = do new_ty <- zonkTcTypeToType env ty
@@ -687,13 +772,12 @@ zonkExpr env (ExprWithTySigOut e ty)
        ; return (ExprWithTySigOut e' ty) }
 
 zonkExpr env (ArithSeq expr wit info)
-  = do new_expr <- zonkExpr env expr
-       new_wit <- zonkWit env wit
-       new_info <- zonkArithSeq env info
+  = do (env1, new_wit) <- zonkWit env wit
+       new_expr <- zonkExpr env expr
+       new_info <- zonkArithSeq env1 info
        return (ArithSeq new_expr new_wit new_info)
-   where zonkWit _ Nothing = return Nothing
-         zonkWit env (Just fln) = do new_fln <- zonkExpr env fln
-                                     return (Just new_fln)
+   where zonkWit env Nothing    = return (env, Nothing)
+         zonkWit env (Just fln) = second Just <$> zonkSyntaxExpr env fln
 
 zonkExpr env (PArrSeq expr info)
   = do new_expr <- zonkExpr env expr
@@ -704,9 +788,9 @@ zonkExpr env (HsSCC src lbl expr)
   = do new_expr <- zonkLExpr env expr
        return (HsSCC src lbl new_expr)
 
-zonkExpr env (HsTickPragma src info expr)
+zonkExpr env (HsTickPragma src info srcInfo expr)
   = do new_expr <- zonkLExpr env expr
-       return (HsTickPragma src info new_expr)
+       return (HsTickPragma src info srcInfo new_expr)
 
 -- hdaume: core annotations
 zonkExpr env (HsCoreAnn src lbl expr)
@@ -720,18 +804,51 @@ zonkExpr env (HsProc pat body)
         ; return (HsProc new_pat new_body) }
 
 -- StaticPointers extension
-zonkExpr env (HsStatic expr)
-  = HsStatic <$> zonkLExpr env expr
+zonkExpr env (HsStatic fvs expr)
+  = HsStatic fvs <$> zonkLExpr env expr
 
 zonkExpr env (HsWrap co_fn expr)
   = do (env1, new_co_fn) <- zonkCoFn env co_fn
        new_expr <- zonkExpr env1 expr
        return (HsWrap new_co_fn new_expr)
 
-zonkExpr _ (HsUnboundVar v)
-  = return (HsUnboundVar v)
+zonkExpr _ e@(HsUnboundVar {}) = return e
 
 zonkExpr _ expr = pprPanic "zonkExpr" (ppr expr)
+
+-------------------------------------------------------------------------
+{-
+Note [Skolems in zonkSyntaxExpr]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider rebindable syntax with something like
+
+  (>>=) :: (forall x. blah) -> (forall y. blah') -> blah''
+
+The x and y become skolems that are in scope when type-checking the
+arguments to the bind. This means that we must extend the ZonkEnv with
+these skolems when zonking the arguments to the bind. But the skolems
+are different between the two arguments, and so we should theoretically
+carry around different environments to use for the different arguments.
+
+However, this becomes a logistical nightmare, especially in dealing with
+the more exotic Stmt forms. So, we simplify by making the critical
+assumption that the uniques of the skolems are different. (This assumption
+is justified by the use of newUnique in TcMType.instSkolTyCoVarX.)
+Now, we can safely just extend one environment.
+-}
+
+-- See Note [Skolems in zonkSyntaxExpr]
+zonkSyntaxExpr :: ZonkEnv -> SyntaxExpr TcId
+               -> TcM (ZonkEnv, SyntaxExpr Id)
+zonkSyntaxExpr env (SyntaxExpr { syn_expr      = expr
+                               , syn_arg_wraps = arg_wraps
+                               , syn_res_wrap  = res_wrap })
+  = do { (env0, res_wrap')  <- zonkCoFn env res_wrap
+       ; expr'              <- zonkExpr env0 expr
+       ; (env1, arg_wraps') <- mapAccumLM zonkCoFn env0 arg_wraps
+       ; return (env1, SyntaxExpr { syn_expr      = expr'
+                                  , syn_arg_wraps = arg_wraps'
+                                  , syn_res_wrap  = res_wrap' }) }
 
 -------------------------------------------------------------------------
 
@@ -740,10 +857,10 @@ zonkCmd   :: ZonkEnv -> HsCmd TcId    -> TcM (HsCmd Id)
 
 zonkLCmd  env cmd  = wrapLocM (zonkCmd env) cmd
 
-zonkCmd env (HsCmdCast co cmd)
-  = do { co' <- zonkCoToCo env co
-       ; cmd' <- zonkCmd env cmd
-       ; return (HsCmdCast co' cmd') }
+zonkCmd env (HsCmdWrap w cmd)
+  = do { (env1, w') <- zonkCoFn env w
+       ; cmd' <- zonkCmd env1 cmd
+       ; return (HsCmdWrap w' cmd') }
 zonkCmd env (HsCmdArrApp e1 e2 ty ho rl)
   = do new_e1 <- zonkLExpr env e1
        new_e2 <- zonkLExpr env e2
@@ -774,11 +891,14 @@ zonkCmd env (HsCmdCase expr ms)
        return (HsCmdCase new_expr new_ms)
 
 zonkCmd env (HsCmdIf eCond ePred cThen cElse)
-  = do { new_eCond <- fmapMaybeM (zonkExpr env) eCond
-       ; new_ePred <- zonkLExpr env ePred
-       ; new_cThen <- zonkLCmd env cThen
-       ; new_cElse <- zonkLCmd env cElse
+  = do { (env1, new_eCond) <- zonkWit env eCond
+       ; new_ePred <- zonkLExpr env1 ePred
+       ; new_cThen <- zonkLCmd env1 cThen
+       ; new_cElse <- zonkLCmd env1 cElse
        ; return (HsCmdIf new_eCond new_ePred new_cThen new_cElse) }
+  where
+    zonkWit env Nothing  = return (env, Nothing)
+    zonkWit env (Just w) = second Just <$> zonkSyntaxExpr env w
 
 zonkCmd env (HsCmdLet (L l binds) cmd)
   = do (new_env, new_binds) <- zonkLocalBinds env binds
@@ -811,11 +931,10 @@ zonkCoFn env WpHole   = return (env, WpHole)
 zonkCoFn env (WpCompose c1 c2) = do { (env1, c1') <- zonkCoFn env c1
                                     ; (env2, c2') <- zonkCoFn env1 c2
                                     ; return (env2, WpCompose c1' c2') }
-zonkCoFn env (WpFun c1 c2 t1 t2) = do { (env1, c1') <- zonkCoFn env c1
-                                      ; (env2, c2') <- zonkCoFn env1 c2
-                                      ; t1'         <- zonkTcTypeToType env2 t1
-                                      ; t2'         <- zonkTcTypeToType env2 t2
-                                      ; return (env2, WpFun c1' c2' t1' t2') }
+zonkCoFn env (WpFun c1 c2 t1) = do { (env1, c1') <- zonkCoFn env c1
+                                   ; (env2, c2') <- zonkCoFn env1 c2
+                                   ; t1'         <- zonkTcTypeToType env2 t1
+                                   ; return (env2, WpFun c1' c2' t1') }
 zonkCoFn env (WpCast co) = do { co' <- zonkCoToCo env co
                               ; return (env, WpCast co') }
 zonkCoFn env (WpEvLam ev)   = do { (env', ev') <- zonkEvBndrX env ev
@@ -873,70 +992,81 @@ zonkStmts env zBody (s:ss) = do { (env1, s')  <- wrapLocSndM (zonkStmt env zBody
 zonkStmt :: ZonkEnv
          -> (ZonkEnv -> Located (body TcId) -> TcM (Located (body Id)))
          -> Stmt TcId (Located (body TcId)) -> TcM (ZonkEnv, Stmt Id (Located (body Id)))
-zonkStmt env _ (ParStmt stmts_w_bndrs mzip_op bind_op)
-  = do { new_stmts_w_bndrs <- mapM zonk_branch stmts_w_bndrs
+zonkStmt env _ (ParStmt stmts_w_bndrs mzip_op bind_op bind_ty)
+  = do { (env1, new_bind_op) <- zonkSyntaxExpr env bind_op
+       ; new_bind_ty <- zonkTcTypeToType env1 bind_ty
+       ; new_stmts_w_bndrs <- mapM (zonk_branch env1) stmts_w_bndrs
        ; let new_binders = [b | ParStmtBlock _ bs _ <- new_stmts_w_bndrs, b <- bs]
-             env1 = extendIdZonkEnvRec env new_binders
-       ; new_mzip <- zonkExpr env1 mzip_op
-       ; new_bind <- zonkExpr env1 bind_op
-       ; return (env1, ParStmt new_stmts_w_bndrs new_mzip new_bind) }
+             env2 = extendIdZonkEnvRec env1 new_binders
+       ; new_mzip <- zonkExpr env2 mzip_op
+       ; return (env2, ParStmt new_stmts_w_bndrs new_mzip new_bind_op new_bind_ty) }
   where
-    zonk_branch (ParStmtBlock stmts bndrs return_op)
-       = do { (env1, new_stmts) <- zonkStmts env zonkLExpr stmts
-            ; new_return <- zonkExpr env1 return_op
-            ; return (ParStmtBlock new_stmts (zonkIdOccs env1 bndrs) new_return) }
+    zonk_branch env1 (ParStmtBlock stmts bndrs return_op)
+       = do { (env2, new_stmts)  <- zonkStmts env1 zonkLExpr stmts
+            ; (env3, new_return) <- zonkSyntaxExpr env2 return_op
+            ; return (ParStmtBlock new_stmts (zonkIdOccs env3 bndrs) new_return) }
 
 zonkStmt env zBody (RecStmt { recS_stmts = segStmts, recS_later_ids = lvs, recS_rec_ids = rvs
-                            , recS_ret_fn = ret_id, recS_mfix_fn = mfix_id, recS_bind_fn = bind_id
+                            , recS_ret_fn = ret_id, recS_mfix_fn = mfix_id
+                            , recS_bind_fn = bind_id, recS_bind_ty = bind_ty
                             , recS_later_rets = later_rets, recS_rec_rets = rec_rets
                             , recS_ret_ty = ret_ty })
-  = do { new_rvs <- zonkIdBndrs env rvs
-       ; new_lvs <- zonkIdBndrs env lvs
-       ; new_ret_ty  <- zonkTcTypeToType env ret_ty
-       ; new_ret_id  <- zonkExpr env ret_id
-       ; new_mfix_id <- zonkExpr env mfix_id
-       ; new_bind_id <- zonkExpr env bind_id
-       ; let env1 = extendIdZonkEnvRec env new_rvs
-       ; (env2, new_segStmts) <- zonkStmts env1 zBody segStmts
+  = do { (env1, new_bind_id) <- zonkSyntaxExpr env bind_id
+       ; (env2, new_mfix_id) <- zonkSyntaxExpr env1 mfix_id
+       ; (env3, new_ret_id)  <- zonkSyntaxExpr env2 ret_id
+       ; new_bind_ty <- zonkTcTypeToType env3 bind_ty
+       ; new_rvs <- zonkIdBndrs env3 rvs
+       ; new_lvs <- zonkIdBndrs env3 lvs
+       ; new_ret_ty  <- zonkTcTypeToType env3 ret_ty
+       ; let env4 = extendIdZonkEnvRec env3 new_rvs
+       ; (env5, new_segStmts) <- zonkStmts env4 zBody segStmts
         -- Zonk the ret-expressions in an envt that
         -- has the polymorphic bindings in the envt
-       ; new_later_rets <- mapM (zonkExpr env2) later_rets
-       ; new_rec_rets <- mapM (zonkExpr env2) rec_rets
-       ; return (extendIdZonkEnvRec env new_lvs,     -- Only the lvs are needed
+       ; new_later_rets <- mapM (zonkExpr env5) later_rets
+       ; new_rec_rets <- mapM (zonkExpr env5) rec_rets
+       ; return (extendIdZonkEnvRec env3 new_lvs,     -- Only the lvs are needed
                  RecStmt { recS_stmts = new_segStmts, recS_later_ids = new_lvs
                          , recS_rec_ids = new_rvs, recS_ret_fn = new_ret_id
                          , recS_mfix_fn = new_mfix_id, recS_bind_fn = new_bind_id
+                         , recS_bind_ty = new_bind_ty
                          , recS_later_rets = new_later_rets
                          , recS_rec_rets = new_rec_rets, recS_ret_ty = new_ret_ty }) }
 
 zonkStmt env zBody (BodyStmt body then_op guard_op ty)
-  = do new_body <- zBody env body
-       new_then <- zonkExpr env then_op
-       new_guard <- zonkExpr env guard_op
-       new_ty <- zonkTcTypeToType env ty
-       return (env, BodyStmt new_body new_then new_guard new_ty)
+  = do (env1, new_then_op)  <- zonkSyntaxExpr env then_op
+       (env2, new_guard_op) <- zonkSyntaxExpr env1 guard_op
+       new_body <- zBody env2 body
+       new_ty   <- zonkTcTypeToType env2 ty
+       return (env2, BodyStmt new_body new_then_op new_guard_op new_ty)
 
 zonkStmt env zBody (LastStmt body noret ret_op)
-  = do new_body <- zBody env body
-       new_ret <- zonkExpr env ret_op
+  = do (env1, new_ret) <- zonkSyntaxExpr env ret_op
+       new_body <- zBody env1 body
        return (env, LastStmt new_body noret new_ret)
 
 zonkStmt env _ (TransStmt { trS_stmts = stmts, trS_bndrs = binderMap
-                              , trS_by = by, trS_form = form, trS_using = using
-                              , trS_ret = return_op, trS_bind = bind_op, trS_fmap = liftM_op })
-  = do { (env', stmts') <- zonkStmts env zonkLExpr stmts
-    ; binderMap' <- mapM (zonkBinderMapEntry env') binderMap
-    ; by'        <- fmapMaybeM (zonkLExpr env') by
-    ; using'     <- zonkLExpr env using
-    ; return_op' <- zonkExpr env' return_op
-    ; bind_op'   <- zonkExpr env' bind_op
-    ; liftM_op'  <- zonkExpr env' liftM_op
-    ; let env'' = extendIdZonkEnvRec env' (map snd binderMap')
-    ; return (env'', TransStmt { trS_stmts = stmts', trS_bndrs = binderMap'
+                          , trS_by = by, trS_form = form, trS_using = using
+                          , trS_ret = return_op, trS_bind = bind_op
+                          , trS_bind_arg_ty = bind_arg_ty
+                          , trS_fmap = liftM_op })
+  = do {
+    ; (env1, bind_op') <- zonkSyntaxExpr env bind_op
+    ; bind_arg_ty' <- zonkTcTypeToType env1 bind_arg_ty
+    ; (env2, stmts') <- zonkStmts env1 zonkLExpr stmts
+    ; by'        <- fmapMaybeM (zonkLExpr env2) by
+    ; using'     <- zonkLExpr env2 using
+
+    ; (env3, return_op') <- zonkSyntaxExpr env2 return_op
+    ; binderMap' <- mapM (zonkBinderMapEntry env3) binderMap
+    ; liftM_op'  <- zonkExpr env3 liftM_op
+    ; let env3' = extendIdZonkEnvRec env3 (map snd binderMap')
+    ; return (env3', TransStmt { trS_stmts = stmts', trS_bndrs = binderMap'
                                , trS_by = by', trS_form = form, trS_using = using'
-                               , trS_ret = return_op', trS_bind = bind_op', trS_fmap = liftM_op' }) }
+                               , trS_ret = return_op', trS_bind = bind_op'
+                               , trS_bind_arg_ty = bind_arg_ty'
+                               , trS_fmap = liftM_op' }) }
   where
-    zonkBinderMapEntry env (oldBinder, newBinder) = do
+    zonkBinderMapEntry env  (oldBinder, newBinder) = do
         let oldBinder' = zonkIdOcc env oldBinder
         newBinder' <- zonkIdBndr env newBinder
         return (oldBinder', newBinder')
@@ -945,35 +1075,55 @@ zonkStmt env _ (LetStmt (L l binds))
   = do (env1, new_binds) <- zonkLocalBinds env binds
        return (env1, LetStmt (L l new_binds))
 
-zonkStmt env zBody (BindStmt pat body bind_op fail_op)
-  = do  { new_body <- zBody env body
-        ; (env1, new_pat) <- zonkPat env pat
-        ; new_bind <- zonkExpr env bind_op
-        ; new_fail <- zonkExpr env fail_op
-        ; return (env1, BindStmt new_pat new_body new_bind new_fail) }
+zonkStmt env zBody (BindStmt pat body bind_op fail_op bind_ty)
+  = do  { (env1, new_bind) <- zonkSyntaxExpr env bind_op
+        ; new_bind_ty <- zonkTcTypeToType env1 bind_ty
+        ; new_body <- zBody env1 body
+        ; (env2, new_pat) <- zonkPat env1 pat
+        ; (_, new_fail) <- zonkSyntaxExpr env1 fail_op
+        ; return (env2, BindStmt new_pat new_body new_bind new_fail new_bind_ty) }
 
+-- Scopes: join > ops (in reverse order) > pats (in forward order)
+--              > rest of stmts
 zonkStmt env _zBody (ApplicativeStmt args mb_join body_ty)
-  = do  { (env', args') <- zonk_args env args
-        ; new_mb_join <- traverse (zonkExpr env) mb_join
-        ; new_body_ty <- zonkTcTypeToType env' body_ty
-        ; return (env', ApplicativeStmt args' new_mb_join new_body_ty) }
+  = do  { (env1, new_mb_join)   <- zonk_join env mb_join
+        ; (env2, new_args)      <- zonk_args env1 args
+        ; new_body_ty           <- zonkTcTypeToType env2 body_ty
+        ; return (env2, ApplicativeStmt new_args new_mb_join new_body_ty) }
   where
-   zonk_args env [] = return (env, [])
-   zonk_args env ((op, arg) : groups)
-      = do { (env1, arg') <- zonk_arg env arg
-           ; op' <- zonkExpr env1 op
-           ; (env2, ss) <- zonk_args env1 groups
-           ; return (env2, (op', arg') : ss) }
+    zonk_join env Nothing  = return (env, Nothing)
+    zonk_join env (Just j) = second Just <$> zonkSyntaxExpr env j
 
-   zonk_arg env (ApplicativeArgOne pat expr)
-     = do { (env1, new_pat) <- zonkPat env pat
-          ; new_expr <- zonkLExpr env expr
-          ; return (env1, ApplicativeArgOne new_pat new_expr) }
-   zonk_arg env (ApplicativeArgMany stmts ret pat)
-     = do { (env1, new_stmts) <- zonkStmts env zonkLExpr stmts
-          ; new_ret <- zonkExpr env1 ret
-          ; (env2, new_pat) <- zonkPat env pat
-          ; return (env2, ApplicativeArgMany new_stmts new_ret new_pat) }
+    get_pat (_, ApplicativeArgOne pat _)    = pat
+    get_pat (_, ApplicativeArgMany _ _ pat) = pat
+
+    replace_pat pat (op, ApplicativeArgOne _ a)
+      = (op, ApplicativeArgOne pat a)
+    replace_pat pat (op, ApplicativeArgMany a b _)
+      = (op, ApplicativeArgMany a b pat)
+
+    zonk_args env args
+      = do { (env1, new_args_rev) <- zonk_args_rev env (reverse args)
+           ; (env2, new_pats)     <- zonkPats env1 (map get_pat args)
+           ; return (env2, zipWith replace_pat new_pats (reverse new_args_rev)) }
+
+     -- these need to go backward, because if any operators are higher-rank,
+     -- later operators may introduce skolems that are in scope for earlier
+     -- arguments
+    zonk_args_rev env ((op, arg) : args)
+      = do { (env1, new_op)         <- zonkSyntaxExpr env op
+           ; new_arg                <- zonk_arg env1 arg
+           ; (env2, new_args)       <- zonk_args_rev env1 args
+           ; return (env2, (new_op, new_arg) : new_args) }
+    zonk_args_rev env [] = return (env, [])
+
+    zonk_arg env (ApplicativeArgOne pat expr)
+      = do { new_expr <- zonkLExpr env expr
+           ; return (ApplicativeArgOne pat new_expr) }
+    zonk_arg env (ApplicativeArgMany stmts ret pat)
+      = do { (env1, new_stmts) <- zonkStmts env zonkLExpr stmts
+           ; new_ret           <- zonkExpr env1 ret
+           ; return (ApplicativeArgMany new_stmts new_ret pat) }
 
 -------------------------------------------------------------------------
 zonkRecFields :: ZonkEnv -> HsRecordBinds TcId -> TcM (HsRecordBinds TcId)
@@ -1024,6 +1174,8 @@ zonk_pat env (ParPat p)
 
 zonk_pat env (WildPat ty)
   = do  { ty' <- zonkTcTypeToType env ty
+        ; ensureNotRepresentationPolymorphic ty'
+            (text "In a wildcard pattern")
         ; return (env, WildPat ty') }
 
 zonk_pat env (VarPat (L l v))
@@ -1055,11 +1207,11 @@ zonk_pat env (ListPat pats ty Nothing)
         ; return (env', ListPat pats' ty' Nothing) }
 
 zonk_pat env (ListPat pats ty (Just (ty2,wit)))
-  = do  { wit' <- zonkExpr env wit
-        ; ty2' <- zonkTcTypeToType env ty2
-        ; ty' <- zonkTcTypeToType env ty
-        ; (env', pats') <- zonkPats env pats
-        ; return (env', ListPat pats' ty' (Just (ty2',wit'))) }
+  = do  { (env', wit') <- zonkSyntaxExpr env wit
+        ; ty2' <- zonkTcTypeToType env' ty2
+        ; ty' <- zonkTcTypeToType env' ty
+        ; (env'', pats') <- zonkPats env' pats
+        ; return (env'', ListPat pats' ty' (Just (ty2',wit'))) }
 
 zonk_pat env (PArrPat pats ty)
   = do  { ty' <- zonkTcTypeToType env ty
@@ -1070,6 +1222,11 @@ zonk_pat env (TuplePat pats boxed tys)
   = do  { tys' <- mapM (zonkTcTypeToType env) tys
         ; (env', pats') <- zonkPats env pats
         ; return (env', TuplePat pats' boxed tys') }
+
+zonk_pat env (SumPat pat alt arity tys)
+  = do  { tys' <- mapM (zonkTcTypeToType env) tys
+        ; (env', pat') <- zonkPat env pat
+        ; return (env', SumPat pat' alt arity tys') }
 
 zonk_pat env p@(ConPatOut { pat_arg_tys = tys, pat_tvs = tyvars
                           , pat_dicts = evs, pat_binds = binds
@@ -1098,19 +1255,25 @@ zonk_pat env (SigPatOut pat ty)
         ; (env', pat') <- zonkPat env pat
         ; return (env', SigPatOut pat' ty') }
 
-zonk_pat env (NPat (L l lit) mb_neg eq_expr)
-  = do  { lit' <- zonkOverLit env lit
-        ; mb_neg' <- fmapMaybeM (zonkExpr env) mb_neg
-        ; eq_expr' <- zonkExpr env eq_expr
-        ; return (env, NPat (L l lit') mb_neg' eq_expr') }
+zonk_pat env (NPat (L l lit) mb_neg eq_expr ty)
+  = do  { (env1, eq_expr') <- zonkSyntaxExpr env eq_expr
+        ; (env2, mb_neg') <- case mb_neg of
+            Nothing -> return (env1, Nothing)
+            Just n  -> second Just <$> zonkSyntaxExpr env1 n
 
-zonk_pat env (NPlusKPat (L loc n) (L l lit) e1 e2)
-  = do  { n' <- zonkIdBndr env n
-        ; lit' <- zonkOverLit env lit
-        ; e1' <- zonkExpr env e1
-        ; e2' <- zonkExpr env e2
-        ; return (extendIdZonkEnv1 env n',
-                  NPlusKPat (L loc n') (L l lit') e1' e2') }
+        ; lit' <- zonkOverLit env2 lit
+        ; ty' <- zonkTcTypeToType env2 ty
+        ; return (env2, NPat (L l lit') mb_neg' eq_expr' ty') }
+
+zonk_pat env (NPlusKPat (L loc n) (L l lit1) lit2 e1 e2 ty)
+  = do  { (env1, e1') <- zonkSyntaxExpr env  e1
+        ; (env2, e2') <- zonkSyntaxExpr env1 e2
+        ; n' <- zonkIdBndr env2 n
+        ; lit1' <- zonkOverLit env2 lit1
+        ; lit2' <- zonkOverLit env2 lit2
+        ; ty' <- zonkTcTypeToType env2 ty
+        ; return (extendIdZonkEnv1 env2 n',
+                  NPlusKPat (L loc n') (L l lit1') lit2' e1' e2' ty') }
 
 zonk_pat env (CoPat co_fn pat ty)
   = do { (env', co_fn') <- zonkCoFn env co_fn
@@ -1172,25 +1335,15 @@ zonkRules env rs = mapM (wrapLocM (zonkRule env)) rs
 
 zonkRule :: ZonkEnv -> RuleDecl TcId -> TcM (RuleDecl Id)
 zonkRule env (HsRule name act (vars{-::[RuleBndr TcId]-}) lhs fv_lhs rhs fv_rhs)
-  = do { unbound_tkv_set <- newMutVar emptyVarSet
-       ; let kind_var_set = identify_kind_vars vars
-             env_rule = setZonkType env (zonkTvCollecting kind_var_set unbound_tkv_set)
+  = do { (env_inside, new_bndrs) <- mapAccumLM zonk_bndr env vars
+
+       ; let env_lhs = setZonkType env_inside zonkTvSkolemising
               -- See Note [Zonking the LHS of a RULE]
 
-       ; (env_inside, new_bndrs) <- mapAccumLM zonk_bndr env_rule vars
-
-       ; new_lhs <- zonkLExpr env_inside lhs
+       ; new_lhs <- zonkLExpr env_lhs    lhs
        ; new_rhs <- zonkLExpr env_inside rhs
 
-       ; unbound_tkvs <- readMutVar unbound_tkv_set
-
-       ; let final_bndrs :: [LRuleBndr Var]
-             final_bndrs = map (noLoc . RuleBndr . noLoc)
-                               (varSetElemsWellScoped unbound_tkvs)
-                           ++ new_bndrs
-
-       ; return $
-         HsRule name act final_bndrs new_lhs fv_lhs new_rhs fv_rhs }
+       ; return (HsRule name act new_bndrs new_lhs fv_lhs new_rhs fv_rhs) }
   where
    zonk_bndr env (L l (RuleBndr (L loc v)))
       = do { (env', v') <- zonk_it env v
@@ -1205,18 +1358,6 @@ zonkRule env (HsRule name act (vars{-::[RuleBndr TcId]-}) lhs fv_lhs rhs fv_rhs)
                     -- DV: used to be return (env,v) but that is plain
                     -- wrong because we may need to go inside the kind
                     -- of v and zonk there!
-
-     -- returns the set of type variables mentioned in the kind of another
-     -- type. This is used only when -XPolyKinds is not set.
-   identify_kind_vars :: [LRuleBndr TcId] -> TyVarSet
-   identify_kind_vars rule_bndrs
-     = let vars = map strip_rulebndr rule_bndrs in
-       unionVarSets (map (\v -> if isTyVar v
-                                then tyCoVarsOfType (tyVarKind v)
-                                else emptyVarSet) vars)
-
-   strip_rulebndr (L _ (RuleBndr (L _ v))) = v
-   strip_rulebndr (L _ (RuleBndrSig {}))   = panic "strip_rulebndr zonkRule"
 
 zonkVects :: ZonkEnv -> [LVectDecl TcId] -> TcM [LVectDecl Id]
 zonkVects env = mapM (wrapLocM (zonkVect env))
@@ -1344,31 +1485,6 @@ zonkEvBind env bind@(EvBind { eb_lhs = var, eb_rhs = term })
 *                                                                      *
 ************************************************************************
 
-Note [Zonking the LHS of a RULE]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We need to gather the type variables mentioned on the LHS so we can
-quantify over them.  Example:
-  data T a = C
-
-  foo :: T a -> Int
-  foo C = 1
-
-  {-# RULES "myrule"  foo C = 1 #-}
-
-After type checking the LHS becomes (foo a (C a))
-and we do not want to zap the unbound tyvar 'a' to (), because
-that limits the applicability of the rule.  Instead, we
-want to quantify over it!
-
-It's easiest to get zonkTvCollecting to gather the free tyvars
-here. Attempts to do so earlier are tiresome, because (a) the data
-type is big and (b) finding the free type vars of an expression is
-necessarily monadic operation. (consider /\a -> f @ b, where b is
-side-effected to a)
-
-And that in turn is why ZonkEnv carries the function to use for
-type variables!
-
 Note [Zonking mutable unbound type or kind variables]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In zonkTypeZapping, we zonk mutable but unbound type or kind variables to an
@@ -1471,6 +1587,7 @@ zonk_tycomapper = TyCoMapper
   , tcm_hole  = zonkCoHole
   , tcm_tybinder = \env tv _vis -> zonkTyBndrX env tv }
 
+-- Confused by zonking? See Note [What is zonking?] in TcMType.
 zonkTcTypeToType :: ZonkEnv -> TcType -> TcM Type
 zonkTcTypeToType = mapType zonk_tycomapper
 
@@ -1480,26 +1597,167 @@ zonkTcTypeToTypes env tys = mapM (zonkTcTypeToType env) tys
 zonkCoToCo :: ZonkEnv -> Coercion -> TcM Coercion
 zonkCoToCo = mapCoercion zonk_tycomapper
 
-zonkTvCollecting :: TyVarSet -> TcRef TyVarSet -> UnboundTyVarZonker
--- This variant collects unbound type variables in a mutable variable
--- Works on both types and kinds
-zonkTvCollecting kind_vars unbound_tv_set tv
-  = do { poly_kinds <- xoptM LangExt.PolyKinds
-       ; if tv `elemVarSet` kind_vars && not poly_kinds then defaultKindVar tv else do
-       { ty_or_tv <- zonkQuantifiedTyVarOrType tv
-       ; case ty_or_tv of
-           Right ty -> return ty
-           Left tv' -> do
-             { tv_set <- readMutVar unbound_tv_set
-             ; writeMutVar unbound_tv_set (extendVarSet tv_set tv')
-             ; return (mkTyVarTy tv') } } }
+zonkTvSkolemising :: UnboundTyVarZonker
+-- This variant is used for the LHS of rules
+-- See Note [Zonking the LHS of a RULE].
+zonkTvSkolemising tv
+  = do { tv' <- skolemiseUnboundMetaTyVar tv vanillaSkolemTv
+       ; return (mkTyVarTy tv') }
 
 zonkTypeZapping :: UnboundTyVarZonker
 -- This variant is used for everything except the LHS of rules
--- It zaps unbound type variables to (), or some other arbitrary type
+-- It zaps unbound type variables to Any, except for RuntimeRep
+-- vars which it zonks to PtrRepLIfted
 -- Works on both types and kinds
 zonkTypeZapping tv
-  = do { let ty | isLevityVar tv = liftedDataConTy
-                | otherwise      = anyTypeOfKind (tyVarKind tv)
+  = do { let ty | isRuntimeRepVar tv = ptrRepLiftedTy
+                | otherwise          = anyTypeOfKind (tyVarKind tv)
        ; writeMetaTyVar tv ty
        ; return ty }
+
+---------------------------------------
+{- Note [Zonking the LHS of a RULE]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+See also DsBinds Note [Free tyvars on rule LHS]
+
+We need to gather the type variables mentioned on the LHS so we can
+quantify over them.  Example:
+  data T a = C
+
+  foo :: T a -> Int
+  foo C = 1
+
+  {-# RULES "myrule"  foo C = 1 #-}
+
+After type checking the LHS becomes (foo alpha (C alpha)) and we do
+not want to zap the unbound meta-tyvar 'alpha' to Any, because that
+limits the applicability of the rule.  Instead, we want to quantify
+over it!
+
+We do this in two stages.
+
+* During zonking, we skolemise 'alpha' to 'a'.  We do this by using
+  zonkTvSkolemising as the UnboundTyVarZonker in the ZonkEnv.
+  (This is the whole reason that the ZonkEnv has a UnboundTyVarZonker.)
+
+* In DsBinds, we quantify over it.  See DsBinds
+  Note [Free tyvars on rule LHS]
+
+Quantifying here is awkward because (a) the data type is big and (b)
+finding the free type vars of an expression is necessarily monadic
+operation. (consider /\a -> f @ b, where b is side-effected to a)
+
+Note [Unboxed tuples in representation polymorphism check]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Recall that all types that have values (that is, lifted and unlifted
+types) have kinds that look like (TYPE rep), where (rep :: RuntimeRep)
+tells how the values are represented at runtime. Lifted types have
+kind (TYPE PtrRepLifted) (for which * is just a synonym) and, say,
+Int# has kind (TYPE IntRep).
+
+It would be terrible if the code generator came upon a binder of a type
+whose kind is something like TYPE r, where r is a skolem type variable.
+The code generator wouldn't know what to do. So we eliminate that case
+here.
+
+Although representation polymorphism and the RuntimeRep type catch
+most ways of abusing unlifted types, it still isn't quite satisfactory
+around unboxed tuples. That's because all unboxed tuple types have kind
+TYPE UnboxedTupleRep, which is clearly a lie: it doesn't actually tell
+you what the representation is.
+
+Naively, when checking for representation polymorphism, you might think we can
+just look for free variables in a type's RuntimeRep. But this misses the
+UnboxedTupleRep case.
+
+So, instead, we handle unboxed tuples specially. Only after unboxed tuples
+are handled do we look for free tyvars in a RuntimeRep.
+
+We must still be careful in the UnboxedTupleRep case. A binder whose type
+has kind UnboxedTupleRep is OK -- only as long as the type is really an
+unboxed tuple, which the code generator treats specially. So we do this:
+ 1. Check if the type is an unboxed tuple. If so, recur.
+ 2. Check if the kind is TYPE UnboxedTupleRep. If so, error.
+ 3. Check if the kind has any free variables. If so, error.
+
+In case 1, we have a type that looks like
+
+  (# , #) PtrRepLifted IntRep Bool Int#
+
+recalling that
+
+  (# , #) :: forall (r1 :: RuntimeRep) (r2 :: RuntimeRep).
+             TYPE r1 -> TYPE r2 -> TYPE UnboxedTupleRep
+
+It's tempting just to look at the RuntimeRep arguments to make sure
+that they are devoid of free variables and not UnboxedTupleRep. This
+naive check, though, fails on nested unboxed tuples, like
+(# Int#, (# Bool, Void# #) #). Thus, instead of looking at the RuntimeRep
+args to the unboxed tuple constructor, we look at the types themselves.
+
+Here are a few examples:
+
+   type family F r :: TYPE r
+
+   x :: (F r :: TYPE r)   -- REJECTED: simple representation polymorphism
+     where r is an in-scope type variable of kind RuntimeRep
+
+   x :: (F PtrRepLifted :: TYPE PtrRepLifted)   -- OK
+   x :: (F IntRep       :: TYPE IntRep)         -- OK
+
+   x :: (F UnboxedTupleRep :: TYPE UnboxedTupleRep)  -- REJECTED
+
+   x :: ((# Int, Bool #) :: TYPE UnboxedTupleRep)    -- OK
+-}
+
+-- | According to the rules around representation polymorphism
+-- (see https://ghc.haskell.org/trac/ghc/wiki/NoSubKinds), no binder
+-- can have a representation-polymorphic type. This check ensures
+-- that we respect this rule. It is a bit regrettable that this error
+-- occurs in zonking, after which we should have reported all errors.
+-- But it's hard to see where else to do it, because this can be discovered
+-- only after all solving is done. And, perhaps most importantly, this
+-- isn't really a compositional property of a type system, so it's
+-- not a terrible surprise that the check has to go in an awkward spot.
+ensureNotRepresentationPolymorphic
+  :: Type  -- its zonked type
+  -> SDoc  -- where this happened
+  -> TcM ()
+ensureNotRepresentationPolymorphic ty doc
+  = whenNoErrs $   -- sometimes we end up zonking bogus definitions of type
+                   -- forall a. a. See, for example, test ghci/scripts/T9140
+    checkForRepresentationPolymorphism doc ty
+
+   -- See Note [Unboxed tuples in representation polymorphism check]
+checkForRepresentationPolymorphism :: SDoc -> Type -> TcM ()
+checkForRepresentationPolymorphism extra ty
+  | Just (tc, tys) <- splitTyConApp_maybe ty
+  , isUnboxedTupleTyCon tc || isUnboxedSumTyCon tc
+  = mapM_ (checkForRepresentationPolymorphism extra) (dropRuntimeRepArgs tys)
+
+  | tuple_rep || sum_rep
+  = addErr (vcat [ text "The type" <+> quotes (ppr tidy_ty) <+>
+                     (text "is not an unboxed" <+> tuple_or_sum <> comma)
+                 , text "and yet its kind suggests that it has the representation"
+                 , text "of an unboxed" <+> tuple_or_sum <> text ". This is not allowed." ] $$
+            extra)
+
+  | not (isEmptyVarSet (tyCoVarsOfType runtime_rep))
+  = addErr $
+    hang (text "A representation-polymorphic type is not allowed here:")
+       2 (vcat [ text "Type:" <+> ppr tidy_ty
+               , text "Kind:" <+> ppr tidy_ki ]) $$
+    extra
+
+  | otherwise
+  = return ()
+  where
+    tuple_rep    = runtime_rep `eqType` unboxedTupleRepDataConTy
+    sum_rep      = runtime_rep `eqType` unboxedSumRepDataConTy
+    tuple_or_sum = text (if tuple_rep then "tuple" else "sum")
+
+    ki          = typeKind ty
+    runtime_rep = getRuntimeRepFromKind "check_type" ki
+
+    (tidy_env, tidy_ty) = tidyOpenType emptyTidyEnv ty
+    tidy_ki             = tidyType tidy_env (typeKind ty)

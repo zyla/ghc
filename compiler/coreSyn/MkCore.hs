@@ -24,14 +24,15 @@ module MkCore (
         mkCoreTupBoxity,
 
         -- * Constructing big tuples
-        mkBigCoreVarTup, mkBigCoreVarTupTy,
-        mkBigCoreTup, mkBigCoreTupTy,
+        mkBigCoreVarTup, mkBigCoreVarTup1,
+        mkBigCoreVarTupTy, mkBigCoreTupTy,
+        mkBigCoreTup,
 
         -- * Deconstructing small tuples
         mkSmallTupleSelector, mkSmallTupleCase,
 
         -- * Deconstructing big tuples
-        mkTupleSelector, mkTupleCase,
+        mkTupleSelector, mkTupleSelector1, mkTupleCase,
 
         -- * Constructing list expressions
         mkNilExpr, mkConsExpr, mkListExpr,
@@ -44,8 +45,8 @@ module MkCore (
         mkRuntimeErrorApp, mkImpossibleExpr, errorIds,
         rEC_CON_ERROR_ID, iRREFUT_PAT_ERROR_ID, rUNTIME_ERROR_ID,
         nON_EXHAUSTIVE_GUARDS_ERROR_ID, nO_METHOD_BINDING_ERROR_ID,
-        pAT_ERROR_ID, eRROR_ID, rEC_SEL_ERROR_ID, aBSENT_ERROR_ID,
-        uNDEFINED_ID, tYPE_ERROR_ID, undefinedName
+        pAT_ERROR_ID, rEC_SEL_ERROR_ID, aBSENT_ERROR_ID,
+        tYPE_ERROR_ID,
     ) where
 
 #include "HsVersions.h"
@@ -62,7 +63,7 @@ import TysWiredIn
 import PrelNames
 
 import HsUtils          ( mkChunkified, chunkify )
-import TcType           ( mkInvSigmaTy )
+import TcType           ( mkSpecSigmaTy )
 import Type
 import Coercion         ( isCoVar )
 import TysPrim
@@ -80,9 +81,6 @@ import DynFlags
 import Data.List
 
 import Data.Char        ( ord )
-#if __GLASGOW_HASKELL__ < 709
-import Data.Word        ( Word )
-#endif
 
 infixl 4 `mkCoreApp`, `mkCoreApps`
 
@@ -123,13 +121,13 @@ mkCoreLets binds body = foldr mkCoreLet body binds
 mkCoreApp :: SDoc -> CoreExpr -> CoreExpr -> CoreExpr
 -- Respects the let/app invariant by building a case expression where necessary
 --   See CoreSyn Note [CoreSyn let/app invariant]
-mkCoreApp _ fun (Type ty) = App fun (Type ty)
+mkCoreApp _ fun (Type ty)     = App fun (Type ty)
 mkCoreApp _ fun (Coercion co) = App fun (Coercion co)
-mkCoreApp d fun arg       = ASSERT2( isFunTy fun_ty, ppr fun $$ ppr arg $$ d )
-                          mk_val_app fun arg arg_ty res_ty
-                      where
-                        fun_ty = exprType fun
-                        (arg_ty, res_ty) = splitFunTy fun_ty
+mkCoreApp d fun arg           = ASSERT2( isFunTy fun_ty, ppr fun $$ ppr arg $$ d )
+                                mk_val_app fun arg arg_ty res_ty
+                              where
+                                fun_ty = exprType fun
+                                (arg_ty, res_ty) = splitFunTy fun_ty
 
 -- | Construct an expression which represents the application of a number of
 -- expressions to another. The leftmost expression in the list is applied first
@@ -140,13 +138,13 @@ mkCoreApps :: CoreExpr -> [CoreExpr] -> CoreExpr
 mkCoreApps orig_fun orig_args
   = go orig_fun (exprType orig_fun) orig_args
   where
-    go fun _      []                   = fun
-    go fun fun_ty (Type ty     : args) = go (App fun (Type ty)) (piResultTy fun_ty ty) args
-    go fun fun_ty (arg         : args) = ASSERT2( isFunTy fun_ty, ppr fun_ty $$ ppr orig_fun
-                                                                  $$ ppr orig_args )
-                                         go (mk_val_app fun arg arg_ty res_ty) res_ty args
-                                       where
-                                         (arg_ty, res_ty) = splitFunTy fun_ty
+    go fun _      []               = fun
+    go fun fun_ty (Type ty : args) = go (App fun (Type ty)) (piResultTy fun_ty ty) args
+    go fun fun_ty (arg     : args) = ASSERT2( isFunTy fun_ty, ppr fun_ty $$ ppr orig_fun
+                                                              $$ ppr orig_args )
+                                     go (mk_val_app fun arg arg_ty res_ty) res_ty args
+                                   where
+                                     (arg_ty, res_ty) = splitFunTy fun_ty
 
 -- | Construct an expression which represents the application of a number of
 -- expressions to that of a data constructor expression. The leftmost expression
@@ -306,17 +304,36 @@ Creating tuples and their types for Core expressions
 
 * If there are more elements than a big tuple can have, it nests
   the tuples.
+
+Note [Flattening one-tuples]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+This family of functions creates a tuple of variables/expressions/types.
+  mkCoreTup [e1,e2,e3] = (e1,e2,e3)
+What if there is just one variable/expression/type in the agument?
+We could do one of two things:
+
+* Flatten it out, so that
+    mkCoreTup [e1] = e1
+
+* Built a one-tuple (see Note [One-tuples] in TysWiredIn)
+    mkCoreTup1 [e1] = Unit e1
+  We use a suffix "1" to indicate this.
+
+Usually we want the former, but occasionally the latter.
 -}
 
 -- | Build a small tuple holding the specified variables
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkCoreVarTup :: [Id] -> CoreExpr
 mkCoreVarTup ids = mkCoreTup (map Var ids)
 
--- | Bulid the type of a small tuple that holds the specified variables
+-- | Build the type of a small tuple that holds the specified variables
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkCoreVarTupTy :: [Id] -> Type
 mkCoreVarTupTy ids = mkBoxedTupleTy (map idType ids)
 
 -- | Build a small tuple holding the specified expressions
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkCoreTup :: [CoreExpr] -> CoreExpr
 mkCoreTup []  = Var unitDataConId
 mkCoreTup [c] = c
@@ -325,13 +342,14 @@ mkCoreTup cs  = mkCoreConApps (tupleDataCon Boxed (length cs))
 
 -- | Build a small unboxed tuple holding the specified expressions,
 -- with the given types. The types must be the types of the expressions.
--- Do not include the levity specifiers; this function calculates them
+-- Do not include the RuntimeRep specifiers; this function calculates them
 -- for you.
+-- Does /not/ flatten one-tuples; see Note [Flattening one-tuples]
 mkCoreUbxTup :: [Type] -> [CoreExpr] -> CoreExpr
 mkCoreUbxTup tys exps
   = ASSERT( tys `equalLength` exps)
     mkCoreConApps (tupleDataCon Unboxed (length tys))
-             (map (Type . getLevity "mkCoreUbxTup") tys ++ map Type tys ++ exps)
+             (map (Type . getRuntimeRep "mkCoreUbxTup") tys ++ map Type tys ++ exps)
 
 -- | Make a core tuple of the given boxity
 mkCoreTupBoxity :: Boxity -> [CoreExpr] -> CoreExpr
@@ -339,43 +357,32 @@ mkCoreTupBoxity Boxed   exps = mkCoreTup exps
 mkCoreTupBoxity Unboxed exps = mkCoreUbxTup (map exprType exps) exps
 
 -- | Build a big tuple holding the specified variables
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkBigCoreVarTup :: [Id] -> CoreExpr
 mkBigCoreVarTup ids = mkBigCoreTup (map Var ids)
 
+mkBigCoreVarTup1 :: [Id] -> CoreExpr
+-- Same as mkBigCoreVarTup, but one-tuples are NOT flattened
+--                          see Note [Flattening one-tuples]
+mkBigCoreVarTup1 [id] = mkCoreConApps (tupleDataCon Boxed 1)
+                                      [Type (idType id), Var id]
+mkBigCoreVarTup1 ids  = mkBigCoreTup (map Var ids)
+
 -- | Build the type of a big tuple that holds the specified variables
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkBigCoreVarTupTy :: [Id] -> Type
 mkBigCoreVarTupTy ids = mkBigCoreTupTy (map idType ids)
 
 -- | Build a big tuple holding the specified expressions
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkBigCoreTup :: [CoreExpr] -> CoreExpr
 mkBigCoreTup = mkChunkified mkCoreTup
 
 -- | Build the type of a big tuple that holds the specified type of thing
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkBigCoreTupTy :: [Type] -> Type
 mkBigCoreTupTy = mkChunkified mkBoxedTupleTy
 
-{-
-************************************************************************
-*                                                                      *
-                Floats
-*                                                                      *
-************************************************************************
--}
-
-data FloatBind
-  = FloatLet  CoreBind
-  | FloatCase CoreExpr Id AltCon [Var]
-      -- case e of y { C ys -> ... }
-      -- See Note [Floating cases] in SetLevels
-
-instance Outputable FloatBind where
-  ppr (FloatLet b) = ptext (sLit "LET") <+> ppr b
-  ppr (FloatCase e b c bs) = hang (ptext (sLit "CASE") <+> ppr e <+> ptext (sLit "of") <+> ppr b)
-                                2 (ppr c <+> ppr bs)
-
-wrapFloat :: FloatBind -> CoreExpr -> CoreExpr
-wrapFloat (FloatLet defns)       body = Let defns body
-wrapFloat (FloatCase e b con bs) body = Case e b (exprType body) [(con, bs, body)]
 
 {-
 ************************************************************************
@@ -395,11 +402,12 @@ wrapFloat (FloatCase e b con bs) body = Case e b (exprType body) [(con, bs, body
 -- just the identity.
 --
 -- If necessary, we pattern match on a \"big\" tuple.
-mkTupleSelector :: [Id]         -- ^ The 'Id's to pattern match the tuple against
-                -> Id           -- ^ The 'Id' to select
-                -> Id           -- ^ A variable of the same type as the scrutinee
-                -> CoreExpr     -- ^ Scrutinee
-                -> CoreExpr     -- ^ Selector expression
+mkTupleSelector, mkTupleSelector1
+    :: [Id]         -- ^ The 'Id's to pattern match the tuple against
+    -> Id           -- ^ The 'Id' to select
+    -> Id           -- ^ A variable of the same type as the scrutinee
+    -> CoreExpr     -- ^ Scrutinee
+    -> CoreExpr     -- ^ Selector expression
 
 -- mkTupleSelector [a,b,c,d] b v e
 --          = case e of v {
@@ -423,21 +431,34 @@ mkTupleSelector vars the_var scrut_var scrut
           tpl_vs  = mkTemplateLocals tpl_tys
           [(tpl_v, group)] = [(tpl,gp) | (tpl,gp) <- zipEqual "mkTupleSelector" tpl_vs vars_s,
                                          the_var `elem` gp ]
+-- ^ 'mkTupleSelector1' is like 'mkTupleSelector'
+-- but one-tuples are NOT flattened (see Note [Flattening one-tuples])
+mkTupleSelector1 vars the_var scrut_var scrut
+  | [_] <- vars
+  = mkSmallTupleSelector1 vars the_var scrut_var scrut
+  | otherwise
+  = mkTupleSelector vars the_var scrut_var scrut
 
 -- | Like 'mkTupleSelector' but for tuples that are guaranteed
 -- never to be \"big\".
 --
 -- > mkSmallTupleSelector [x] x v e = [| e |]
 -- > mkSmallTupleSelector [x,y,z] x v e = [| case e of v { (x,y,z) -> x } |]
-mkSmallTupleSelector :: [Id]        -- The tuple args
-          -> Id         -- The selected one
-          -> Id         -- A variable of the same type as the scrutinee
-          -> CoreExpr        -- Scrutinee
+mkSmallTupleSelector, mkSmallTupleSelector1
+          :: [Id]        -- The tuple args
+          -> Id          -- The selected one
+          -> Id          -- A variable of the same type as the scrutinee
+          -> CoreExpr    -- Scrutinee
           -> CoreExpr
 mkSmallTupleSelector [var] should_be_the_same_var _ scrut
   = ASSERT(var == should_be_the_same_var)
-    scrut
+    scrut  -- Special case for 1-tuples
 mkSmallTupleSelector vars the_var scrut_var scrut
+  = mkSmallTupleSelector1 vars the_var scrut_var scrut
+
+-- ^ 'mkSmallTupleSelector1' is like 'mkSmallTupleSelector'
+-- but one-tuples are NOT flattened (see Note [Flattening one-tuples])
+mkSmallTupleSelector1 vars the_var scrut_var scrut
   = ASSERT( notNull vars )
     Case scrut scrut_var (idType the_var)
          [(DataAlt (tupleDataCon Boxed (length vars)), vars, Var the_var)]
@@ -495,6 +516,29 @@ mkSmallTupleCase vars body scrut_var scrut
 -- One branch no refinement?
   = Case scrut scrut_var (exprType body)
          [(DataAlt (tupleDataCon Boxed (length vars)), vars, body)]
+
+{-
+************************************************************************
+*                                                                      *
+                Floats
+*                                                                      *
+************************************************************************
+-}
+
+data FloatBind
+  = FloatLet  CoreBind
+  | FloatCase CoreExpr Id AltCon [Var]
+      -- case e of y { C ys -> ... }
+      -- See Note [Floating cases] in SetLevels
+
+instance Outputable FloatBind where
+  ppr (FloatLet b) = text "LET" <+> ppr b
+  ppr (FloatCase e b c bs) = hang (text "CASE" <+> ppr e <+> ptext (sLit "of") <+> ppr b)
+                                2 (ppr c <+> ppr bs)
+
+wrapFloat :: FloatBind -> CoreExpr -> CoreExpr
+wrapFloat (FloatLet defns)       body = Let defns body
+wrapFloat (FloatCase e b con bs) body = Case e b (exprType body) [(con, bs, body)]
 
 {-
 ************************************************************************
@@ -591,7 +635,8 @@ mkRuntimeErrorApp
         -> CoreExpr
 
 mkRuntimeErrorApp err_id res_ty err_msg
-  = mkApps (Var err_id) [Type (getLevity "mkRuntimeErrorApp" res_ty), Type res_ty, err_string]
+  = mkApps (Var err_id) [ Type (getRuntimeRep "mkRuntimeErrorApp" res_ty)
+                        , Type res_ty, err_string ]
   where
     err_string = Lit (mkMachString err_msg)
 
@@ -624,16 +669,7 @@ templates, but we don't ever expect to generate code for it.
 
 errorIds :: [Id]
 errorIds
-  = [ eRROR_ID,   -- This one isn't used anywhere else in the compiler
-                  -- But we still need it in wiredInIds so that when GHC
-                  -- compiles a program that mentions 'error' we don't
-                  -- import its type from the interface file; we just get
-                  -- the Id defined here.  Which has an 'open-tyvar' type.
-
-      uNDEFINED_ID,   -- Ditto for 'undefined'. The big deal is to give it
-                      -- an 'open-tyvar' type.
-
-      rUNTIME_ERROR_ID,
+  = [ rUNTIME_ERROR_ID,
       iRREFUT_PAT_ERROR_ID,
       nON_EXHAUSTIVE_GUARDS_ERROR_ID,
       nO_METHOD_BINDING_ERROR_ID,
@@ -667,8 +703,7 @@ err_nm str uniq id = mkWiredInIdName cONTROL_EXCEPTION_BASE (fsLit str) uniq id
 
 rEC_SEL_ERROR_ID, rUNTIME_ERROR_ID, iRREFUT_PAT_ERROR_ID, rEC_CON_ERROR_ID :: Id
 pAT_ERROR_ID, nO_METHOD_BINDING_ERROR_ID, nON_EXHAUSTIVE_GUARDS_ERROR_ID :: Id
-tYPE_ERROR_ID :: Id
-aBSENT_ERROR_ID :: Id
+tYPE_ERROR_ID, aBSENT_ERROR_ID :: Id
 rEC_SEL_ERROR_ID                = mkRuntimeErrorId recSelErrorName
 rUNTIME_ERROR_ID                = mkRuntimeErrorId runtimeErrorName
 iRREFUT_PAT_ERROR_ID            = mkRuntimeErrorId irrefutPatErrorName
@@ -680,67 +715,14 @@ aBSENT_ERROR_ID                 = mkRuntimeErrorId absentErrorName
 tYPE_ERROR_ID                   = mkRuntimeErrorId typeErrorName
 
 mkRuntimeErrorId :: Name -> Id
-mkRuntimeErrorId name = pc_bottoming_Id1 name runtimeErrorTy
-
-runtimeErrorTy :: Type
--- The runtime error Ids take a UTF8-encoded string as argument
-runtimeErrorTy = mkInvSigmaTy [levity1TyVar, openAlphaTyVar] []
-                              (mkFunTy addrPrimTy openAlphaTy)
-
-errorName :: Name
-errorName = mkWiredInIdName gHC_ERR (fsLit "error") errorIdKey eRROR_ID
-
-eRROR_ID :: Id
-eRROR_ID = pc_bottoming_Id2 errorName errorTy
-
-errorTy  :: Type   -- See Note [Error and friends have an "open-tyvar" forall]
-errorTy  = mkInvSigmaTy [levity1TyVar, openAlphaTyVar] []
-             (mkFunTys [ mkClassPred
-                           ipClass
-                           [ mkStrLitTy (fsLit "callStack")
-                           , mkTyConTy callStackTyCon ]
-                       , mkListTy charTy]
-                       openAlphaTy)
-
-undefinedName :: Name
-undefinedName = mkWiredInIdName gHC_ERR (fsLit "undefined") undefinedKey uNDEFINED_ID
-
-uNDEFINED_ID :: Id
-uNDEFINED_ID = pc_bottoming_Id1 undefinedName undefinedTy
-
-undefinedTy  :: Type   -- See Note [Error and friends have an "open-tyvar" forall]
-undefinedTy  = mkInvSigmaTy [levity1TyVar, openAlphaTyVar] []
-                 (mkFunTy (mkClassPred
-                             ipClass
-                             [ mkStrLitTy (fsLit "callStack")
-                             , mkTyConTy callStackTyCon ])
-                          openAlphaTy)
-
-{-
-Note [Error and friends have an "open-tyvar" forall]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-'error' and 'undefined' have types
-        error     :: forall (v :: Levity) (a :: TYPE v). String -> a
-        undefined :: forall (v :: Levity) (a :: TYPE v). a
-Notice the levity polymophism. This ensures that
-"error" can be instantiated at
-  * unboxed as well as boxed types
-  * polymorphic types
-This is OK because it never returns, so the return type is irrelevant.
-See Note [Sort-polymorphic tyvars accept foralls] in TcUnify.
-
-
-************************************************************************
-*                                                                      *
-\subsection{Utilities}
-*                                                                      *
-************************************************************************
--}
-
-pc_bottoming_Id1 :: Name -> Type -> Id
--- Function of arity 1, which diverges after being given one argument
-pc_bottoming_Id1 name ty
- = mkVanillaGlobalWithInfo name ty bottoming_info
+-- Error function
+--   with type:  forall (r:RuntimeRep) (a:TYPE r). Addr# -> a
+--   with arity: 1
+-- which diverges after being given one argument
+-- The Addr# is expected to be the address of
+--   a UTF8-encoded error string
+mkRuntimeErrorId name
+ = mkVanillaGlobalWithInfo name runtime_err_ty bottoming_info
  where
     bottoming_info = vanillaIdInfo `setStrictnessInfo`    strict_sig
                                    `setArityInfo`         1
@@ -755,14 +737,21 @@ pc_bottoming_Id1 name ty
         -- any pc_bottoming_Id will itself have CafRefs, which bloats
         -- SRTs.
 
-    strict_sig = mkClosedStrictSig [evalDmd] botRes
-    -- These "bottom" out, no matter what their arguments
+    strict_sig = mkClosedStrictSig [evalDmd] exnRes
+              -- exnRes: these throw an exception, not just diverge
 
-pc_bottoming_Id2 :: Name -> Type -> Id
--- Same but arity two
-pc_bottoming_Id2 name ty
- = mkVanillaGlobalWithInfo name ty bottoming_info
- where
-    bottoming_info = vanillaIdInfo `setStrictnessInfo` strict_sig
-                                   `setArityInfo`      2
-    strict_sig = mkClosedStrictSig [evalDmd, evalDmd] botRes
+    -- forall (rr :: RuntimeRep) (a :: rr). Addr# -> a
+    --   See Note [Error and friends have an "open-tyvar" forall]
+    runtime_err_ty = mkSpecSigmaTy [runtimeRep1TyVar, openAlphaTyVar] []
+                                   (mkFunTy addrPrimTy openAlphaTy)
+
+{- Note [Error and friends have an "open-tyvar" forall]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+'error' and 'undefined' have types
+        error     :: forall (v :: RuntimeRep) (a :: TYPE v). String -> a
+        undefined :: forall (v :: RuntimeRep) (a :: TYPE v). a
+Notice the runtime-representation polymophism. This ensures that
+"error" can be instantiated at unboxed as well as boxed types.
+This is OK because it never returns, so the return type is irrelevant.
+-}
+

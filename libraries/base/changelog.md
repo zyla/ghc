@@ -1,6 +1,29 @@
 # Changelog for [`base` package](http://hackage.haskell.org/package/base)
 
-## 4.9.0.0  *TBA*
+## next *TBA*
+  * Bundled with GHC *TBA*
+
+  * `Data.Type.Bool.Not` given a type family dependency (#12057).
+
+  * `Foreign.Ptr` now exports the constructors for `IntPtr` and `WordPtr`
+    (#11983)
+
+  * `Generic1`, as well as the associated datatypes and typeclasses in
+    `GHC.Generics`, are now poly-kinded (#10604)
+
+  * `New modules `Data.Bifoldable` and `Data.Bitraversable` (previously defined
+    in the `bifunctors` package) (#10448)
+
+  * `Data.Either` now provides `fromLeft` and `fromRight` (#12402)
+
+  * `Data.Type.Coercion` now provides `gcoerceWith` (#12493)
+
+  * New methods `liftReadList(2)` and `liftReadListPrec(2)` in the
+    `Read1`/`Read2` classes that are defined in terms of `ReadPrec` instead of
+    `ReadS`, as well as related combinators, have been added to
+    `Data.Functor.Classes` (#12358)
+
+## 4.9.0.0  *May 2016*
 
   * Bundled with GHC 8.0
 
@@ -13,7 +36,9 @@
 
   * New `GHC.Generics.packageName` operation
 
-  * New `GHC.Stack.CallStack` data type
+  * Redesigned `GHC.Stack.CallStack` data type. As a result, `CallStack`'s
+    `Show` instance produces different output, and `CallStack` no longer has an
+    `Eq` instance.
 
   * New `GHC.Generics.packageName` operation
 
@@ -25,6 +50,9 @@
   * New `GHC.Stack.Types.freezeCallStack` function freezes a `CallStack` preventing future `pushCallStack` operations from having any effect
 
   * New `GHC.Stack.Types.pushCallStack` function pushes a call-site onto a `CallStack`
+
+  * New `GHC.Stack.Types.fromCallSiteList` function creates a `CallStack` from
+    a list of call-sites (i.e., `[(String, SrcLoc)]`)
 
   * `GHC.SrcLoc` has been removed
 
@@ -43,6 +71,9 @@
   * Add `URec`, `UAddr`, `UChar`, `UDouble`, `UFloat`, `UInt`, and `UWord` to
     `GHC.Generics` as part of making GHC generics capable of handling
     unlifted types (#10868)
+
+  * The `Eq`, `Ord`, `Read`, and `Show` instances for `U1` now use lazier
+    pattern-matching
 
   * Keep `shift{L,R}` on `Integer` with negative shift-arguments from
     segfaulting (#10571)
@@ -70,6 +101,9 @@
     `Data.Functor.Product`, and `Data.Functor.Sum` (previously provided by
     `transformers` package). (#11135)
 
+  * New instances for `Proxy`: `Eq1`, `Ord1`, `Show1`, `Read1`. All
+    of the classes are from `Data.Functor.Classes` (#11756).
+
   * New module `Control.Monad.Fail` providing new `MonadFail(fail)`
     class (#10751)
 
@@ -91,10 +125,18 @@
     precision: `log1p`, `expm1`, `log1pexp` and `log1mexp`. These are not
     available from `Prelude`, but the full class is exported from `Numeric`.
 
+  * New `Control.Exception.TypeError` datatype, which is thrown when an
+    expression fails to typecheck when run using `-fdefer-type-errors` (#10284)
+
 ### New instances
 
   * `Alt`, `Dual`, `First`, `Last`, `Product`, and `Sum` now have `Data`,
     `MonadZip`, and `MonadFix` instances
+
+  * The datatypes in `GHC.Generics` now have `Enum`, `Bounded`, `Ix`,
+    `Functor`, `Applicative`, `Monad`, `MonadFix`, `MonadPlus`, `MonadZip`,
+    `Foldable`, `Foldable`, `Traversable`, `Generic1`, and `Data` instances
+    as appropriate.
 
   * `Maybe` now has a `MonadZip` instance
 
@@ -112,9 +154,9 @@
 
   * `Identity` now has `Semigroup` and `Monoid` instances
 
-  * `Identity` and `Const` now have `Bounded`, `Enum` and `Ix` instances
-
-  * `Identity` and `Const` now have `Storable` instances
+  * `Identity` and `Const` now have `Bits`, `Bounded`, `Enum`, `FiniteBits`,
+    `Floating`, `Fractional`, `Integral`, `IsString`, `Ix`, `Num`, `Real`,
+    `RealFloat`, `RealFrac` and `Storable` instances. (#11210, #11790)
 
   * `()` now has a `Storable` instance
 
@@ -129,6 +171,11 @@
 
   * Add `MonadPlus IO` and `Alternative IO` instances
     (previously orphans in `transformers`) (#10755)
+
+  * `CallStack` now has an `IsList` instance
+
+  * The field `spInfoName` of `GHC.StaticPtr.StaticPtrInfo` has been removed.
+    The value is no longer available when constructing the `StaticPtr`.
 
 ### Generalizations
 

@@ -137,6 +137,7 @@ test('simpl021',
      run_command,
      ['$MAKE -s --no-print-directory simpl021'])
 test('T5327', normal, run_command, ['$MAKE -s --no-print-directory T5327'])
+test('T5615', normal, run_command, ['$MAKE -s --no-print-directory T5615'])
 test('T5623', normal, run_command, ['$MAKE -s --no-print-directory T5623'])
 test('T5658b',
      normal,
@@ -166,11 +167,11 @@ test('T7796',
      extra_clean(['T7796.prep']),
      run_command,
      ['$MAKE -s --no-print-directory T7796'])
-test('T5550', normal, compile, [''])
+test('T5550', omit_ways(prof_ways), compile, [''])
 test('T7865', normal, run_command, ['$MAKE -s --no-print-directory T7865'])
 test('T7785', only_ways(['optasm']), compile, ['-ddump-rules'])
 test('T7702', 
-     [pre_cmd('$MAKE -s --no-print-directory -C T7702plugin package.T7702'), 
+     [pre_cmd('$MAKE -s --no-print-directory -C T7702plugin package.T7702 TOP={top}'),
       clean_cmd('$MAKE -s --no-print-directory -C T7702plugin clean.T7702'), 
       # we say 18mb peak allocated +/- 70% because other compiler flags have 
       # a large effect on allocation which is hard to separate from the 
@@ -179,7 +180,7 @@ test('T7702',
           [(wordsize(32), 18, 70), (wordsize(64), 18, 70)]) 
      ], 
      compile, 
-     ['-v0 -package-db T7702plugin/pkg.T7702/local.package.conf -fplugin T7702Plugin -package T7702plugin ' + config.ghci_way_flags])
+     ['-v0 -package-db T7702plugin/pkg.T7702/local.package.conf -fplugin T7702Plugin -package T7702plugin ' + config.plugin_way_flags])
 
 test('T7995',
      # RULE doesn't seem to fire unless optimizations are turned on.
@@ -220,7 +221,7 @@ test('T10602', only_ways(['optasm']), multimod_compile, ['T10602','-v0'])
 test('T10627', only_ways(['optasm']), compile, [''])
 test('T10181', [expect_broken(10181), only_ways(['optasm'])], compile, [''])
 test('T10083',
-     expect_broken(10083),
+     normal,
      run_command,
      ['$MAKE -s --no-print-directory T10083'])
 test('T10689', normal, compile, [''])
@@ -229,3 +230,18 @@ test('T11155',
      run_command,
      ['$MAKE -s --no-print-directory T11155'])
 test('T11232', normal, compile, ['-O2'])
+test('T11562', normal, compile, ['-O2'])
+test('T11742', normal, compile, ['-O2'])
+test('T11644', normal, compile, ['-O2'])
+test('T3990',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T3990'])
+
+test('T12076', extra_clean(['T12076a.hi', 'T12076a.o']), multimod_compile, ['T12076', '-v0'])
+test('T12076lit', normal, compile, ['-O'])
+test('T12076sat', normal, compile, ['-O'])
+test('T12212', normal, compile, ['-O'])
+
+test('noinline01', only_ways(['optasm']), compile, ['-ddump-stg -dsuppress-uniques -O'])
+test('par01', only_ways(['optasm']), compile, ['-ddump-prep -dsuppress-uniques -O2'])

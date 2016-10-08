@@ -9,6 +9,7 @@
 #include "PosixSource.h"
 #include "Rts.h"
 
+#include "Capability.h"
 #include "RtsFlags.h"
 #include "RtsUtils.h"
 #include "Profiling.h"
@@ -19,6 +20,7 @@
 #include "LdvProfile.h"
 #include "Arena.h"
 #include "Printer.h"
+#include "Trace.h"
 #include "sm/GCThread.h"
 
 #include <string.h>
@@ -37,7 +39,7 @@
  * store only up to (max_era - 1) as its creation or last use time.
  * -------------------------------------------------------------------------- */
 unsigned int era;
-static nat max_era;
+static uint32_t max_era;
 
 /* -----------------------------------------------------------------------------
  * Counters
@@ -48,15 +50,16 @@ static nat max_era;
  * lag/drag/void counters for each identity.
  * -------------------------------------------------------------------------- */
 typedef struct _counter {
-    void *identity;
+    const void *identity;
     union {
-        nat resid;
+        ssize_t resid;
         struct {
-            long prim;     // total size of 'inherently used' closures
-            long not_used; // total size of 'never used' closures
-            long used;     // total size of 'used at least once' closures
-            long void_total;  // current total size of 'destroyed without being used' closures
-            long drag_total;  // current total size of 'used at least once and waiting to die'
+            // Total sizes of:
+            ssize_t prim;     // 'inherently used' closures
+            ssize_t not_used; // 'never used' closures
+            ssize_t used;     // 'used at least once' closures
+            ssize_t void_total;  // 'destroyed without being used' closures
+            ssize_t drag_total;  // 'used at least once and waiting to die'
         } ldv;
     } c;
     struct _counter *next;
@@ -79,15 +82,15 @@ typedef struct {
     Arena     * arena;
 
     // for LDV profiling, when just displaying by LDV
-    long       prim;
-    long       not_used;
-    long       used;
-    long       void_total;
-    long       drag_total;
+    ssize_t    prim;
+    ssize_t    not_used;
+    ssize_t    used;
+    ssize_t    void_total;
+    ssize_t    drag_total;
 } Census;
 
 static Census *censuses = NULL;
-static nat n_censuses = 0;
+static uint32_t n_censuses = 0;
 
 #ifdef PROFILING
 static void aggregateCensusInfo( void );
@@ -95,15 +98,15 @@ static void aggregateCensusInfo( void );
 
 static void dumpCensus( Census *census );
 
-static rtsBool closureSatisfiesConstraints( StgClosure* p );
+static rtsBool closureSatisfiesConstraints( const StgClosure* p );
 
 /* ----------------------------------------------------------------------------
  * Find the "closure identity", which is a unique pointer representing
  * the band to which this closure's heap space is attributed in the
  * heap profile.
  * ------------------------------------------------------------------------- */
-static void *
-closureIdentity( StgClosure *p )
+static const void *
+closureIdentity( const StgClosure *p )
 {
     switch (RtsFlags.ProfFlags.doHeapProfile) {
 
@@ -127,7 +130,7 @@ closureIdentity( StgClosure *p )
 #else
     case HEAP_BY_CLOSURE_TYPE:
     {
-        StgInfoTable *info;
+        const StgInfoTable *info;
         info = get_itbl(p);
         switch (info->type) {
         case CONSTR:
@@ -161,7 +164,7 @@ doingLDVProfiling( void )
             || RtsFlags.ProfFlags.bioSelector != NULL);
 }
 
-STATIC_INLINE rtsBool
+rtsBool
 doingRetainerProfiling( void )
 {
     return (RtsFlags.ProfFlags.doHeapProfile == HEAP_BY_RETAINER
@@ -180,10 +183,10 @@ doingRetainerProfiling( void )
 
 #ifdef PROFILING
 void
-LDV_recordDead( StgClosure *c, nat size )
+LDV_recordDead( const StgClosure *c, uint32_t size )
 {
-    void *id;
-    nat t;
+    const void *id;
+    uint32_t t;
     counter *ctr;
 
     if (era > 0 && closureSatisfiesConstraints(c)) {
@@ -193,14 +196,14 @@ LDV_recordDead( StgClosure *c, nat size )
             t = (LDVW((c)) & LDV_CREATE_MASK) >> LDV_SHIFT;
             if (t < era) {
                 if (RtsFlags.ProfFlags.bioSelector == NULL) {
-                    censuses[t].void_total   += (long)size;
-                    censuses[era].void_total -= (long)size;
+                    censuses[t].void_total   += size;
+                    censuses[era].void_total -= size;
                     ASSERT(censuses[t].void_total < censuses[t].not_used);
                 } else {
                     id = closureIdentity(c);
                     ctr = lookupHashTable(censuses[t].hash, (StgWord)id);
                     ASSERT( ctr != NULL );
-                    ctr->c.ldv.void_total += (long)size;
+                    ctr->c.ldv.void_total += size;
                     ctr = lookupHashTable(censuses[era].hash, (StgWord)id);
                     if (ctr == NULL) {
                         ctr = arenaAlloc(censuses[era].arena, sizeof(counter));
@@ -210,7 +213,7 @@ LDV_recordDead( StgClosure *c, nat size )
                         ctr->next = censuses[era].ctrs;
                         censuses[era].ctrs = ctr;
                     }
-                    ctr->c.ldv.void_total -= (long)size;
+                    ctr->c.ldv.void_total -= size;
                 }
             }
         } else {
@@ -220,11 +223,11 @@ LDV_recordDead( StgClosure *c, nat size )
                     censuses[t+1].drag_total += size;
                     censuses[era].drag_total -= size;
                 } else {
-                    void *id;
+                    const void *id;
                     id = closureIdentity(c);
                     ctr = lookupHashTable(censuses[t+1].hash, (StgWord)id);
                     ASSERT( ctr != NULL );
-                    ctr->c.ldv.drag_total += (long)size;
+                    ctr->c.ldv.drag_total += size;
                     ctr = lookupHashTable(censuses[era].hash, (StgWord)id);
                     if (ctr == NULL) {
                         ctr = arenaAlloc(censuses[era].arena, sizeof(counter));
@@ -234,7 +237,7 @@ LDV_recordDead( StgClosure *c, nat size )
                         ctr->next = censuses[era].ctrs;
                         censuses[era].ctrs = ctr;
                     }
-                    ctr->c.ldv.drag_total -= (long)size;
+                    ctr->c.ldv.drag_total -= size;
                 }
             }
         }
@@ -311,15 +314,11 @@ nextEra( void )
 FILE *hp_file;
 static char *hp_filename;
 
-void initProfiling (void)
-{
-}
-
 void freeProfiling (void)
 {
 }
 
-void initProfiling2 (void)
+void initProfiling (void)
 {
     char *prog;
 
@@ -373,10 +372,23 @@ printSample(rtsBool beginSample, StgDouble sampleValue)
     }
 }
 
+static void
+dumpCostCentresToEventLog(void)
+{
+#ifdef PROFILING
+    CostCentre *cc, *next;
+    for (cc = CC_LIST; cc != NULL; cc = next) {
+        next = cc->link;
+        traceHeapProfCostCentre(cc->ccID, cc->label, cc->module,
+                                cc->srcloc, cc->is_caf);
+    }
+#endif
+}
+
 /* --------------------------------------------------------------------------
  * Initialize the heap profilier
  * ----------------------------------------------------------------------- */
-nat
+uint32_t
 initHeapProfiling(void)
 {
     if (! RtsFlags.ProfFlags.doHeapProfile) {
@@ -388,6 +400,13 @@ initHeapProfiling(void)
         errorBelch("cannot mix -hb and -hr");
         stg_exit(EXIT_FAILURE);
     }
+#ifdef THREADED_RTS
+    // See Trac #12019.
+    if (doingLDVProfiling() && RtsFlags.ParFlags.nCapabilities > 1) {
+        errorBelch("-hb cannot be used with multiple capabilities");
+        stg_exit(EXIT_FAILURE);
+    }
+#endif
 #endif
 
     // we only count eras if we're doing LDV profiling.  Otherwise era
@@ -402,7 +421,7 @@ initHeapProfiling(void)
     }
 
     // max_era = 2^LDV_SHIFT
-        max_era = 1 << LDV_SHIFT;
+    max_era = 1 << LDV_SHIFT;
 
     n_censuses = 32;
     censuses = stgMallocBytes(sizeof(Census) * n_censuses, "initHeapProfiling");
@@ -439,6 +458,9 @@ initHeapProfiling(void)
     }
 #endif
 
+    traceHeapProfBegin(0);
+    dumpCostCentresToEventLog();
+
     return 0;
 }
 
@@ -459,7 +481,7 @@ endHeapProfiling(void)
 
 #ifdef PROFILING
     if (doingLDVProfiling()) {
-        nat t;
+        uint32_t t;
         LdvCensusKillAll();
         aggregateCensusInfo();
         for (t = 1; t < era; t++) {
@@ -470,7 +492,7 @@ endHeapProfiling(void)
 
 #ifdef PROFILING
     if (doingLDVProfiling()) {
-        nat t;
+        uint32_t t;
         if (RtsFlags.ProfFlags.bioSelector != NULL) {
             for (t = 1; t <= era; t++) {
                 freeEra( &censuses[t] );
@@ -509,7 +531,7 @@ buf_append(char *p, const char *q, char *end)
 }
 
 static void
-fprint_ccs(FILE *fp, CostCentreStack *ccs, nat max_length)
+fprint_ccs(FILE *fp, CostCentreStack *ccs, uint32_t max_length)
 {
     char buf[max_length+1], *p, *buf_end;
 
@@ -519,7 +541,7 @@ fprint_ccs(FILE *fp, CostCentreStack *ccs, nat max_length)
         return;
     }
 
-    fprintf(fp, "(%ld)", ccs->ccsID);
+    fprintf(fp, "(%" FMT_Int ")", ccs->ccsID);
 
     p = buf;
     buf_end = buf + max_length + 1;
@@ -579,7 +601,7 @@ strMatchesSelector( const char* str, const char* sel )
  * testing against all the specified constraints.
  * -------------------------------------------------------------------------- */
 static rtsBool
-closureSatisfiesConstraints( StgClosure* p )
+closureSatisfiesConstraints( const StgClosure* p )
 {
 #if !defined(PROFILING)
     (void)p;   /* keep gcc -Wall happy */
@@ -606,7 +628,7 @@ closureSatisfiesConstraints( StgClosure* p )
    }
    if (RtsFlags.ProfFlags.retainerSelector) {
        RetainerSet *rs;
-       nat i;
+       uint32_t i;
        // We must check that the retainer set is valid here.  One
        // reason it might not be valid is if this closure is a
        // a newly deceased weak pointer (i.e. a DEAD_WEAK), since
@@ -635,7 +657,7 @@ static void
 aggregateCensusInfo( void )
 {
     HashTable *acc;
-    nat t;
+    uint32_t t;
     counter *c, *d, *ctrs;
     Arena *arena;
 
@@ -743,13 +765,15 @@ static void
 dumpCensus( Census *census )
 {
     counter *ctr;
-    long count;
+    ssize_t count;
 
     printSample(rtsTrue, census->time);
+    traceHeapProfSampleBegin(era);
 
 #ifdef PROFILING
     if (RtsFlags.ProfFlags.doHeapProfile == HEAP_BY_LDV) {
-      fprintf(hp_file, "VOID\t%lu\n", (unsigned long)(census->void_total) * sizeof(W_));
+        fprintf(hp_file, "VOID\t%lu\n",
+                (unsigned long)(census->void_total) * sizeof(W_));
         fprintf(hp_file, "LAG\t%lu\n",
                 (unsigned long)(census->not_used - census->void_total) * sizeof(W_));
         fprintf(hp_file, "USE\t%lu\n",
@@ -790,6 +814,8 @@ dumpCensus( Census *census )
         switch (RtsFlags.ProfFlags.doHeapProfile) {
         case HEAP_BY_CLOSURE_TYPE:
             fprintf(hp_file, "%s", (char *)ctr->identity);
+            traceHeapProfSampleString(0, (char *)ctr->identity,
+                                      count * sizeof(W_));
             break;
         }
 #endif
@@ -797,12 +823,17 @@ dumpCensus( Census *census )
 #ifdef PROFILING
         switch (RtsFlags.ProfFlags.doHeapProfile) {
         case HEAP_BY_CCS:
-            fprint_ccs(hp_file, (CostCentreStack *)ctr->identity, RtsFlags.ProfFlags.ccsLength);
+            fprint_ccs(hp_file, (CostCentreStack *)ctr->identity,
+                       RtsFlags.ProfFlags.ccsLength);
+            traceHeapProfSampleCostCentre(0, (CostCentreStack *)ctr->identity,
+                                          count * sizeof(W_));
             break;
         case HEAP_BY_MOD:
         case HEAP_BY_DESCR:
         case HEAP_BY_TYPE:
             fprintf(hp_file, "%s", (char *)ctr->identity);
+            traceHeapProfSampleString(0, (char *)ctr->identity,
+                                      count * sizeof(W_));
             break;
         case HEAP_BY_RETAINER:
         {
@@ -832,22 +863,22 @@ dumpCensus( Census *census )
         }
 #endif
 
-        fprintf(hp_file, "\t%" FMT_SizeT "\n", (W_)count * sizeof(W_));
+        fprintf(hp_file, "\t%" FMT_Word "\n", (W_)count * sizeof(W_));
     }
 
     printSample(rtsFalse, census->time);
 }
 
 
-static void heapProfObject(Census *census, StgClosure *p, nat size,
+static void heapProfObject(Census *census, StgClosure *p, size_t size,
                            rtsBool prim
 #ifndef PROFILING
                            STG_UNUSED
 #endif
                            )
 {
-    void *identity;
-    nat real_size;
+    const void *identity;
+    size_t real_size;
     counter *ctr;
 
             identity = NULL;
@@ -874,7 +905,7 @@ static void heapProfObject(Census *census, StgClosure *p, nat size,
                     identity = closureIdentity((StgClosure *)p);
 
                     if (identity != NULL) {
-                        ctr = lookupHashTable( census->hash, (StgWord)identity );
+                        ctr = lookupHashTable(census->hash, (StgWord)identity);
                         if (ctr != NULL) {
 #ifdef PROFILING
                             if (RtsFlags.ProfFlags.bioSelector != NULL) {
@@ -916,6 +947,24 @@ static void heapProfObject(Census *census, StgClosure *p, nat size,
             }
 }
 
+// Compact objects require special handling code because they
+// are not stored consecutively in memory (rather, each object
+// is a list of objects), and that would break the while loop
+// below. But we know that each block holds at most one object
+// so we don't need the loop.
+//
+// See Note [Compact Normal Forms] for details.
+static void
+heapCensusCompactList(Census *census, bdescr *bd)
+{
+    for (; bd != NULL; bd = bd->link) {
+        StgCompactNFDataBlock *block = (StgCompactNFDataBlock*)bd->start;
+        StgCompactNFData *str = block->owner;
+        heapProfObject(census, (StgClosure*)str,
+                       compact_nfdata_full_sizeW(str), rtsTrue);
+    }
+}
+
 /* -----------------------------------------------------------------------------
  * Code to perform a heap census.
  * -------------------------------------------------------------------------- */
@@ -923,8 +972,8 @@ static void
 heapCensusChain( Census *census, bdescr *bd )
 {
     StgPtr p;
-    StgInfoTable *info;
-    nat size;
+    const StgInfoTable *info;
+    size_t size;
     rtsBool prim;
 
     for (; bd != NULL; bd = bd->link) {
@@ -941,8 +990,22 @@ heapCensusChain( Census *census, bdescr *bd )
         }
 
         p = bd->start;
+
+        // When we shrink a large ARR_WORDS, we do not adjust the free pointer
+        // of the associated block descriptor, thus introducing slop at the end
+        // of the object.  This slop remains after GC, violating the assumption
+        // of the loop below that all slop has been eliminated (#11627).
+        // Consequently, we handle large ARR_WORDS objects as a special case.
+        if (bd->flags & BF_LARGE
+            && get_itbl((StgClosure *)p)->type == ARR_WORDS) {
+            size = arr_words_sizeW((StgArrBytes *)p);
+            prim = rtsTrue;
+            heapProfObject(census, (StgClosure *)p, size, prim);
+            continue;
+        }
+
         while (p < bd->free) {
-            info = get_itbl((StgClosure *)p);
+            info = get_itbl((const StgClosure *)p);
             prim = rtsFalse;
 
             switch (info->type) {
@@ -965,7 +1028,6 @@ heapCensusChain( Census *census, bdescr *bd )
 
             case CONSTR:
             case FUN:
-            case IND_PERM:
             case BLACKHOLE:
             case BLOCKING_QUEUE:
             case FUN_1_0:
@@ -1079,6 +1141,10 @@ heapCensusChain( Census *census, bdescr *bd )
                 size = sizeofW(StgTRecChunk);
                 break;
 
+            case COMPACT_NFDATA:
+                barf("heapCensus, found compact object in the wrong list");
+                break;
+
             default:
                 barf("heapCensus, unknown object: %d", info->type);
             }
@@ -1092,7 +1158,7 @@ heapCensusChain( Census *census, bdescr *bd )
 
 void heapCensus (Time t)
 {
-  nat g, n;
+  uint32_t g, n;
   Census *census;
   gen_workspace *ws;
 
@@ -1116,6 +1182,7 @@ void heapCensus (Time t)
       // Are we interested in large objects?  might be
       // confusing to include the stack in a heap profile.
       heapCensusChain( census, generations[g].large_objects );
+      heapCensusCompactList ( census, generations[g].compact_objects );
 
       for (n = 0; n < n_capabilities; n++) {
           ws = &gc_threads[n]->gens[g];

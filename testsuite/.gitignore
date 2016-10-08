@@ -39,6 +39,8 @@ Thumbs.db
 *.stderr-ws-32.normalised
 *.interp.stdout
 *.interp.stderr
+*.prof.normalised
+*.prof.sample.normalised
 *.run.stdout
 *.run.stderr
 
@@ -100,6 +102,10 @@ mk/ghcconfig*_test___spaces_ghc*.exe.mk
 /tests/arrows/should_run/arrowrun002
 /tests/arrows/should_run/arrowrun003
 /tests/arrows/should_run/arrowrun004
+/tests/backpack/should_run/bkprun01
+/tests/backpack/should_run/bkprun02
+/tests/backpack/should_run/bkprun03
+/tests/backpack/should_run/bkprun04
 /tests/boxy/T2193
 /tests/cabal/1750.hs
 /tests/cabal/1750.out
@@ -121,6 +127,9 @@ mk/ghcconfig*_test___spaces_ghc*.exe.mk
 /tests/cabal/cabal05/r-0.1.0.0/
 /tests/cabal/cabal06/inst-*/
 /tests/cabal/cabal06/tmp*
+/tests/cabal/cabal08/Main
+/tests/cabal/cabal08/inst-*
+/tests/cabal/cabal08/tmp*
 /tests/cabal/local01.package.conf/
 /tests/cabal/local03.package.conf/
 /tests/cabal/local04.package.conf/
@@ -566,6 +575,10 @@ mk/ghcconfig*_test___spaces_ghc*.exe.mk
 /tests/driver/T8526/A.inc
 /tests/driver/T8602/t8602.sh
 /tests/driver/T9562/Main
+/tests/driver/T11763
+/tests/driver/T12135
+/tests/driver/T12135a
+/tests/driver/T12135b
 /tests/driver/Test.081b
 /tests/driver/Test.081b.hs
 /tests/driver/Test_081a
@@ -781,6 +794,7 @@ mk/ghcconfig*_test___spaces_ghc*.exe.mk
 /tests/ghci/scripts/ghci027.hs
 /tests/ghci/should_run/3171.err
 /tests/hsc2hs/3837.hs
+/tests/hsc2hs/T12504/path/to/T12504.hs
 /tests/hsc2hs/T3837.hs
 /tests/hsc2hs/hsc2hs001.hs
 /tests/hsc2hs/hsc2hs002.hs
@@ -1469,6 +1483,7 @@ mk/ghcconfig*_test___spaces_ghc*.exe.mk
 /tests/simplCore/should_run/T5997
 /tests/simplCore/should_run/T7101
 /tests/simplCore/should_run/T7924
+/tests/simplCore/should_run/T11731
 /tests/simplCore/should_run/T9128
 /tests/simplCore/should_run/T9390
 /tests/simplCore/should_run/runST

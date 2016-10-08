@@ -11,7 +11,7 @@ Typechecking class declarations
 module TcClassDcl ( tcClassSigs, tcClassDecl2,
                     findMethodBind, instantiateMethod,
                     tcClassMinimalDef,
-                    HsSigFun, mkHsSigFun, lookupHsSig, emptyHsSigs,
+                    HsSigFun, mkHsSigFun,
                     tcMkDeclCtxt, tcAddDeclCtxt, badMethodErr,
                     tcATDefault
                   ) where
@@ -20,13 +20,13 @@ module TcClassDcl ( tcClassSigs, tcClassDecl2,
 
 import HsSyn
 import TcEnv
-import TcPat( addInlinePrags, lookupPragEnv, emptyPragEnv )
-import TcEvidence( idHsWrapper )
+import TcSigs
+import TcEvidence ( idHsWrapper )
 import TcBinds
 import TcUnify
 import TcHsType
 import TcMType
-import Type     ( getClassPredTys_maybe, varSetElemsWellScoped )
+import Type     ( getClassPredTys_maybe, piResultTys )
 import TcType
 import TcRnMonad
 import BuildTyCl( TcMethInfo )
@@ -41,7 +41,6 @@ import NameEnv
 import NameSet
 import Var
 import VarEnv
-import VarSet
 import Outputable
 import SrcLoc
 import TyCon
@@ -53,7 +52,7 @@ import BooleanFormula
 import Util
 
 import Control.Monad
-import Data.List ( mapAccumL )
+import Data.List ( mapAccumL, partition )
 
 {-
 Dictionary handling
@@ -104,7 +103,7 @@ tcClassSigs clas sigs def_methods
   = do { traceTc "tcClassSigs 1" (ppr clas)
 
        ; gen_dm_prs <- concat <$> mapM (addLocM tc_gen_sig) gen_sigs
-       ; let gen_dm_env :: NameEnv Type
+       ; let gen_dm_env :: NameEnv (SrcSpan, Type)
              gen_dm_env = mkNameEnv gen_dm_prs
 
        ; op_info <- concat <$> mapM (addLocM (tc_sig gen_dm_env)) vanilla_sigs
@@ -126,7 +125,7 @@ tcClassSigs clas sigs def_methods
     dm_bind_names :: [Name]     -- These ones have a value binding in the class decl
     dm_bind_names = [op | L _ (FunBind {fun_id = L _ op}) <- bagToList def_methods]
 
-    tc_sig :: NameEnv Type -> ([Located Name], LHsSigType Name)
+    tc_sig :: NameEnv (SrcSpan, Type) -> ([Located Name], LHsSigType Name)
            -> TcM [TcMethInfo]
     tc_sig gen_dm_env (op_names, op_hs_ty)
       = do { traceTc "ClsSig 1" (ppr op_names)
@@ -134,13 +133,13 @@ tcClassSigs clas sigs def_methods
            ; traceTc "ClsSig 2" (ppr op_names)
            ; return [ (op_name, op_ty, f op_name) | L _ op_name <- op_names ] }
            where
-             f nm | Just ty <- lookupNameEnv gen_dm_env nm = Just (GenericDM ty)
-                  | nm `elem` dm_bind_names                = Just VanillaDM
-                  | otherwise                              = Nothing
+             f nm | Just lty <- lookupNameEnv gen_dm_env nm = Just (GenericDM lty)
+                  | nm `elem` dm_bind_names                 = Just VanillaDM
+                  | otherwise                               = Nothing
 
     tc_gen_sig (op_names, gen_hs_ty)
       = do { gen_op_ty <- tcClassSigType op_names gen_hs_ty
-           ; return [ (op_name, gen_op_ty) | L _ op_name <- op_names ] }
+           ; return [ (op_name, (loc, gen_op_ty)) | L loc op_name <- op_names ] }
 
 {-
 ************************************************************************
@@ -153,10 +152,10 @@ tcClassSigs clas sigs def_methods
 tcClassDecl2 :: LTyClDecl Name          -- The class declaration
              -> TcM (LHsBinds Id)
 
-tcClassDecl2 (L loc (ClassDecl {tcdLName = class_name, tcdSigs = sigs,
+tcClassDecl2 (L _ (ClassDecl {tcdLName = class_name, tcdSigs = sigs,
                                 tcdMeths = default_binds}))
   = recoverM (return emptyLHsBinds)     $
-    setSrcSpan loc                      $
+    setSrcSpan (getLoc class_name)      $
     do  { clas <- tcLookupLocatedClass class_name
 
         -- We make a separate binding for each default method.
@@ -200,21 +199,32 @@ tcDefMeth _ _ _ _ _ prag_fn (sel_id, Nothing)
 
 tcDefMeth clas tyvars this_dict binds_in hs_sig_fn prag_fn
           (sel_id, Just (dm_name, dm_spec))
-  | Just (L bind_loc dm_bind, bndr_loc) <- findMethodBind sel_name binds_in
-  = do { -- First look up the default method -- It should be there!
+  | Just (L bind_loc dm_bind, bndr_loc, prags) <- findMethodBind sel_name binds_in prag_fn
+  = do { -- First look up the default method; it should be there!
+         -- It can be the orinary default method
+         -- or the generic-default method.  E.g of the latter
+         --      class C a where
+         --        op :: a -> a -> Bool
+         --        default op :: Eq a => a -> a -> Bool
+         --        op x y = x==y
+         -- The default method we generate is
+         --    $gm :: (C a, Eq a) => a -> a -> Bool
+         --    $gm x y = x==y
+
          global_dm_id  <- tcLookupId dm_name
        ; global_dm_id  <- addInlinePrags global_dm_id prags
-       ; local_dm_name <- setSrcSpan bndr_loc (newLocalName sel_name)
+       ; local_dm_name <- newNameAt (getOccName sel_name) bndr_loc
             -- Base the local_dm_name on the selector name, because
             -- type errors from tcInstanceMethodBody come from here
 
        ; spec_prags <- discardConstraints $
                        tcSpecPrags global_dm_id prags
-       ; warnTc (not (null spec_prags))
-                (ptext (sLit "Ignoring SPECIALISE pragmas on default method")
+       ; warnTc NoReason
+                (not (null spec_prags))
+                (text "Ignoring SPECIALISE pragmas on default method"
                  <+> quotes (ppr sel_name))
 
-       ; let hs_ty = lookupHsSig hs_sig_fn sel_name
+       ; let hs_ty = hs_sig_fn sel_name
                      `orElse` pprPanic "tc_dm" (ppr sel_name)
              -- We need the HsType so that we can bring the right
              -- type variables into scope
@@ -241,31 +251,31 @@ tcDefMeth clas tyvars this_dict binds_in hs_sig_fn prag_fn
 
              ctxt = FunSigCtxt sel_name warn_redundant
 
-       ; local_dm_sig <- instTcTySig ctxt hs_ty local_dm_ty local_dm_name
-        ; (ev_binds, (tc_bind, _))
+       ; let local_dm_id = mkLocalId local_dm_name local_dm_ty
+             local_dm_sig = CompleteSig { sig_bndr = local_dm_id
+                                        , sig_ctxt  = ctxt
+                                        , sig_loc   = getLoc (hsSigType hs_ty) }
+
+       ; (ev_binds, (tc_bind, _))
                <- checkConstraints (ClsSkol clas) tyvars [this_dict] $
-                  tcPolyCheck NonRecursive no_prag_fn local_dm_sig
+                  tcPolyCheck no_prag_fn local_dm_sig
                               (L bind_loc lm_bind)
 
-        ; let export = ABE { abe_poly  = global_dm_id
-                           -- We have created a complete type signature in
-                           -- instTcTySig, hence it is safe to call
-                           -- completeSigPolyId
-                           , abe_mono  = completeIdSigPolyId local_dm_sig
+       ; let export = ABE { abe_poly   = global_dm_id
+                           , abe_mono  = local_dm_id
                            , abe_wrap  = idHsWrapper
                            , abe_prags = IsDefaultMethod }
-              full_bind = AbsBinds { abs_tvs      = tyvars
-                                   , abs_ev_vars  = [this_dict]
-                                   , abs_exports  = [export]
-                                   , abs_ev_binds = [ev_binds]
-                                   , abs_binds    = tc_bind }
+             full_bind = AbsBinds { abs_tvs      = tyvars
+                                  , abs_ev_vars  = [this_dict]
+                                  , abs_exports  = [export]
+                                  , abs_ev_binds = [ev_binds]
+                                  , abs_binds    = tc_bind }
 
-        ; return (unitBag (L bind_loc full_bind)) }
+       ; return (unitBag (L bind_loc full_bind)) }
 
   | otherwise = pprPanic "tcDefMeth" (ppr sel_id)
   where
     sel_name = idName sel_id
-    prags    = lookupPragEnv prag_fn sel_name
     no_prag_fn = emptyPragEnv   -- No pragmas for local_meth_id;
                                 -- they are all for meth_id
 
@@ -280,7 +290,7 @@ tcClassMinimalDef _clas sigs op_info
         -- class ops without default methods are required, since we
         -- have no way to fill them in otherwise
         whenIsJust (isUnsatisfied (mindef `impliesAtom`) defMindef) $
-                   (\bf -> addWarnTc (warningMinimalDefIncomplete bf))
+                   (\bf -> addWarnTc NoReason (warningMinimalDefIncomplete bf))
         return mindef
   where
     -- By default require all methods without a default
@@ -299,10 +309,7 @@ instantiateMethod :: Class -> Id -> [TcType] -> TcType
 instantiateMethod clas sel_id inst_tys
   = ASSERT( ok_first_pred ) local_meth_ty
   where
-    (sel_tyvars,sel_rho) = tcSplitForAllTys (idType sel_id)
-    rho_ty = ASSERT( length sel_tyvars == length inst_tys )
-             substTyWith sel_tyvars inst_tys sel_rho
-
+    rho_ty = piResultTys (idType sel_id) inst_tys
     (first_pred, local_meth_ty) = tcSplitPredFunTy_maybe rho_ty
                 `orElse` pprPanic "tcInstanceMethod" (ppr sel_id)
 
@@ -314,31 +321,33 @@ instantiateMethod clas sel_id inst_tys
 
 
 ---------------------------
-type HsSigFun = NameEnv (LHsSigType Name)
-
-emptyHsSigs :: HsSigFun
-emptyHsSigs = emptyNameEnv
+type HsSigFun = Name -> Maybe (LHsSigType Name)
 
 mkHsSigFun :: [LSig Name] -> HsSigFun
-mkHsSigFun sigs = mkNameEnv [(n, hs_ty)
-                            | L _ (ClassOpSig False ns hs_ty) <- sigs
-                            , L _ n <- ns ]
+mkHsSigFun sigs = lookupNameEnv env
+  where
+    env = mkHsSigEnv get_classop_sig sigs
 
-lookupHsSig :: HsSigFun -> Name -> Maybe (LHsSigType Name)
-lookupHsSig = lookupNameEnv
+    get_classop_sig :: LSig Name -> Maybe ([Located Name], LHsSigType Name)
+    get_classop_sig  (L _ (ClassOpSig _ ns hs_ty)) = Just (ns, hs_ty)
+    get_classop_sig  _                             = Nothing
 
 ---------------------------
-findMethodBind  :: Name                 -- Selector name
+findMethodBind  :: Name                 -- Selector
                 -> LHsBinds Name        -- A group of bindings
-                -> Maybe (LHsBind Name, SrcSpan)
-                -- Returns the binding, and the binding
-                -- site of the method binder
-findMethodBind sel_name binds
+                -> TcPragEnv
+                -> Maybe (LHsBind Name, SrcSpan, [LSig Name])
+                -- Returns the binding, the binding
+                -- site of the method binder, and any inline or
+                -- specialisation pragmas
+findMethodBind sel_name binds prag_fn
   = foldlBag mplus Nothing (mapBag f binds)
   where
+    prags    = lookupPragEnv prag_fn sel_name
+
     f bind@(L _ (FunBind { fun_id = L bndr_loc op_name }))
       | op_name == sel_name
-             = Just (bind, bndr_loc)
+             = Just (bind, bndr_loc, prags)
     f _other = Nothing
 
 ---------------------------
@@ -385,8 +394,8 @@ This makes the error messages right.
 -}
 
 tcMkDeclCtxt :: TyClDecl Name -> SDoc
-tcMkDeclCtxt decl = hsep [ptext (sLit "In the"), pprTyClDeclFlavour decl,
-                      ptext (sLit "declaration for"), quotes (ppr (tcdName decl))]
+tcMkDeclCtxt decl = hsep [text "In the", pprTyClDeclFlavour decl,
+                      text "declaration for", quotes (ppr (tcdName decl))]
 
 tcAddDeclCtxt :: TyClDecl Name -> TcM a -> TcM a
 tcAddDeclCtxt decl thing_inside
@@ -394,44 +403,44 @@ tcAddDeclCtxt decl thing_inside
 
 badMethodErr :: Outputable a => a -> Name -> SDoc
 badMethodErr clas op
-  = hsep [ptext (sLit "Class"), quotes (ppr clas),
-          ptext (sLit "does not have a method"), quotes (ppr op)]
+  = hsep [text "Class", quotes (ppr clas),
+          text "does not have a method", quotes (ppr op)]
 
 badGenericMethod :: Outputable a => a -> Name -> SDoc
 badGenericMethod clas op
-  = hsep [ptext (sLit "Class"), quotes (ppr clas),
-          ptext (sLit "has a generic-default signature without a binding"), quotes (ppr op)]
+  = hsep [text "Class", quotes (ppr clas),
+          text "has a generic-default signature without a binding", quotes (ppr op)]
 
 {-
 badGenericInstanceType :: LHsBinds Name -> SDoc
 badGenericInstanceType binds
-  = vcat [ptext (sLit "Illegal type pattern in the generic bindings"),
+  = vcat [text "Illegal type pattern in the generic bindings",
           nest 2 (ppr binds)]
 
 missingGenericInstances :: [Name] -> SDoc
 missingGenericInstances missing
-  = ptext (sLit "Missing type patterns for") <+> pprQuotedList missing
+  = text "Missing type patterns for" <+> pprQuotedList missing
 
 dupGenericInsts :: [(TyCon, InstInfo a)] -> SDoc
 dupGenericInsts tc_inst_infos
-  = vcat [ptext (sLit "More than one type pattern for a single generic type constructor:"),
+  = vcat [text "More than one type pattern for a single generic type constructor:",
           nest 2 (vcat (map ppr_inst_ty tc_inst_infos)),
-          ptext (sLit "All the type patterns for a generic type constructor must be identical")
+          text "All the type patterns for a generic type constructor must be identical"
     ]
   where
     ppr_inst_ty (_,inst) = ppr (simpleInstInfoTy inst)
 -}
 badDmPrag :: Id -> Sig Name -> TcM ()
 badDmPrag sel_id prag
-  = addErrTc (ptext (sLit "The") <+> hsSigDoc prag <+> ptext (sLit "for default method")
+  = addErrTc (text "The" <+> hsSigDoc prag <+> ptext (sLit "for default method")
               <+> quotes (ppr sel_id)
-              <+> ptext (sLit "lacks an accompanying binding"))
+              <+> text "lacks an accompanying binding")
 
 warningMinimalDefIncomplete :: ClassMinimalDef -> SDoc
 warningMinimalDefIncomplete mindef
-  = vcat [ ptext (sLit "The MINIMAL pragma does not require:")
+  = vcat [ text "The MINIMAL pragma does not require:"
          , nest 2 (pprBooleanFormulaNice mindef)
-         , ptext (sLit "but there is no default implementation.") ]
+         , text "but there is no default implementation." ]
 
 tcATDefault :: Bool -- If a warning should be emitted when a default instance
                     -- definition is not provided by the user
@@ -455,11 +464,11 @@ tcATDefault emit_warn loc inst_subst defined_ats (ATI fam_tc defs)
   | Just (rhs_ty, _loc) <- defs
   = do { let (subst', pat_tys') = mapAccumL subst_tv inst_subst
                                             (tyConTyVars fam_tc)
-             rhs'     = substTy subst' rhs_ty
-             tcv_set' = tyCoVarsOfTypes pat_tys'
-             (tv_set', cv_set') = partitionVarSet isTyVar tcv_set'
-             tvs'     = varSetElemsWellScoped tv_set'
-             cvs'     = varSetElemsWellScoped cv_set'
+             rhs'     = substTyUnchecked subst' rhs_ty
+             tcv' = tyCoVarsOfTypesList pat_tys'
+             (tv', cv') = partition isTyVar tcv'
+             tvs'     = toposortTyVars tv'
+             cvs'     = toposortTyVars cv'
        ; rep_tc_name <- newFamInstTyConName (L loc (tyConName fam_tc)) pat_tys'
        ; let axiom = mkSingleCoAxiom Nominal rep_tc_name tvs' cvs'
                                      fam_tc pat_tys' rhs'
@@ -470,8 +479,7 @@ tcATDefault emit_warn loc inst_subst defined_ats (ATI fam_tc defs)
 
        ; traceTc "mk_deflt_at_instance" (vcat [ ppr fam_tc, ppr rhs_ty
                                               , pprCoAxiom axiom ])
-       ; fam_inst <- ASSERT( tyCoVarsOfType rhs' `subVarSet` tv_set' )
-                     newFamInst SynFamilyInst axiom
+       ; fam_inst <- newFamInst SynFamilyInst axiom
        ; return [fam_inst] }
 
    -- No defaults ==> generate a warning
@@ -483,15 +491,15 @@ tcATDefault emit_warn loc inst_subst defined_ats (ATI fam_tc defs)
       | Just ty <- lookupVarEnv (getTvSubstEnv subst) tc_tv
       = (subst, ty)
       | otherwise
-      = (extendTCvSubst subst tc_tv ty', ty')
+      = (extendTvSubst subst tc_tv ty', ty')
       where
-        ty' = mkTyVarTy (updateTyVarKind (substTy subst) tc_tv)
+        ty' = mkTyVarTy (updateTyVarKind (substTyUnchecked subst) tc_tv)
 
 warnMissingAT :: Name -> TcM ()
 warnMissingAT name
   = do { warn <- woptM Opt_WarnMissingMethods
        ; traceTc "warn" (ppr name <+> ppr warn)
-       ; warnTc warn  -- Warn only if -Wmissing-methods
-                (ptext (sLit "No explicit") <+> text "associated type"
-                    <+> ptext (sLit "or default declaration for     ")
+       ; warnTc (Reason Opt_WarnMissingMethods) warn  -- Warn only if -Wmissing-methods
+                (text "No explicit" <+> text "associated type"
+                    <+> text "or default declaration for     "
                     <+> quotes (ppr name)) }

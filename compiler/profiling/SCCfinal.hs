@@ -37,9 +37,6 @@ import SrcLoc
 import Util
 
 import Control.Monad (liftM, ap)
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative(..))
-#endif
 
 stgMassageForProfiling
         :: DynFlags
@@ -93,9 +90,9 @@ stgMassageForProfiling dflags mod_name _us stg_binds
     ----------
     do_top_rhs :: Id -> StgRhs -> MassageM StgRhs
 
-    do_top_rhs _ (StgRhsClosure _ _ _ _ _ []
+    do_top_rhs _ (StgRhsClosure _ _ _ _ []
                      (StgTick (ProfNote _cc False{-not tick-} _push)
-                              (StgConApp con args)))
+                              (StgConApp con args _)))
       | not (isDllConApp dflags mod_name con args)
         -- Trivial _scc_ around nothing but static data
         -- Eliminate _scc_ ... and turn into StgRhsCon
@@ -103,7 +100,7 @@ stgMassageForProfiling dflags mod_name _us stg_binds
         -- isDllConApp checks for LitLit args too
       = return (StgRhsCon dontCareCCS con args)
 
-    do_top_rhs binder (StgRhsClosure _ bi fv u srt [] body)
+    do_top_rhs binder (StgRhsClosure _ bi fv u [] body)
       = do
         -- Top level CAF without a cost centre attached
         -- Attach CAF cc (collect if individual CAF ccs)
@@ -122,11 +119,11 @@ stgMassageForProfiling dflags mod_name _us stg_binds
                    else
                         return all_cafs_ccs
         body' <- do_expr body
-        return (StgRhsClosure caf_ccs bi fv u srt [] body')
+        return (StgRhsClosure caf_ccs bi fv u [] body')
 
-    do_top_rhs _ (StgRhsClosure _no_ccs bi fv u srt args body)
+    do_top_rhs _ (StgRhsClosure _no_ccs bi fv u args body)
       = do body' <- do_expr body
-           return (StgRhsClosure dontCareCCS bi fv u srt args body')
+           return (StgRhsClosure dontCareCCS bi fv u args body')
 
     do_top_rhs _ (StgRhsCon _ con args)
         -- Top-level (static) data is not counted in heap
@@ -142,8 +139,8 @@ stgMassageForProfiling dflags mod_name _us stg_binds
     do_expr (StgApp fn args)
       = return (StgApp fn args)
 
-    do_expr (StgConApp con args)
-      = return (StgConApp con args)
+    do_expr (StgConApp con args ty_args)
+      = return (StgConApp con args ty_args)
 
     do_expr (StgOpApp con args res_ty)
       = return (StgOpApp con args res_ty)
@@ -158,22 +155,22 @@ stgMassageForProfiling dflags mod_name _us stg_binds
         expr' <- do_expr expr
         return (StgTick ti expr')
 
-    do_expr (StgCase expr fv1 fv2 bndr srt alt_type alts) = do
+    do_expr (StgCase expr bndr alt_type alts) = do
         expr' <- do_expr expr
         alts' <- mapM do_alt alts
-        return (StgCase expr' fv1 fv2 bndr srt alt_type alts')
+        return (StgCase expr' bndr alt_type alts')
       where
-        do_alt (id, bs, use_mask, e) = do
+        do_alt (id, bs, e) = do
             e' <- do_expr e
-            return (id, bs, use_mask, e')
+            return (id, bs, e')
 
     do_expr (StgLet b e) = do
           (b,e) <- do_let b e
           return (StgLet b e)
 
-    do_expr (StgLetNoEscape lvs1 lvs2 b e) = do
+    do_expr (StgLetNoEscape b e) = do
           (b,e) <- do_let b e
-          return (StgLetNoEscape lvs1 lvs2 b e)
+          return (StgLetNoEscape b e)
 
     do_expr other = pprPanic "SCCfinal.do_expr" (ppr other)
 
@@ -203,15 +200,15 @@ stgMassageForProfiling dflags mod_name _us stg_binds
         -- allocation of the constructor to the wrong place (XXX)
         -- We should really attach (PushCC cc CurrentCCS) to the rhs,
         -- but need to reinstate PushCC for that.
-    do_rhs (StgRhsClosure _closure_cc _bi _fv _u _srt []
+    do_rhs (StgRhsClosure _closure_cc _bi _fv _u []
                (StgTick (ProfNote cc False{-not tick-} _push)
-                        (StgConApp con args)))
+                        (StgConApp con args _)))
       = do collectCC cc
            return (StgRhsCon currentCCS con args)
 
-    do_rhs (StgRhsClosure _ bi fv u srt args expr) = do
+    do_rhs (StgRhsClosure _ bi fv u args expr) = do
         expr' <- do_expr expr
-        return (StgRhsClosure currentCCS bi fv u srt args expr')
+        return (StgRhsClosure currentCCS bi fv u args expr')
 
     do_rhs (StgRhsCon _ con args)
       = return (StgRhsCon currentCCS con args)
@@ -236,7 +233,6 @@ instance Applicative MassageM where
       (*>) = thenMM_
 
 instance Monad MassageM where
-    return = pure
     (>>=) = thenMM
     (>>)  = (*>)
 

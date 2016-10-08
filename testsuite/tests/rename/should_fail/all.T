@@ -113,12 +113,9 @@ test('T7937', normal, compile_fail, [''])
 test('T7943', normal, compile_fail, [''])
 test('T8448', normal, compile_fail, [''])
 test('T8149', normal, compile, [''])
-test('RnStaticPointersFail01',
-     when(compiler_lt('ghc', '7.9'), skip), compile_fail, [''])
-test('RnStaticPointersFail02',
-     when(compiler_lt('ghc', '7.9'), skip), compile_fail, [''])
-test('RnStaticPointersFail03',
-     when(compiler_lt('ghc', '7.9'), skip), compile_fail, [''])
+test('RnStaticPointersFail01', [], compile_fail, [''])
+test('RnStaticPointersFail02', [], compile_fail, [''])
+test('RnStaticPointersFail03', [], compile_fail, ['-dsuppress-uniques'])
 test('T9006',
      extra_clean(['T9006a.hi', 'T9006a.o']),
      multimod_compile_fail, ['T9006', '-v0'])
@@ -140,3 +137,5 @@ test('T5001b', normal, compile_fail, [''])
 test('T10781', normal, compile_fail, [''])
 test('T11071', normal, compile_fail, [''])
 test('T11071a', normal, compile_fail, [''])
+test('T11663', normal, compile_fail, [''])
+test('T12229', normal, compile, [''])

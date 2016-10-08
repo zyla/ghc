@@ -30,6 +30,12 @@
 #ifdef HAVE_FCNTL_H
 #include <fcntl.h>
 #endif
+#ifdef HAVE_NUMA_H
+#include <numa.h>
+#endif
+#ifdef HAVE_NUMAIF_H
+#include <numaif.h>
+#endif
 
 #include <errno.h>
 
@@ -39,11 +45,11 @@
 #include <sys/sysctl.h>
 #endif
 
-static caddr_t next_request = 0;
+static void *next_request = 0;
 
 void osMemInit(void)
 {
-    next_request = (caddr_t)RtsFlags.GcFlags.heapBase;
+    next_request = (void *)RtsFlags.GcFlags.heapBase;
 }
 
 /* -----------------------------------------------------------------------------
@@ -164,20 +170,7 @@ my_mmap (void *addr, W_ size, int operation)
     else
         flags = 0;
 
-#if defined(irix_HOST_OS)
-    {
-        if (operation & MEM_RESERVE)
-        {
-            int fd = open("/dev/zero",O_RDONLY);
-            ret = mmap(addr, size, prot, flags | MAP_PRIVATE, fd, 0);
-            close(fd);
-        }
-        else
-        {
-            ret = mmap(addr, size, prot, flags | MAP_PRIVATE, -1, 0);
-        }
-    }
-#elif hpux_HOST_OS
+#if hpux_HOST_OS
     ret = mmap(addr, size, prot, flags | MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
 #elif linux_HOST_OS
     ret = mmap(addr, size, prot, flags | MAP_ANON | MAP_PRIVATE, -1, 0);
@@ -222,7 +215,7 @@ my_mmap_or_barf (void *addr, W_ size, int operation)
             // If we request more than 3Gig, then we get EINVAL
             // instead of ENOMEM (at least on Linux).
             errorBelch("out of memory (requested %" FMT_Word " bytes)", size);
-            stg_exit(EXIT_FAILURE);
+            stg_exit(EXIT_HEAPOVERFLOW);
         } else {
             barf("getMBlock: mmap: %s", strerror(errno));
         }
@@ -273,9 +266,9 @@ gen_map_mblocks (W_ size)
 }
 
 void *
-osGetMBlocks(nat n)
+osGetMBlocks(uint32_t n)
 {
-  caddr_t ret;
+  void *ret;
   W_ size = MBLOCK_SIZE * (W_)n;
 
   if (next_request == 0) {
@@ -300,14 +293,40 @@ osGetMBlocks(nat n)
           ret = gen_map_mblocks(size);
       }
   }
+
   // Next time, we'll try to allocate right after the block we just got.
   // ToDo: check that we haven't already grabbed the memory at next_request
-  next_request = ret + size;
+  next_request = (char *)ret + size;
 
   return ret;
 }
 
-void osFreeMBlocks(char *addr, nat n)
+void osBindMBlocksToNode(
+    void *addr STG_UNUSED,
+    StgWord size STG_UNUSED,
+    uint32_t node STG_UNUSED)
+{
+#if HAVE_LIBNUMA
+    int ret;
+    StgWord mask = 0;
+    mask |= 1 << node;
+    if (RtsFlags.GcFlags.numa) {
+        ret = mbind(addr, (unsigned long)size,
+                    MPOL_BIND, &mask, sizeof(StgWord)*8, MPOL_MF_STRICT);
+        // paranoia: MPOL_BIND guarantees memory on the correct node;
+        // MPOL_MF_STRICT will tell us if it didn't work.  We might want to
+        // relax these in due course, but I want to be sure it's doing what we
+        // want first.
+        if (ret != 0) {
+            sysErrorBelch("mbind");
+            stg_exit(EXIT_FAILURE);
+        }
+    }
+#endif
+}
+
+
+void osFreeMBlocks(void *addr, uint32_t n)
 {
     munmap(addr, n * MBLOCK_SIZE);
 }
@@ -328,20 +347,20 @@ void osFreeAllMBlocks(void)
     }
 }
 
-W_ getPageSize (void)
+size_t getPageSize (void)
 {
-    static W_ pageSize = 0;
-    if (pageSize) {
-        return pageSize;
-    } else {
+    static size_t pageSize = 0;
+
+    if (pageSize == 0) {
         long ret;
         ret = sysconf(_SC_PAGESIZE);
         if (ret == -1) {
            barf("getPageSize: cannot get page size");
         }
         pageSize = ret;
-        return ret;
     }
+
+    return pageSize;
 }
 
 /* Returns 0 if physical memory size cannot be identified */
@@ -431,16 +450,18 @@ osTryReserveHeapMemory (W_ len, void *hint)
     return start;
 }
 
-void *osReserveHeapMemory(W_ *len)
+void *osReserveHeapMemory(void *startAddressPtr, W_ *len)
 {
     int attempt;
     void *at;
 
     /* We want to ensure the heap starts at least 8 GB inside the address space,
-       to make sure that any dynamically loaded code will be close enough to the
-       original code so that short relocations will work. This is in particular
-       important on Darwin/Mach-O, because object files not compiled as shared
-       libraries are position independent but cannot be loaded about 4GB.
+       since we want to reserve the address space below that address for code.
+       Specifically, we need to make sure that any dynamically loaded code will
+       be close enough to the original code so that short relocations will work.
+       This is in particular important on Darwin/Mach-O, because object files
+       not compiled as shared libraries are position independent but cannot be
+       loaded above 4GB.
 
        We do so with a hint to the mmap, and we verify the OS satisfied our
        hint. We loop, shifting our hint by 1 BLOCK_SIZE every time, in case
@@ -453,6 +474,19 @@ void *osReserveHeapMemory(W_ *len)
 
     */
 
+    W_ minimumAddress = (W_)8 * (1 << 30);
+    // We don't use minimumAddress (0x200000000) as default because we know
+    // it can clash with third-party libraries. See ticket #12573.
+    W_ startAddress = 0x4200000000;
+    if (startAddressPtr) {
+        startAddress = (W_)startAddressPtr;
+    }
+    if (startAddress < minimumAddress) {
+        errorBelch(
+            "Provided heap start address %p is lower than minimum address %p",
+            (void*)startAddress, (void*)minimumAddress);
+    }
+
     attempt = 0;
     while (1) {
         if (*len < MBLOCK_SIZE) {
@@ -460,7 +494,7 @@ void *osReserveHeapMemory(W_ *len)
             barf("osReserveHeapMemory: Failed to allocate heap storage");
         }
 
-        void *hint = (void*)((W_)8 * (1 << 30) + attempt * BLOCK_SIZE);
+        void *hint = (void*)(startAddress + attempt * BLOCK_SIZE);
         at = osTryReserveHeapMemory(*len, hint);
         if (at == NULL) {
             // This means that mmap failed which we take to mean that we asked
@@ -468,7 +502,7 @@ void *osReserveHeapMemory(W_ *len)
             // limits. In this case we reduce our allocation request by a factor
             // of two and try again.
             *len /= 2;
-        } else if ((W_)at >= ((W_)8 * (1 << 30))) {
+        } else if ((W_)at >= minimumAddress) {
             // Success! We were given a block of memory starting above the 8 GB
             // mark, which is what we were looking for.
             break;
@@ -479,6 +513,7 @@ void *osReserveHeapMemory(W_ *len)
                 sysErrorBelch("unable to release reserved heap");
             }
         }
+        attempt++;
     }
 
     return at;
@@ -526,3 +561,35 @@ void osReleaseHeapMemory(void)
 }
 
 #endif
+
+rtsBool osNumaAvailable(void)
+{
+#if HAVE_LIBNUMA
+    return (numa_available() != -1);
+#else
+    return rtsFalse;
+#endif
+}
+
+uint32_t osNumaNodes(void)
+{
+#if HAVE_LIBNUMA
+    return numa_num_configured_nodes();
+#else
+    return 1;
+#endif
+}
+
+StgWord osNumaMask(void)
+{
+#if HAVE_LIBNUMA
+    struct bitmask *mask;
+    mask = numa_get_mems_allowed();
+    if (mask->size > sizeof(StgWord)*8) {
+        barf("Too many NUMA nodes");
+    }
+    return mask->maskp[0];
+#else
+    return 1;
+#endif
+}

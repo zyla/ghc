@@ -66,6 +66,7 @@ latex_elements = {
     'utf8extra': '',
     'preamble': '''
 \usepackage{fontspec}
+\usepackage{makeidx}
 \setsansfont{DejaVu Sans}
 \setromanfont{DejaVu Serif}
 \setmonofont{DejaVu Sans Mono}
@@ -110,3 +111,73 @@ texinfo_documents = [
    u'GHC Team', 'GHCUsersGuide', 'The Glasgow Haskell Compiler.',
    'Compilers'),
 ]
+
+from sphinx import addnodes
+from docutils import nodes
+
+def parse_ghci_cmd(env, sig, signode):
+    name = sig.split(';')[0]
+    sig = sig.replace(';', '')
+    signode += addnodes.desc_name(name, sig)
+    return name
+
+def parse_flag(env, sig, signode):
+    import re
+    names = []
+    for i, flag in enumerate(sig.split(',')):
+        flag = flag.strip()
+        sep = '='
+        parts = flag.split('=')
+        if len(parts) == 1:
+            sep=' '
+            parts = flag.split()
+        if len(parts) == 0: continue
+
+        name = parts[0]
+        names.append(name)
+        sig = sep + ' '.join(parts[1:])
+        sig = re.sub(ur'<([-a-zA-Z ]+)>', ur'⟨\1⟩', sig)
+        if i > 0:
+            signode += addnodes.desc_name(', ', ', ')
+        signode += addnodes.desc_name(name, name)
+        if len(sig) > 0:
+            signode += addnodes.desc_addname(sig, sig)
+
+    return names[0]
+
+def setup(app):
+    from sphinx.util.docfields import Field, TypedField
+
+    increase_python_stack()
+
+    # the :ghci-cmd: directive used in ghci.rst
+    app.add_object_type('ghci-cmd', 'ghci-cmd',
+                        parse_node=parse_ghci_cmd,
+                        objname='GHCi command',
+                        indextemplate='pair: %s; GHCi command')
+
+    app.add_object_type('ghc-flag', 'ghc-flag',
+                        objname='GHC command-line option',
+                        parse_node=parse_flag,
+                        indextemplate='pair: %s; GHC option',
+                        doc_field_types=[
+                            Field('since', label='Introduced in GHC version', names=['since']),
+                            Field('default', label='Default value', names=['default']),
+                            Field('static')
+                        ])
+
+    app.add_object_type('rts-flag', 'rts-flag',
+                        objname='runtime system command-line option',
+                        parse_node=parse_flag,
+                        indextemplate='pair: %s; RTS option',
+                        doc_field_types=[
+                            Field('since', label='Introduced in GHC version', names=['since']),
+                        ])
+
+def increase_python_stack():
+    # Workaround sphinx-build recursion limit overflow:
+    # pickle.dump(doctree, f, pickle.HIGHEST_PROTOCOL)
+    #  RuntimeError: maximum recursion depth exceeded while pickling an object
+    #
+    # Default python allows recursion depth of 1000 calls.
+    sys.setrecursionlimit(10000)

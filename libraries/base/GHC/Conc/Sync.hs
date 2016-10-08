@@ -59,6 +59,8 @@ module GHC.Conc.Sync
         , threadStatus
         , threadCapability
 
+        , newStablePtrPrimMVar, PrimMVar
+
         -- * Allocation counter and quota
         , setAllocationCounter
         , getAllocationCounter
@@ -117,6 +119,7 @@ import GHC.MVar
 import GHC.Ptr
 import GHC.Real         ( fromIntegral )
 import GHC.Show         ( Show(..), showString )
+import GHC.Stable       ( StablePtr(..) )
 import GHC.Weak
 
 infixr 0 `par`, `pseq`
@@ -145,6 +148,7 @@ This misfeature will hopefully be corrected at a later date.
 
 -}
 
+-- | @since 4.2.0.0
 instance Show ThreadId where
    showsPrec d t =
         showString "ThreadId " .
@@ -165,12 +169,14 @@ cmpThread t1 t2 =
       0  -> EQ
       _  -> GT -- must be 1
 
+-- | @since 4.2.0.0
 instance Eq ThreadId where
    t1 == t2 =
       case t1 `cmpThread` t2 of
          EQ -> True
          _  -> False
 
+-- | @since 4.2.0.0
 instance Ord ThreadId where
    compare = cmpThread
 
@@ -612,6 +618,17 @@ mkWeakThreadId t@(ThreadId t#) = IO $ \s ->
       (# s1, w #) -> (# s1, Weak w #)
 
 
+data PrimMVar
+
+-- | Make a StablePtr that can be passed to the C function
+-- @hs_try_putmvar()@.  The RTS wants a 'StablePtr' to the underlying
+-- 'MVar#', but a 'StablePtr#' can only refer to lifted types, so we
+-- have to cheat by coercing.
+newStablePtrPrimMVar :: MVar () -> IO (StablePtr PrimMVar)
+newStablePtrPrimMVar (MVar m) = IO $ \s0 ->
+  case makeStablePtr# (unsafeCoerce# m :: PrimMVar) s0 of
+    (# s1, sp #) -> (# s1, StablePtr sp #)
+
 -----------------------------------------------------------------------------
 -- Transactional heap operations
 -----------------------------------------------------------------------------
@@ -625,9 +642,11 @@ newtype STM a = STM (State# RealWorld -> (# State# RealWorld, a #))
 unSTM :: STM a -> (State# RealWorld -> (# State# RealWorld, a #))
 unSTM (STM a) = a
 
+-- | @since 4.3.0.0
 instance  Functor STM where
    fmap f x = x >>= (pure . f)
 
+-- | @since 4.8.0.0
 instance Applicative STM where
   {-# INLINE pure #-}
   {-# INLINE (*>) #-}
@@ -635,6 +654,7 @@ instance Applicative STM where
   (<*>) = ap
   m *> k = thenSTM m k
 
+-- | @since 4.3.0.0
 instance  Monad STM  where
     {-# INLINE (>>=)  #-}
     m >>= k     = bindSTM m k
@@ -655,13 +675,13 @@ thenSTM (STM m) k = STM ( \s ->
 returnSTM :: a -> STM a
 returnSTM x = STM (\s -> (# s, x #))
 
+-- | @since 4.8.0.0
 instance Alternative STM where
   empty = retry
   (<|>) = orElse
 
-instance MonadPlus STM where
-  mzero = empty
-  mplus = (<|>)
+-- | @since 4.3.0.0
+instance MonadPlus STM
 
 -- | Unsafely performs IO in the STM monad.  Beware: this is a highly
 -- dangerous thing to do.
@@ -771,6 +791,7 @@ always i = alwaysSucceeds ( do v <- i
 -- |Shared memory locations that support atomic memory transactions.
 data TVar a = TVar (TVar# RealWorld a)
 
+-- | @since 4.8.0.0
 instance Eq (TVar a) where
         (TVar tvar1#) == (TVar tvar2#) = isTrue# (sameTVar# tvar1# tvar2#)
 

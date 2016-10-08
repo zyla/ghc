@@ -84,9 +84,6 @@ import Data.List
 import Data.Maybe
 import Data.Ord         ( comparing )
 import Control.Exception
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative(..))
-#endif
 import Control.Monad
 import System.IO
 
@@ -435,8 +432,10 @@ cmmNativeGens dflags this_mod modLoc ncgImpl h dbgMap us
         -- Generate .file directives for every new file that has been
         -- used. Note that it is important that we generate these in
         -- ascending order, as Clang's 3.6 assembler complains.
-        let newFileIds = sortBy (comparing snd) $ eltsUFM $ fileIds' `minusUFM` fileIds
-            pprDecl (f,n) = ptext (sLit "\t.file ") <> ppr n <+>
+        let newFileIds = sortBy (comparing snd) $
+                         nonDetEltsUFM $ fileIds' `minusUFM` fileIds
+            -- See Note [Unique Determinism and code generation]
+            pprDecl (f,n) = text "\t.file " <> ppr n <+>
                             doubleQuotes (ftext f)
 
         emitNativeCode dflags h $ vcat $
@@ -538,10 +537,8 @@ cmmNativeGen dflags this_mod modLoc ncgImpl us fileIds dbgMap cmm count
 
         -- allocate registers
         (alloced, usAlloc, ppr_raStatsColor, ppr_raStatsLinear) <-
-         if False
-           -- Disabled, see #7679, #8657
-           --  ( gopt Opt_RegsGraph dflags
-           --  || gopt Opt_RegsIterative dflags)
+         if ( gopt Opt_RegsGraph dflags
+           || gopt Opt_RegsIterative dflags )
           then do
                 -- the regs usable for allocation
                 let (alloc_regs :: UniqFM (UniqSet RealReg))
@@ -552,7 +549,7 @@ cmmNativeGen dflags this_mod modLoc ncgImpl us fileIds dbgMap cmm count
 
                 -- do the graph coloring register allocation
                 let ((alloced, regAllocStats), usAlloc)
-                        = {-# SCC "RegAlloc" #-}
+                        = {-# SCC "RegAlloc-color" #-}
                           initUs usLive
                           $ Color.regAlloc
                                 dflags
@@ -596,7 +593,7 @@ cmmNativeGen dflags this_mod modLoc ncgImpl us fileIds dbgMap cmm count
                            return (alloced', ra_stats )
 
                 let ((alloced, regAllocStats), usAlloc)
-                        = {-# SCC "RegAlloc" #-}
+                        = {-# SCC "RegAlloc-linear" #-}
                           initUs usLive
                           $ liftM unzip
                           $ mapM reg_alloc withLiveness
@@ -767,7 +764,7 @@ sccBlocks
                 , BlockId
                 , [BlockId])]
 
-sccBlocks blocks = stronglyConnCompFromEdgedVerticesR (map mkNode blocks)
+sccBlocks blocks = stronglyConnCompFromEdgedVerticesUniqR (map mkNode blocks)
 
 -- we're only interested in the last instruction of
 -- the block, and only if it has a single destination.
@@ -986,7 +983,6 @@ instance Applicative CmmOptM where
     (<*>) = ap
 
 instance Monad CmmOptM where
-  return = pure
   (CmmOptM f) >>= g =
     CmmOptM $ \dflags this_mod imports ->
                 case f dflags this_mod imports of

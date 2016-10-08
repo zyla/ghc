@@ -45,6 +45,7 @@ libraries/array              -           -                               -
 libraries/binary             -           -                               https://github.com/kolmodin/binary.git
 libraries/bytestring         -           -                               https://github.com/haskell/bytestring.git
 libraries/Cabal              -           -                               https://github.com/haskell/cabal.git
+libraries/compact            -           -                               -
 libraries/containers         -           -                               https://github.com/haskell/containers.git
 libraries/deepseq            -           -                               ssh://git@github.com/haskell/deepseq.git
 libraries/directory          -           -                               ssh://git@github.com/haskell/directory.git
@@ -63,7 +64,7 @@ libraries/xhtml              -           -                               https:/
 nofib                        nofib       -                               -
 libraries/parallel           extra       -                               ssh://git@github.com/haskell/parallel.git
 libraries/stm                extra       -                               -
-libraries/random             dph         -                               https://github.com/haskell/random.git
+libraries/random             extra       -                               https://github.com/haskell/random.git
 libraries/primitive          dph         -                               https://github.com/haskell/primitive.git
 libraries/vector             dph         -                               https://github.com/haskell/vector.git
 libraries/dph                dph         -                               -

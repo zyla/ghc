@@ -12,13 +12,32 @@
 #include "BeginPrivate.h"
 
 void osMemInit(void);
-void *osGetMBlocks(nat n);
-void osFreeMBlocks(char *addr, nat n);
+void *osGetMBlocks(uint32_t n);
+void osFreeMBlocks(void *addr, uint32_t n);
 void osReleaseFreeMemory(void);
 void osFreeAllMBlocks(void);
-W_ getPageSize (void);
+size_t getPageSize (void);
 StgWord64 getPhysicalMemorySize (void);
 void setExecutable (void *p, W_ len, rtsBool exec);
+rtsBool osNumaAvailable(void);
+uint32_t osNumaNodes(void);
+StgWord osNumaMask(void);
+void osBindMBlocksToNode(void *addr, StgWord size, uint32_t node);
+
+INLINE_HEADER size_t
+roundDownToPage (size_t x)
+{
+    size_t size = getPageSize();
+    return (x & ~(size - 1));
+}
+
+INLINE_HEADER size_t
+roundUpToPage (size_t x)
+{
+    size_t size = getPageSize();
+    return ((x + size - 1) & ~(size - 1));
+}
+
 
 #ifdef USE_LARGE_ADDRESS_SPACE
 
@@ -39,7 +58,10 @@ void setExecutable (void *p, W_ len, rtsBool exec);
 // to the amount of memory actually reserved.
 //
 // This function is called once when the block allocator is initialized.
-void *osReserveHeapMemory(W_ *len);
+//
+// startAddress must be greater or equal than 8 * (1 << 30), and can be
+// NULL, in which case a default will be picked by the RTS.
+void *osReserveHeapMemory(void *startAddress, W_ *len);
 
 // Commit (allocate memory for) a piece of address space, which must
 // be within the previously reserved space After this call, it is safe

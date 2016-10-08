@@ -37,7 +37,7 @@ $(eval $(call all-target,rts,$(ALL_RTS_LIBS)))
 # -----------------------------------------------------------------------------
 # Defining the sources
 
-ALL_DIRS = hooks sm eventlog
+ALL_DIRS = hooks sm eventlog linker
 
 ifeq "$(HostOS_CPP)" "mingw32"
 ALL_DIRS += win32
@@ -53,6 +53,7 @@ ifneq "$(PORTING_HOST)" "YES"
 ifneq "$(findstring $(TargetArch_CPP), i386 powerpc powerpc64)" ""
 rts_S_SRCS += rts/AdjustorAsm.S
 endif
+# this matches substrings of powerpc64le, including "powerpc" and "powerpc64"
 ifneq "$(findstring $(TargetArch_CPP), powerpc64le)" ""
 rts_S_SRCS += rts/StgCRunAsm.S
 endif
@@ -160,7 +161,7 @@ ifneq "$$(findstring thr, $1)" ""
 rts_$1_EXTRA_C_SRCS  =  rts/dist/build/sm/Evac_thr.c rts/dist/build/sm/Scav_thr.c
 endif
 
-$(call distdir-way-opts,rts,dist,$1)
+$(call distdir-way-opts,rts,dist,$1,1) # 1 because the rts is built with stage1
 $(call c-suffix-rules,rts,dist,$1,YES)
 $(call cmm-suffix-rules,rts,dist,$1)
 
@@ -206,7 +207,7 @@ ifneq "$$(findstring dyn, $1)" ""
 ifeq "$$(HostOS_CPP)" "mingw32" 
 $$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(ALL_RTS_DEF_LIBS) rts/dist/libs.depend rts/dist/build/$$(LIBFFI_DLL)
 	"$$(RM)" $$(RM_OPTS) $$@
-	"$$(rts_dist_HC)" -this-package-key rts -shared -dynamic -dynload deploy \
+	"$$(rts_dist_HC)" -this-unit-id rts -shared -dynamic -dynload deploy \
 	  -no-auto-link-packages -Lrts/dist/build -l$$(LIBFFI_NAME) \
          `cat rts/dist/libs.depend` $$(rts_$1_OBJS) $$(ALL_RTS_DEF_LIBS) \
          $$(rts_dist_$1_GHC_LD_OPTS) \
@@ -227,7 +228,7 @@ LIBFFI_LIBS =
 endif
 $$(rts_$1_LIB) : $$(rts_$1_OBJS) $$(rts_$1_DTRACE_OBJS) rts/dist/libs.depend $$(rts_dist_FFI_SO)
 	"$$(RM)" $$(RM_OPTS) $$@
-	"$$(rts_dist_HC)" -this-package-key rts -shared -dynamic -dynload deploy \
+	"$$(rts_dist_HC)" -this-unit-id rts -shared -dynamic -dynload deploy \
 	  -no-auto-link-packages $$(LIBFFI_LIBS) `cat rts/dist/libs.depend` $$(rts_$1_OBJS) \
           $$(rts_dist_$1_GHC_LD_OPTS) \
 	  $$(rts_$1_DTRACE_OBJS) -o $$@
@@ -301,7 +302,7 @@ STANDARD_OPTS += -DCOMPILING_RTS
 rts_CC_OPTS += $(WARNING_OPTS)
 rts_CC_OPTS += $(STANDARD_OPTS)
 
-rts_HC_OPTS += $(STANDARD_OPTS) -this-package-key rts
+rts_HC_OPTS += $(STANDARD_OPTS) -this-unit-id rts
 
 ifneq "$(GhcWithSMP)" "YES"
 rts_CC_OPTS += -DNOSMP
@@ -479,14 +480,6 @@ rts_PACKAGE_CPP_OPTS += '-DFFI_LIB="C$(LIBFFI_NAME)"'
 
 endif
 
-#-----------------------------------------------------------------------------
-# Add support for reading DWARF debugging information, if available
-
-ifeq "$(GhcRtsWithLibdw)" "YES"
-rts_CC_OPTS          += -DUSE_LIBDW
-rts_PACKAGE_CPP_OPTS += -DUSE_LIBDW
-endif
-
 # -----------------------------------------------------------------------------
 # dependencies
 
@@ -537,7 +530,7 @@ ifeq "$(TargetOS_CPP)" "darwin"
 # Darwin has a flag to tell dtrace which cpp to use.
 # Unfortunately, this isn't supported on Solaris (See Solaris Dynamic Tracing
 # Guide, Chapter 16, for the configuration variables available on Solaris)
-DTRACE_FLAGS = -x cpppath=$(WhatGccIsCalled)
+DTRACE_FLAGS = -x cpppath=$(CC)
 endif
 
 DTRACEPROBES_SRC = rts/RtsProbes.d

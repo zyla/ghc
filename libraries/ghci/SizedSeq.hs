@@ -8,17 +8,27 @@ module SizedSeq
   , sizeSS
   ) where
 
+import Control.DeepSeq
 import Data.Binary
 import Data.List
 import GHC.Generics
 
-data SizedSeq a = SizedSeq !Word [a]
+data SizedSeq a = SizedSeq {-# UNPACK #-} !Word [a]
   deriving (Generic, Show)
 
 instance Functor SizedSeq where
   fmap f (SizedSeq sz l) = SizedSeq sz (fmap f l)
 
+instance Foldable SizedSeq where
+  foldr f c ss = foldr f c (ssElts ss)
+
+instance Traversable SizedSeq where
+  traverse f (SizedSeq sz l) = SizedSeq sz . reverse <$> traverse f (reverse l)
+
 instance Binary a => Binary (SizedSeq a)
+
+instance NFData a => NFData (SizedSeq a) where
+  rnf (SizedSeq _ xs) = rnf xs
 
 emptySS :: SizedSeq a
 emptySS = SizedSeq 0 []

@@ -32,18 +32,21 @@ test('T3382', normal, compile_and_run, [''])
 test('mc01', normal, compile_and_run, [''])
 test('mc02', normal, compile_and_run, [''])
 test('mc03', normal, compile_and_run, [''])
+
+# #5522: "I noticed that test mc03 runs out of memory compiled with
+#         -O -fliberate-case -fspec-constr."
+test('T5522', [only_ways(['optasm']), extra_files(['mc03.hs'])], multimod_compile,
+     ['mc03', '-fliberate-case -fspec-constr -v0 +RTS -M1G -RTS'])
+
 test('mc04', normal, compile_and_run, [''])
 test('mc05', normal, compile_and_run, [''])
 test('mc06', normal, compile_and_run, [''])
 test('mc07', normal, compile_and_run, [''])
 test('mc08', normal, compile_and_run, [''])
 test('T5742', normal, compile_and_run, [''])
-test('DsLambdaCase', when(compiler_lt('ghc', '7.5'), skip), compile_and_run, [''])
-test('DsMultiWayIf', when(compiler_lt('ghc', '7.5'), skip), compile_and_run, [''])
-test('DsStaticPointers',
-     [ when(compiler_lt('ghc', '7.9'), skip)
-     , when(doing_ghci(), extra_hc_opts('-fobject-code'))
-     ],
+test('DsLambdaCase', [], compile_and_run, [''])
+test('DsMultiWayIf', [], compile_and_run, [''])
+test('DsStaticPointers', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
      compile_and_run, [''])
 test('T8952', normal, compile_and_run, [''])
 test('T9238', normal, compile_and_run, [''])
@@ -53,3 +56,7 @@ test('DsStrictData', normal, compile_and_run, [''])
 test('DsStrict', normal, compile_and_run, [''])
 test('DsStrictLet', normal, compile_and_run, ['-O'])
 test('T11193', exit_code(1), compile_and_run, [''])
+test('T11572', exit_code(1), compile_and_run, [''])
+test('T11601', exit_code(1), compile_and_run, [''])
+test('T11747', normal, compile_and_run, ['-dcore-lint'])
+test('T12595', normal, compile_and_run, [''])

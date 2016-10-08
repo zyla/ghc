@@ -59,7 +59,6 @@ import PrelNames
 import TysPrim          ( realWorldStatePrimTy )
 import Bag
 import Util
-import FastString
 import Outputable
 import ForeignCall
 
@@ -150,6 +149,10 @@ mkInlinableUnfolding dflags expr
 
 specUnfolding :: DynFlags -> Subst -> [Var] -> [CoreExpr] -> Unfolding -> Unfolding
 -- See Note [Specialising unfoldings]
+-- specUnfolding subst new_bndrs spec_args unf
+--   = \new_bndrs. (subst( unf ) spec_args)
+--
+-- Precondition: in-scope(subst) `superset` fvs( spec_args )
 specUnfolding _ subst new_bndrs spec_args
               df@(DFunUnfolding { df_bndrs = bndrs, df_con = con , df_args = args })
   = ASSERT2( length bndrs >= length spec_args, ppr df $$ ppr spec_args $$ ppr new_bndrs )
@@ -181,7 +184,7 @@ specUnfolding _dflags subst new_bndrs spec_args
 specUnfolding _ _ _ _ _ = noUnfolding
 
 spec_doc :: SDoc
-spec_doc = ptext (sLit "specUnfolding")
+spec_doc = text "specUnfolding"
 
 {-
 Note [Specialising unfoldings]
@@ -196,22 +199,22 @@ specUnfolding to specialise its unfolding.  Some important points:
 * There is a bit of hack for INLINABLE functions:
      f :: Ord a => ....
      f = <big-rhs>
-     {- INLINEABLE f #-}
+     {- INLINABLE f #-}
   Now if we specialise f, should the specialised version still have
-  an INLINEABLE pragma?  If it does, we'll capture a specialised copy
+  an INLINABLE pragma?  If it does, we'll capture a specialised copy
   of <big-rhs> as its unfolding, and that probaby won't inline.  But
   if we don't, the specialised version of <big-rhs> might be small
   enough to inline at a call site. This happens with Control.Monad.liftM3,
   and can cause a lot more allocation as a result (nofib n-body shows this).
 
-  Moreover, keeping the INLINEABLE thing isn't much help, because
+  Moreover, keeping the INLINABLE thing isn't much help, because
   the specialised function (probaby) isn't overloaded any more.
 
   Conclusion: drop the INLINEALE pragma.  In practice what this means is:
      if a stable unfolding has UnfoldingGuidance of UnfWhen,
         we keep it (so the specialised thing too will always inline)
      if a stable unfolding has UnfoldingGuidance of UnfIfGoodArgs
-        (which arises from INLINEABLE), we discard it
+        (which arises from INLINABLE), we discard it
 -}
 
 mkCoreUnfolding :: UnfoldingSource -> Bool -> CoreExpr
@@ -501,7 +504,7 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
     size_up (Let (NonRec binder rhs) body)
       = size_up rhs             `addSizeNSD`
         size_up body            `addSizeN`
-        (if isUnLiftedType (idType binder) then 0 else 10)
+        (if isUnliftedType (idType binder) then 0 else 10)
                 -- For the allocation
                 -- If the binder has an unlifted type there is no allocation
 
@@ -510,29 +513,41 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
               (size_up body `addSizeN` (10 * length pairs))     -- (length pairs) for the allocation
               pairs
 
-    size_up (Case (Var v) _ _ alts)
-        | v `elem` top_args             -- We are scrutinising an argument variable
-        = alts_size (foldr addAltSize sizeZero alt_sizes)
+    size_up (Case e _ _ alts)
+        | Just v <- is_top_arg e -- We are scrutinising an argument variable
+        = let
+            alt_sizes = map size_up_alt alts
+
+                  -- alts_size tries to compute a good discount for
+                  -- the case when we are scrutinising an argument variable
+            alts_size (SizeIs tot tot_disc tot_scrut)
+                          -- Size of all alternatives
+                      (SizeIs max _        _)
+                          -- Size of biggest alternative
+                  = SizeIs tot (unitBag (v, 20 + tot - max)
+                      `unionBags` tot_disc) tot_scrut
+                          -- If the variable is known, we produce a
+                          -- discount that will take us back to 'max',
+                          -- the size of the largest alternative The
+                          -- 1+ is a little discount for reduced
+                          -- allocation in the caller
+                          --
+                          -- Notice though, that we return tot_disc,
+                          -- the total discount from all branches.  I
+                          -- think that's right.
+
+            alts_size tot_size _ = tot_size
+          in
+          alts_size (foldr addAltSize sizeZero alt_sizes)
                     (foldr maxSize    sizeZero alt_sizes)
                 -- Good to inline if an arg is scrutinised, because
                 -- that may eliminate allocation in the caller
                 -- And it eliminates the case itself
         where
-          alt_sizes = map size_up_alt alts
+          is_top_arg (Var v) | v `elem` top_args = Just v
+          is_top_arg (Cast e _) = is_top_arg e
+          is_top_arg _ = Nothing
 
-                -- alts_size tries to compute a good discount for
-                -- the case when we are scrutinising an argument variable
-          alts_size (SizeIs tot tot_disc tot_scrut)  -- Size of all alternatives
-                    (SizeIs max _        _)          -- Size of biggest alternative
-                = SizeIs tot (unitBag (v, 20 + tot - max) `unionBags` tot_disc) tot_scrut
-                        -- If the variable is known, we produce a discount that
-                        -- will take us back to 'max', the size of the largest alternative
-                        -- The 1+ is a little discount for reduced allocation in the caller
-                        --
-                        -- Notice though, that we return tot_disc, the total discount from
-                        -- all branches.  I think that's right.
-
-          alts_size tot_size _ = tot_size
 
     size_up (Case e _ _ alts) = size_up e  `addSizeNSD`
                                 foldr (addAltSize . size_up_alt) case_size alts
@@ -560,7 +575,7 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
 
                 -- unboxed variables, inline primops and unsafe foreign calls
                 -- are all "inline" things:
-          is_inline_scrut (Var v) = isUnLiftedType (idType v)
+          is_inline_scrut (Var v) = isUnliftedType (idType v)
           is_inline_scrut scrut
               | (Var f, _) <- collectArgs scrut
                 = case idDetails f of
@@ -579,13 +594,18 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
                                            size_up_app fun (arg:args) voids
     size_up_app (Var fun)     args voids = size_up_call fun args voids
     size_up_app (Tick _ expr) args voids = size_up_app expr args voids
-    size_up_app other         args voids = size_up other `addSizeN` (length args - voids)
+    size_up_app (Cast expr _) args voids = size_up_app expr args voids
+    size_up_app other         args voids = size_up other `addSizeN`
+                                           callSize (length args) voids
+       -- if the lhs is not an App or a Var, or an invisible thing like a
+       -- Tick or Cast, then we should charge for a complete call plus the
+       -- size of the lhs itself.
 
     ------------
     size_up_call :: Id -> [CoreExpr] -> Int -> ExprSize
     size_up_call fun val_args voids
        = case idDetails fun of
-           FCallId _        -> sizeN (10 * (1 + length val_args))
+           FCallId _        -> sizeN (callSize (length val_args) voids)
            DataConWorkId dc -> conSize    dc (length val_args)
            PrimOpId op      -> primOpSize op (length val_args)
            ClassOpId _      -> classOpSize dflags top_args val_args
@@ -658,6 +678,13 @@ classOpSize dflags top_args (arg1 : other_args)
                               -> unitBag (dict, ufDictDiscount dflags)
                      _other   -> emptyBag
 
+-- | The size of a function call
+callSize
+ :: Int  -- ^ number of value args
+ -> Int  -- ^ number of value args that are void
+ -> Int
+callSize n_val_args voids = 10 * (1 + n_val_args - voids)
+
 funSize :: DynFlags -> [Id] -> Id -> Int -> Int -> ExprSize
 -- Size for functions that are not constructors or primops
 -- Note [Function applications]
@@ -668,7 +695,7 @@ funSize dflags top_args fun n_val_args voids
   where
     some_val_args = n_val_args > 0
 
-    size | some_val_args = 10 * (1 + n_val_args - voids)
+    size | some_val_args = callSize n_val_args voids
          | otherwise     = 0
         -- The 1+ is for the function itself
         -- Add 1 for each non-trivial arg;
@@ -782,7 +809,7 @@ buildSize :: ExprSize
 buildSize = SizeIs 0 emptyBag 40
         -- We really want to inline applications of build
         -- build t (\cn -> e) should cost only the cost of e (because build will be inlined later)
-        -- Indeed, we should add a result_discount becuause build is
+        -- Indeed, we should add a result_discount because build is
         -- very like a constructor.  We don't bother to check that the
         -- build is saturated (it usually is).  The "-2" discounts for the \c n,
         -- The "4" is rather arbitrary.
@@ -864,7 +891,7 @@ data ExprSize
              }
 
 instance Outputable ExprSize where
-  ppr TooBig         = ptext (sLit "TooBig")
+  ppr TooBig         = text "TooBig"
   ppr (SizeIs a _ c) = brackets (int a <+> int c)
 
 -- subtract the discount before deciding whether to bale out. eg. we
@@ -996,9 +1023,9 @@ data ArgSummary = TrivArg       -- Nothing interesting
                                 -- ..or con-like. Note [Conlike is interesting]
 
 instance Outputable ArgSummary where
-  ppr TrivArg    = ptext (sLit "TrivArg")
-  ppr NonTrivArg = ptext (sLit "NonTrivArg")
-  ppr ValueArg   = ptext (sLit "ValueArg")
+  ppr TrivArg    = text "TrivArg"
+  ppr NonTrivArg = text "NonTrivArg"
+  ppr ValueArg   = text "ValueArg"
 
 nonTriv ::  ArgSummary -> Bool
 nonTriv TrivArg = False
@@ -1018,12 +1045,12 @@ data CallCtxt
                         -- that decomposes its scrutinee
 
 instance Outputable CallCtxt where
-  ppr CaseCtxt    = ptext (sLit "CaseCtxt")
-  ppr ValAppCtxt  = ptext (sLit "ValAppCtxt")
-  ppr BoringCtxt  = ptext (sLit "BoringCtxt")
-  ppr RhsCtxt     = ptext (sLit "RhsCtxt")
-  ppr DiscArgCtxt = ptext (sLit "DiscArgCtxt")
-  ppr RuleArgCtxt = ptext (sLit "RuleArgCtxt")
+  ppr CaseCtxt    = text "CaseCtxt"
+  ppr ValAppCtxt  = text "ValAppCtxt"
+  ppr BoringCtxt  = text "BoringCtxt"
+  ppr RhsCtxt     = text "RhsCtxt"
+  ppr DiscArgCtxt = text "DiscArgCtxt"
+  ppr RuleArgCtxt = text "RuleArgCtxt"
 
 callSiteInline dflags id active_unfolding lone_variable arg_infos cont_info
   = case idUnfolding id of
@@ -1038,6 +1065,7 @@ callSiteInline dflags id active_unfolding lone_variable arg_infos cont_info
                                     is_wf is_exp guidance
           | otherwise -> traceInline dflags "Inactive unfolding:" (ppr id) Nothing
         NoUnfolding      -> Nothing
+        BootUnfolding    -> Nothing
         OtherCon {}      -> Nothing
         DFunUnfolding {} -> Nothing     -- Never unfold a DFun
 
@@ -1055,7 +1083,7 @@ tryUnfolding dflags id lone_variable
              arg_infos cont_info unf_template is_top
              is_wf is_exp guidance
  = case guidance of
-     UnfNever -> traceInline dflags str (ptext (sLit "UnfNever")) Nothing
+     UnfNever -> traceInline dflags str (text "UnfNever") Nothing
 
      UnfWhen { ug_arity = uf_arity, ug_unsat_ok = unsat_ok, ug_boring_ok = boring_ok }
         | enough_args && (boring_ok || some_benefit)

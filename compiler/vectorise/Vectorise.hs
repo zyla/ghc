@@ -130,7 +130,7 @@ vectModule guts@(ModGuts { mg_tcs        = tycons
 --
 -- The original binding @foo@ is rewritten to call the vectorised version present in the closure.
 --
--- Vectorisation may be surpressed by annotating a binding with a 'NOVECTORISE' pragma.  If this
+-- Vectorisation may be suppressed by annotating a binding with a 'NOVECTORISE' pragma.  If this
 -- pragma is used in a group of mutually recursive bindings, either all or no binding must have
 -- the pragma.  If only some bindings are annotated, a fatal error is being raised. (In the case of
 -- scalar bindings, we only omit vectorisation if all bindings in a group are scalar.)
@@ -315,7 +315,7 @@ vectTopBinder var inline expr
                   (text "Inferred type" <+> ppr vdty)
               }
           -- Make the vectorised version of binding's name, and set the unfolding used for inlining
-      ; var' <- liftM (`setIdUnfoldingLazily` unfolding)
+      ; var' <- liftM (`setIdUnfolding` unfolding)
                 $  mkVectId var vty
 
           -- Add the mapping between the plain and vectorised name to the state.

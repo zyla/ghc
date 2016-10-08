@@ -19,6 +19,7 @@ import CmmProcPoint
 import SMRep
 import Hoopl
 import UniqSupply
+import StgCmmUtils      ( newTemp )
 import Maybes
 import UniqFM
 import Util
@@ -33,9 +34,7 @@ import Data.Bits
 import Data.List (nub)
 import Control.Monad (liftM)
 
-#if __GLASGOW_HASKELL__ >= 709
 import Prelude hiding ((<*>))
-#endif
 
 #include "HsVersions.h"
 
@@ -185,17 +184,17 @@ instance Outputable StackMap where
      text "Sp = " <> int sm_sp $$
      text "sm_args = " <> int sm_args $$
      text "sm_ret_off = " <> int sm_ret_off $$
-     text "sm_regs = " <> ppr (eltsUFM sm_regs)
+     text "sm_regs = " <> pprUFM sm_regs ppr
 
 
 cmmLayoutStack :: DynFlags -> ProcPointSet -> ByteOff -> CmmGraph
                -> UniqSM (CmmGraph, BlockEnv StackMap)
 cmmLayoutStack dflags procpoints entry_args
-               graph0@(CmmGraph { g_entry = entry })
+               graph@(CmmGraph { g_entry = entry })
   = do
     -- We need liveness info. Dead assignments are removed later
     -- by the sinking pass.
-    let (graph, liveness) = (graph0, cmmLocalLiveness dflags graph0)
+    let liveness = cmmLocalLiveness dflags graph
         blocks = postorderDfs graph
 
     (final_stackmaps, _final_high_sp, new_blocks) <-
@@ -685,7 +684,8 @@ allocate dflags ret_off live stackmap@StackMap{ sm_sp = sp0
                    | x <- [ 1 .. toWords dflags ret_off] ]
                   live_words =
                    [ (toWords dflags x, Occupied)
-                   | (r,off) <- eltsUFM regs1,
+                   | (r,off) <- nonDetEltsUFM regs1,
+                   -- See Note [Unique Determinism and code generation]
                      let w = localRegBytes dflags r,
                      x <- [ off, off - wORD_SIZE dflags .. off - w + 1] ]
    in
@@ -856,17 +856,25 @@ areaToSp dflags _ sp_hwm _ (CmmLit CmmHighStackMark)
     -- Replace CmmHighStackMark with the number of bytes of stack used,
     -- the sp_hwm.   See Note [Stack usage] in StgCmmHeap
 
-areaToSp dflags _ _ _ (CmmMachOp (MO_U_Lt _)
-                          [CmmMachOp (MO_Sub _)
-                                  [ CmmRegOff (CmmGlobal Sp) x_off
-                                  , CmmLit (CmmInt y_lit _)],
-                           CmmReg (CmmGlobal SpLim)])
-  | fromIntegral x_off >= y_lit
+areaToSp dflags _ _ _ (CmmMachOp (MO_U_Lt _) args)
+  | falseStackCheck args
   = zeroExpr dflags
+areaToSp dflags _ _ _ (CmmMachOp (MO_U_Ge _) args)
+  | falseStackCheck args
+  = mkIntExpr dflags 1
     -- Replace a stack-overflow test that cannot fail with a no-op
     -- See Note [Always false stack check]
 
 areaToSp _ _ _ _ other = other
+
+-- | Determine whether a stack check cannot fail.
+falseStackCheck :: [CmmExpr] -> Bool
+falseStackCheck [ CmmMachOp (MO_Sub _)
+                      [ CmmRegOff (CmmGlobal Sp) x_off
+                      , CmmLit (CmmInt y_lit _)]
+                , CmmReg (CmmGlobal SpLim)]
+  = fromIntegral x_off >= y_lit
+falseStackCheck _ = False
 
 -- Note [Always false stack check]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -880,11 +888,18 @@ areaToSp _ _ _ _ other = other
 -- A subsequent sinking pass will later drop the dead code.
 -- Optimising this away depends on knowing that SpLim <= Sp, so it is
 -- really the job of the stack layout algorithm, hence we do it now.
+--
+-- The control flow optimiser may negate a conditional to increase
+-- the likelihood of a fallthrough if the branch is not taken.  But
+-- not every conditional is inverted as the control flow optimiser
+-- places some requirements on the predecessors of both branch targets.
+-- So we better look for the inverted comparison too.
 
 optStackCheck :: CmmNode O C -> CmmNode O C
 optStackCheck n = -- Note [Always false stack check]
  case n of
    CmmCondBranch (CmmLit (CmmInt 0 _)) _true false _ -> CmmBranch false
+   CmmCondBranch (CmmLit (CmmInt _ _)) true _false _ -> CmmBranch true
    other -> other
 
 
@@ -950,7 +965,9 @@ stackMapToLiveness dflags StackMap{..} =
                                      toWords dflags (sm_sp - sm_args)) live_words
    where
      live_words =  [ (toWords dflags off, False)
-                   | (r,off) <- eltsUFM sm_regs, isGcPtrType (localRegType r) ]
+                   | (r,off) <- nonDetEltsUFM sm_regs
+                   , isGcPtrType (localRegType r) ]
+                   -- See Note [Unique Determinism and code generation]
 
 
 -- -----------------------------------------------------------------------------
@@ -1000,12 +1017,9 @@ lowerSafeForeignCall dflags block
     id <- newTemp (bWord dflags)
     new_base <- newTemp (cmmRegType dflags (CmmGlobal BaseReg))
     let (caller_save, caller_load) = callerSaveVolatileRegs dflags
-    load_stack <- newTemp (gcWord dflags)
-    tso <- newTemp (gcWord dflags)
-    cn <- newTemp (bWord dflags)
-    bdfree <- newTemp (bWord dflags)
-    bdstart <- newTemp (bWord dflags)
-    let suspend = saveThreadState dflags tso cn  <*>
+    save_state_code <- saveThreadState dflags
+    load_state_code <- loadThreadState dflags
+    let suspend = save_state_code  <*>
                   caller_save <*>
                   mkMiddle (callSuspendThread dflags id intrbl)
         midCall = mkUnsafeCall tgt res args
@@ -1014,7 +1028,7 @@ lowerSafeForeignCall dflags block
                   -- might now have a different Capability!
                   mkAssign (CmmGlobal BaseReg) (CmmReg (CmmLocal new_base)) <*>
                   caller_load <*>
-                  loadThreadState dflags tso load_stack cn bdfree bdstart
+                  load_state_code
 
         (_, regs, copyout) =
              copyOutOflow dflags NativeReturn Jump (Young succ)
@@ -1052,9 +1066,6 @@ lowerSafeForeignCall dflags block
 foreignLbl :: FastString -> CmmExpr
 foreignLbl name = CmmLit (CmmLabel (mkForeignLabel name Nothing ForeignLabelInExternalPackage IsFunction))
 
-newTemp :: CmmType -> UniqSM LocalReg
-newTemp rep = getUniqueM >>= \u -> return (LocalReg u rep)
-
 callSuspendThread :: DynFlags -> LocalReg -> Bool -> CmmNode O O
 callSuspendThread dflags id intrbl =
   CmmUnsafeForeignCall
@@ -1078,8 +1089,8 @@ data StackSlot = Occupied | Empty
      -- Occupied: a return address or part of an update frame
 
 instance Outputable StackSlot where
-  ppr Occupied = ptext (sLit "XXX")
-  ppr Empty    = ptext (sLit "---")
+  ppr Occupied = text "XXX"
+  ppr Empty    = text "---"
 
 dropEmpty :: WordOff -> [StackSlot] -> Maybe [StackSlot]
 dropEmpty 0 ss           = Just ss
@@ -1110,4 +1121,5 @@ insertReloads stackmap =
 
 
 stackSlotRegs :: StackMap -> [(LocalReg, StackLoc)]
-stackSlotRegs sm = eltsUFM (sm_regs sm)
+stackSlotRegs sm = nonDetEltsUFM (sm_regs sm)
+  -- See Note [Unique Determinism and code generation]

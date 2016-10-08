@@ -30,7 +30,7 @@ import InstEnv
 import Class
 import Avail
 import CoreSyn
-import CoreFVs( exprsSomeFreeVars )
+import CoreFVs( exprsSomeFreeVarsList )
 import CoreSubst
 import PprCore
 import DsMonad
@@ -60,13 +60,12 @@ import Coverage
 import Util
 import MonadUtils
 import OrdList
-import StaticPtrTable
 import UniqFM
+import UniqDFM
 import ListSetOps
 import Fingerprint
 import Maybes
 
-import Data.Function
 import Data.List
 import Data.IORef
 import Control.Monad( when )
@@ -84,7 +83,8 @@ mkDependencies
  = do
       -- Template Haskell used?
       th_used <- readIORef th_var
-      let dep_mods = eltsUFM (delFromUFM (imp_dep_mods imports) (moduleName mod))
+      let dep_mods = eltsUDFM (delFromUDFM (imp_dep_mods imports)
+                                           (moduleName mod))
                 -- M.hi-boot can be in the imp_dep_mods, but we must remove
                 -- it before recording the modules on which this one depends!
                 -- (We want to retain M.hi-boot in imp_dep_mods so that
@@ -92,16 +92,16 @@ mkDependencies
                 --  on M.hi-boot, and hence that we should do the hi-boot consistency
                 --  check.)
 
-          pkgs | th_used   = insertList thUnitId (imp_dep_pkgs imports)
+          pkgs | th_used   = insertList (toInstalledUnitId thUnitId) (imp_dep_pkgs imports)
                | otherwise = imp_dep_pkgs imports
 
           -- Set the packages required to be Safe according to Safe Haskell.
           -- See Note [RnNames . Tracking Trust Transitively]
-          sorted_pkgs = sortBy stableUnitIdCmp pkgs
+          sorted_pkgs = sort pkgs
           trust_pkgs  = imp_trust_pkgs imports
           dep_pkgs'   = map (\x -> (x, x `elem` trust_pkgs)) sorted_pkgs
 
-      return Deps { dep_mods   = sortBy (stableModuleNameCmp `on` fst) dep_mods,
+      return Deps { dep_mods   = dep_mods,
                     dep_pkgs   = dep_pkgs',
                     dep_orphs  = sortBy stableModuleCmp (imp_orphs  imports),
                     dep_finsts = sortBy stableModuleCmp (imp_finsts imports) }
@@ -111,16 +111,21 @@ mkDependencies
 mkUsedNames :: TcGblEnv -> NameSet
 mkUsedNames TcGblEnv{ tcg_dus = dus } = allUses dus
 
-mkUsageInfo :: HscEnv -> Module -> ImportedMods -> NameSet -> [FilePath] -> IO [Usage]
-mkUsageInfo hsc_env this_mod dir_imp_mods used_names dependent_files
+mkUsageInfo :: HscEnv -> Module -> ImportedMods -> NameSet -> [FilePath] -> [(Module, Fingerprint)] -> IO [Usage]
+mkUsageInfo hsc_env this_mod dir_imp_mods used_names dependent_files merged
   = do
     eps <- hscEPS hsc_env
     hashes <- mapM getFileHash dependent_files
     let mod_usages = mk_mod_usage_info (eps_PIT eps) hsc_env this_mod
                                        dir_imp_mods used_names
-    let usages = mod_usages ++ [ UsageFile { usg_file_path = f
+        usages = mod_usages ++ [ UsageFile { usg_file_path = f
                                            , usg_file_hash = hash }
                                | (f, hash) <- zip dependent_files hashes ]
+                            ++ [ UsageMergedRequirement
+                                    { usg_mod = mod,
+                                      usg_mod_hash = hash
+                                    }
+                               | (mod, hash) <- merged ]
     usages `seqList` return usages
     -- seq the list of Usages returned: occasionally these
     -- don't get evaluated for a while and we can end up hanging on to
@@ -149,7 +154,9 @@ mk_mod_usage_info pit hsc_env this_mod direct_imports used_names
     -- ent_map groups together all the things imported and used
     -- from a particular module
     ent_map :: ModuleEnv [OccName]
-    ent_map  = foldNameSet add_mv emptyModuleEnv used_names
+    ent_map  = nonDetFoldUFM add_mv emptyModuleEnv used_names
+     -- nonDetFoldUFM is OK here. If you follow the logic, we sort by OccName
+     -- in ent_hashs
      where
       add_mv name mv_map
         | isWiredInName name = mv_map  -- ignore wired-in names
@@ -263,7 +270,8 @@ deSugar :: HscEnv -> ModLocation -> TcGblEnv -> IO (Messages, Maybe ModGuts)
 
 deSugar hsc_env
         mod_loc
-        tcg_env@(TcGblEnv { tcg_mod          = mod,
+        tcg_env@(TcGblEnv { tcg_mod          = id_mod,
+                            tcg_semantic_mod = mod,
                             tcg_src          = hsc_src,
                             tcg_type_env     = type_env,
                             tcg_imports      = imports,
@@ -274,6 +282,7 @@ deSugar hsc_env
                             tcg_fix_env      = fix_env,
                             tcg_inst_env     = inst_env,
                             tcg_fam_inst_env = fam_inst_env,
+                            tcg_merged       = merged,
                             tcg_warns        = warns,
                             tcg_anns         = anns,
                             tcg_binds        = binds,
@@ -291,10 +300,14 @@ deSugar hsc_env
 
   = do { let dflags = hsc_dflags hsc_env
              print_unqual = mkPrintUnqualified dflags rdr_env
-        ; showPass dflags "Desugar"
-
-        -- Desugar the program
-        ; let export_set = availsToNameSet exports
+        ; withTiming (pure dflags)
+                     (text "Desugar"<+>brackets (ppr mod))
+                     (const ()) $
+     do { -- Desugar the program
+        ; let export_set =
+                -- Used to be 'availsToNameSet', but we now export selectors
+                -- only when necessary. See #12125.
+                availsToNameSetWithSelectors exports
               target     = hscTarget dflags
               hpcInfo    = emptyHpcInfo other_hpc_info
 
@@ -302,7 +315,7 @@ deSugar hsc_env
                          <- if not (isHsBootOrSig hsc_src)
                               then addTicksToBinds hsc_env mod mod_loc
                                        export_set (typeEnvTyCons type_env) binds
-                              else return (binds, hpcInfo, emptyModBreaks)
+                              else return (binds, hpcInfo, Nothing)
 
         ; (msgs, mb_res) <- initDs hsc_env mod rdr_env type_env fam_inst_env $
                        do { ds_ev_binds <- dsEvBinds ev_binds
@@ -311,20 +324,13 @@ deSugar hsc_env
                           ; (ds_fords, foreign_prs) <- dsForeigns fords
                           ; ds_rules <- mapMaybeM dsRule rules
                           ; ds_vects <- mapM dsVect vects
-                          ; stBinds <- dsGetStaticBindsVar >>=
-                                           liftIO . readIORef
                           ; let hpc_init
                                   | gopt Opt_Hpc dflags = hpcInitCode mod ds_hpc_info
                                   | otherwise = empty
-                                -- Stub to insert the static entries of the
-                                -- module into the static pointer table
-                                spt_init = sptInitCode mod stBinds
                           ; return ( ds_ev_binds
                                    , foreign_prs `appOL` core_prs `appOL` spec_prs
-                                                 `appOL` toOL (map snd stBinds)
                                    , spec_rules ++ ds_rules, ds_vects
-                                   , ds_fords `appendStubC` hpc_init
-                                              `appendStubC` spt_init) }
+                                   , ds_fords `appendStubC` hpc_init) }
 
         ; case mb_res of {
            Nothing -> return (msgs, Nothing) ;
@@ -360,7 +366,10 @@ deSugar hsc_env
         ; used_th <- readIORef tc_splice_used
         ; dep_files <- readIORef dependent_files
         ; safe_mode <- finalSafeMode dflags tcg_env
-        ; usages <- mkUsageInfo hsc_env mod (imp_mods imports) used_names dep_files
+        ; usages <- mkUsageInfo hsc_env mod (imp_mods imports) used_names dep_files merged
+        -- id_mod /= mod when we are processing an hsig, but hsigs
+        -- never desugared and compiled (there's no code!)
+        ; MASSERT ( id_mod == mod )
 
         ; let mod_guts = ModGuts {
                 mg_module       = mod,
@@ -391,7 +400,7 @@ deSugar hsc_env
                 mg_trust_pkg    = imp_trust_own_pkg imports
               }
         ; return (msgs, Just mod_guts)
-        }}}
+        }}}}
 
 mkFileSrcSpan :: ModLocation -> SrcSpan
 mkFileSrcSpan mod_loc
@@ -563,7 +572,7 @@ dsRule (L loc (HsRule name rule_act vars lhs _tv_lhs rhs _fv_rhs))
         -- Substitute the dict bindings eagerly,
         -- and take the body apart into a (f args) form
         ; case decomposeRuleLhs bndrs'' lhs'' of {
-                Left msg -> do { warnDs msg; return Nothing } ;
+                Left msg -> do { warnDs NoReason msg; return Nothing } ;
                 Right (final_bndrs, fn_id, args) -> do
 
         { let is_local = isLocalId fn_id
@@ -573,7 +582,9 @@ dsRule (L loc (HsRule name rule_act vars lhs _tv_lhs rhs _fv_rhs))
               fn_name   = idName fn_id
               final_rhs = simpleOptExpr rhs''    -- De-crap it
               rule_name = snd (unLoc name)
-              arg_ids = varSetElems (exprsSomeFreeVars isId args `delVarSetList` final_bndrs)
+              final_bndrs_set = mkVarSet final_bndrs
+              arg_ids = filterOut (`elemVarSet` final_bndrs_set) $
+                        exprsSomeFreeVarsList isId args
 
         ; dflags <- getDynFlags
         ; rule <- dsMkUserRule this_mod is_local
@@ -598,22 +609,24 @@ warnRuleShadowing rule_name rule_act fn_id arg_ids
       | isLocalId lhs_id || canUnfold (idUnfolding lhs_id)
                        -- If imported with no unfolding, no worries
       , idInlineActivation lhs_id `competesWith` rule_act
-      = warnDs (vcat [ hang (ptext (sLit "Rule") <+> pprRuleName rule_name
-                               <+> ptext (sLit "may never fire"))
-                            2 (ptext (sLit "because") <+> quotes (ppr lhs_id)
-                               <+> ptext (sLit "might inline first"))
-                     , ptext (sLit "Probable fix: add an INLINE[n] or NOINLINE[n] pragma for")
+      = warnDs (Reason Opt_WarnInlineRuleShadowing)
+               (vcat [ hang (text "Rule" <+> pprRuleName rule_name
+                               <+> text "may never fire")
+                            2 (text "because" <+> quotes (ppr lhs_id)
+                               <+> text "might inline first")
+                     , text "Probable fix: add an INLINE[n] or NOINLINE[n] pragma for"
                        <+> quotes (ppr lhs_id)
                      , ifPprDebug (ppr (idInlineActivation lhs_id) $$ ppr rule_act) ])
 
       | check_rules_too
       , bad_rule : _ <- get_bad_rules lhs_id
-      = warnDs (vcat [ hang (ptext (sLit "Rule") <+> pprRuleName rule_name
-                               <+> ptext (sLit "may never fire"))
-                            2 (ptext (sLit "because rule") <+> pprRuleName (ruleName bad_rule)
-                               <+> ptext (sLit "for")<+> quotes (ppr lhs_id)
-                               <+> ptext (sLit "might fire first"))
-                      , ptext (sLit "Probable fix: add phase [n] or [~n] to the competing rule")
+      = warnDs (Reason Opt_WarnInlineRuleShadowing)
+               (vcat [ hang (text "Rule" <+> pprRuleName rule_name
+                               <+> text "may never fire")
+                            2 (text "because rule" <+> pprRuleName (ruleName bad_rule)
+                               <+> text "for"<+> quotes (ppr lhs_id)
+                               <+> text "might fire first")
+                      , text "Probable fix: add phase [n] or [~n] to the competing rule"
                       , ifPprDebug (ppr bad_rule) ])
 
       | otherwise
@@ -669,7 +682,7 @@ We want the user to express a rule saying roughly “mapping a coercion over a
 list can be replaced by a coercion”. But the cast operator of Core (▷) cannot
 be written in Haskell. So we use `coerce` for that (#2110). The user writes
     map coerce = coerce
-as a RULE, and this optimizes any kind of mapped' casts aways, including `map
+as a RULE, and this optimizes any kind of mapped' casts away, including `map
 MkNewtype`.
 
 For that we replace any forall'ed `c :: Coercible a b` value in a RULE by

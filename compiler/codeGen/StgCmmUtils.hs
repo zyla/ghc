@@ -38,7 +38,7 @@ module StgCmmUtils (
         addToMem, addToMemE, addToMemLblE, addToMemLbl,
         mkWordCLit,
         newStringCLit, newByteStringCLit,
-        blankWord
+        blankWord,
   ) where
 
 #include "HsVersions.h"
@@ -63,9 +63,11 @@ import Literal
 import Digraph
 import Util
 import Unique
+import UniqSupply (MonadUnique(..))
 import DynFlags
 import FastString
 import Outputable
+import RepType
 
 import qualified Data.ByteString as BS
 import qualified Data.Map as M
@@ -250,7 +252,7 @@ callerSaveVolatileRegs dflags = (caller_save, caller_load)
 
     callerRestoreGlobalReg reg
         = mkAssign (CmmGlobal reg)
-                    (CmmLoad (get_GlobalReg_addr dflags reg) (globalRegType dflags reg))
+                   (CmmLoad (get_GlobalReg_addr dflags reg) (globalRegType dflags reg))
 
 -- -----------------------------------------------------------------------------
 -- Global registers
@@ -345,8 +347,8 @@ assignTemp e = do { dflags <- getDynFlags
                   ; emitAssign (CmmLocal reg) e
                   ; return reg }
 
-newTemp :: CmmType -> FCode LocalReg
-newTemp rep = do { uniq <- newUnique
+newTemp :: MonadUnique m => CmmType -> m LocalReg
+newTemp rep = do { uniq <- getUniqueM
                  ; return (LocalReg uniq rep) }
 
 newUnboxedTupleRegs :: Type -> FCode ([LocalReg], [ForeignHint])
@@ -360,15 +362,11 @@ newUnboxedTupleRegs res_ty
         ; sequel <- getSequel
         ; regs <- choose_regs dflags sequel
         ; ASSERT( regs `equalLength` reps )
-          return (regs, map primRepForeignHint reps) }
+          return (regs, map slotForeignHint reps) }
   where
-    UbxTupleRep ty_args = repType res_ty
-    reps = [ rep
-           | ty <- ty_args
-           , let rep = typePrimRep ty
-           , not (isVoidRep rep) ]
+    MultiRep reps = repType res_ty
     choose_regs _ (AssignTo regs _) = return regs
-    choose_regs dflags _            = mapM (newTemp . primRepCmmType dflags) reps
+    choose_regs dflags _            = mapM (newTemp . slotCmmType dflags) reps
 
 
 
@@ -395,7 +393,7 @@ emitMultiAssign []    []    = return ()
 emitMultiAssign [reg] [rhs] = emitAssign (CmmLocal reg) rhs
 emitMultiAssign regs rhss   = do
   dflags <- getDynFlags
-  ASSERT( equalLength regs rhss )
+  ASSERT2( equalLength regs rhss, ppr regs $$ ppr rhss )
     unscramble dflags ([1..] `zip` (regs `zip` rhss))
 
 unscramble :: DynFlags -> [Vrtx] -> FCode ()
@@ -410,7 +408,7 @@ unscramble dflags vertices = mapM_ do_component components
                                     stmt1 `mustFollow` stmt2 ]
 
         components :: [SCC Vrtx]
-        components = stronglyConnCompFromEdgedVertices edges
+        components = stronglyConnCompFromEdgedVerticesUniq edges
 
         -- do_components deal with one strongly-connected component
         -- Not cyclic, or singleton?  Just do it

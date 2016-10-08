@@ -6,6 +6,8 @@
 --
 -----------------------------------------------------------------------------
 
+{-# LANGUAGE CPP #-}
+
 module CLabel (
         CLabel, -- abstract type
         ForeignLabelSource(..),
@@ -88,8 +90,9 @@ module CLabel (
 
         mkForeignLabel,
         addLabelSize,
-        foreignLabelStdcallInfo,
 
+        foreignLabelStdcallInfo,
+        isForeignLabel,
         mkCCLabel, mkCCSLabel,
 
         DynamicLinkerLabelInfo(..),
@@ -112,6 +115,8 @@ module CLabel (
         pprCLabel
     ) where
 
+#include "HsVersions.h"
+
 import IdInfo
 import BasicTypes
 import Packages
@@ -126,6 +131,7 @@ import FastString
 import DynFlags
 import Platform
 import UniqSet
+import Util
 import PprCore ( {- instances -} )
 
 -- -----------------------------------------------------------------------------
@@ -238,8 +244,91 @@ data CLabel
   | LargeBitmapLabel
         {-# UNPACK #-} !Unique
 
-  deriving (Eq, Ord)
+  deriving Eq
 
+-- This is laborious, but necessary. We can't derive Ord because
+-- Unique doesn't have an Ord instance. Note nonDetCmpUnique in the
+-- implementation. See Note [No Ord for Unique]
+-- This is non-deterministic but we do not currently support deterministic
+-- code-generation. See Note [Unique Determinism and code generation]
+instance Ord CLabel where
+  compare (IdLabel a1 b1 c1) (IdLabel a2 b2 c2) =
+    compare a1 a2 `thenCmp`
+    compare b1 b2 `thenCmp`
+    compare c1 c2
+  compare (CmmLabel a1 b1 c1) (CmmLabel a2 b2 c2) =
+    compare a1 a2 `thenCmp`
+    compare b1 b2 `thenCmp`
+    compare c1 c2
+  compare (RtsLabel a1) (RtsLabel a2) = compare a1 a2
+  compare (ForeignLabel a1 b1 c1 d1) (ForeignLabel a2 b2 c2 d2) =
+    compare a1 a2 `thenCmp`
+    compare b1 b2 `thenCmp`
+    compare c1 c2 `thenCmp`
+    compare d1 d2
+  compare (CaseLabel u1 a1) (CaseLabel u2 a2) =
+    nonDetCmpUnique u1 u2 `thenCmp`
+    compare a1 a2
+  compare (AsmTempLabel u1) (AsmTempLabel u2) = nonDetCmpUnique u1 u2
+  compare (AsmTempDerivedLabel a1 b1) (AsmTempDerivedLabel a2 b2) =
+    compare a1 a2 `thenCmp`
+    compare b1 b2
+  compare (StringLitLabel u1) (StringLitLabel u2) =
+    nonDetCmpUnique u1 u2
+  compare (PlainModuleInitLabel a1) (PlainModuleInitLabel a2) =
+    compare a1 a2
+  compare (CC_Label a1) (CC_Label a2) =
+    compare a1 a2
+  compare (CCS_Label a1) (CCS_Label a2) =
+    compare a1 a2
+  compare (DynamicLinkerLabel a1 b1) (DynamicLinkerLabel a2 b2) =
+    compare a1 a2 `thenCmp`
+    compare b1 b2
+  compare PicBaseLabel PicBaseLabel = EQ
+  compare (DeadStripPreventer a1) (DeadStripPreventer a2) =
+    compare a1 a2
+  compare (HpcTicksLabel a1) (HpcTicksLabel a2) =
+    compare a1 a2
+  compare (SRTLabel u1) (SRTLabel u2) =
+    nonDetCmpUnique u1 u2
+  compare (LargeSRTLabel u1) (LargeSRTLabel u2) =
+    nonDetCmpUnique u1 u2
+  compare (LargeBitmapLabel u1) (LargeBitmapLabel u2) =
+    nonDetCmpUnique u1 u2
+  compare IdLabel{} _ = LT
+  compare _ IdLabel{} = GT
+  compare CmmLabel{} _ = LT
+  compare _ CmmLabel{} = GT
+  compare RtsLabel{} _ = LT
+  compare _ RtsLabel{} = GT
+  compare ForeignLabel{} _ = LT
+  compare _ ForeignLabel{} = GT
+  compare CaseLabel{} _ = LT
+  compare _ CaseLabel{} = GT
+  compare AsmTempLabel{} _ = LT
+  compare _ AsmTempLabel{} = GT
+  compare AsmTempDerivedLabel{} _ = LT
+  compare _ AsmTempDerivedLabel{} = GT
+  compare StringLitLabel{} _ = LT
+  compare _ StringLitLabel{} = GT
+  compare PlainModuleInitLabel{} _ = LT
+  compare _ PlainModuleInitLabel{} = GT
+  compare CC_Label{} _ = LT
+  compare _ CC_Label{} = GT
+  compare CCS_Label{} _ = LT
+  compare _ CCS_Label{} = GT
+  compare DynamicLinkerLabel{} _ = LT
+  compare _ DynamicLinkerLabel{} = GT
+  compare PicBaseLabel{} _ = LT
+  compare _ PicBaseLabel{} = GT
+  compare DeadStripPreventer{} _ = LT
+  compare _ DeadStripPreventer{} = GT
+  compare HpcTicksLabel{} _ = LT
+  compare _ HpcTicksLabel{} = GT
+  compare SRTLabel{} _ = LT
+  compare _ SRTLabel{} = GT
+  compare LargeSRTLabel{} _ = LT
+  compare _ LargeSRTLabel{} = GT
 
 -- | Record where a foreign label is stored.
 data ForeignLabelSource
@@ -491,6 +580,11 @@ addLabelSize (ForeignLabel str _ src  fod) sz
     = ForeignLabel str (Just sz) src fod
 addLabelSize label _
     = label
+
+-- | Whether label is a non-haskell label (defined in C code)
+isForeignLabel :: CLabel -> Bool
+isForeignLabel (ForeignLabel _ _ _ _) = True
+isForeignLabel _lbl = False
 
 -- | Get the label size field from a ForeignLabel
 foreignLabelStdcallInfo :: CLabel -> Maybe Int
@@ -1000,11 +1094,11 @@ pprCLabel platform (DynamicLinkerLabel info lbl)
 
 pprCLabel _ PicBaseLabel
  | cGhcWithNativeCodeGen == "YES"
-   = ptext (sLit "1b")
+   = text "1b"
 
 pprCLabel platform (DeadStripPreventer lbl)
  | cGhcWithNativeCodeGen == "YES"
-   = pprCLabel platform lbl <> ptext (sLit "_dsp")
+   = pprCLabel platform lbl <> text "_dsp"
 
 pprCLabel platform lbl
    = getPprStyle $ \ sty ->
@@ -1028,22 +1122,22 @@ pprAsmCLbl _ lbl
 
 pprCLbl :: CLabel -> SDoc
 pprCLbl (StringLitLabel u)
-  = pprUnique u <> ptext (sLit "_str")
+  = pprUnique u <> text "_str"
 
 pprCLbl (CaseLabel u CaseReturnPt)
-  = hcat [pprUnique u, ptext (sLit "_ret")]
+  = hcat [pprUnique u, text "_ret"]
 pprCLbl (CaseLabel u CaseReturnInfo)
-  = hcat [pprUnique u, ptext (sLit "_info")]
+  = hcat [pprUnique u, text "_info"]
 pprCLbl (CaseLabel u (CaseAlt tag))
-  = hcat [pprUnique u, pp_cSEP, int tag, ptext (sLit "_alt")]
+  = hcat [pprUnique u, pp_cSEP, int tag, text "_alt"]
 pprCLbl (CaseLabel u CaseDefault)
-  = hcat [pprUnique u, ptext (sLit "_dflt")]
+  = hcat [pprUnique u, text "_dflt"]
 
 pprCLbl (SRTLabel u)
-  = pprUnique u <> pp_cSEP <> ptext (sLit "srt")
+  = pprUnique u <> pp_cSEP <> text "srt"
 
-pprCLbl (LargeSRTLabel u)  = pprUnique u <> pp_cSEP <> ptext (sLit "srtd")
-pprCLbl (LargeBitmapLabel u)  = text "b" <> pprUnique u <> pp_cSEP <> ptext (sLit "btm")
+pprCLbl (LargeSRTLabel u)  = pprUnique u <> pp_cSEP <> text "srtd"
+pprCLbl (LargeBitmapLabel u)  = text "b" <> pprUnique u <> pp_cSEP <> text "btm"
 -- Some bitsmaps for tuple constructors have a numeric tag (e.g. '7')
 -- until that gets resolved we'll just force them to start
 -- with a letter so the label will be legal assmbly code.
@@ -1053,56 +1147,64 @@ pprCLbl (CmmLabel _ str CmmCode)        = ftext str
 pprCLbl (CmmLabel _ str CmmData)        = ftext str
 pprCLbl (CmmLabel _ str CmmPrimCall)    = ftext str
 
-pprCLbl (RtsLabel (RtsApFast str))   = ftext str <> ptext (sLit "_fast")
+pprCLbl (RtsLabel (RtsApFast str))   = ftext str <> text "_fast"
 
 pprCLbl (RtsLabel (RtsSelectorInfoTable upd_reqd offset))
-  = hcat [ptext (sLit "stg_sel_"), text (show offset),
+  = sdocWithDynFlags $ \dflags ->
+    ASSERT(offset >= 0 && offset <= mAX_SPEC_SELECTEE_SIZE dflags)
+    hcat [text "stg_sel_", text (show offset),
           ptext (if upd_reqd
                  then (sLit "_upd_info")
                  else (sLit "_noupd_info"))
         ]
 
 pprCLbl (RtsLabel (RtsSelectorEntry upd_reqd offset))
-  = hcat [ptext (sLit "stg_sel_"), text (show offset),
+  = sdocWithDynFlags $ \dflags ->
+    ASSERT(offset >= 0 && offset <= mAX_SPEC_SELECTEE_SIZE dflags)
+    hcat [text "stg_sel_", text (show offset),
                 ptext (if upd_reqd
                         then (sLit "_upd_entry")
                         else (sLit "_noupd_entry"))
         ]
 
 pprCLbl (RtsLabel (RtsApInfoTable upd_reqd arity))
-  = hcat [ptext (sLit "stg_ap_"), text (show arity),
+  = sdocWithDynFlags $ \dflags ->
+    ASSERT(arity > 0 && arity <= mAX_SPEC_AP_SIZE dflags)
+    hcat [text "stg_ap_", text (show arity),
                 ptext (if upd_reqd
                         then (sLit "_upd_info")
                         else (sLit "_noupd_info"))
         ]
 
 pprCLbl (RtsLabel (RtsApEntry upd_reqd arity))
-  = hcat [ptext (sLit "stg_ap_"), text (show arity),
+  = sdocWithDynFlags $ \dflags ->
+    ASSERT(arity > 0 && arity <= mAX_SPEC_AP_SIZE dflags)
+    hcat [text "stg_ap_", text (show arity),
                 ptext (if upd_reqd
                         then (sLit "_upd_entry")
                         else (sLit "_noupd_entry"))
         ]
 
 pprCLbl (CmmLabel _ fs CmmInfo)
-  = ftext fs <> ptext (sLit "_info")
+  = ftext fs <> text "_info"
 
 pprCLbl (CmmLabel _ fs CmmEntry)
-  = ftext fs <> ptext (sLit "_entry")
+  = ftext fs <> text "_entry"
 
 pprCLbl (CmmLabel _ fs CmmRetInfo)
-  = ftext fs <> ptext (sLit "_info")
+  = ftext fs <> text "_info"
 
 pprCLbl (CmmLabel _ fs CmmRet)
-  = ftext fs <> ptext (sLit "_ret")
+  = ftext fs <> text "_ret"
 
 pprCLbl (CmmLabel _ fs CmmClosure)
-  = ftext fs <> ptext (sLit "_closure")
+  = ftext fs <> text "_closure"
 
 pprCLbl (RtsLabel (RtsPrimOp primop))
-  = ptext (sLit "stg_") <> ppr primop
+  = text "stg_" <> ppr primop
 
 pprCLbl (RtsLabel (RtsSlowFastTickyCtr pat))
-  = ptext (sLit "SLOW_CALL_fast_") <> text pat <> ptext (sLit "_ctr")
+  = text "SLOW_CALL_fast_" <> text pat <> ptext (sLit "_ctr")
 
 pprCLbl (ForeignLabel str _ _ _)
   = ftext str
@@ -1113,10 +1215,10 @@ pprCLbl (CC_Label cc)           = ppr cc
 pprCLbl (CCS_Label ccs)         = ppr ccs
 
 pprCLbl (PlainModuleInitLabel mod)
-   = ptext (sLit "__stginit_") <> ppr mod
+   = text "__stginit_" <> ppr mod
 
 pprCLbl (HpcTicksLabel mod)
-  = ptext (sLit "_hpc_tickboxes_")  <> ppr mod <> ptext (sLit "_hpc")
+  = text "_hpc_tickboxes_"  <> ppr mod <> ptext (sLit "_hpc")
 
 pprCLbl (AsmTempLabel {})       = panic "pprCLbl AsmTempLabel"
 pprCLbl (AsmTempDerivedLabel {})= panic "pprCLbl AsmTempDerivedLabel"
@@ -1127,19 +1229,19 @@ pprCLbl (DeadStripPreventer {}) = panic "pprCLbl DeadStripPreventer"
 ppIdFlavor :: IdLabelInfo -> SDoc
 ppIdFlavor x = pp_cSEP <>
                (case x of
-                       Closure          -> ptext (sLit "closure")
-                       SRT              -> ptext (sLit "srt")
-                       InfoTable        -> ptext (sLit "info")
-                       LocalInfoTable   -> ptext (sLit "info")
-                       Entry            -> ptext (sLit "entry")
-                       LocalEntry       -> ptext (sLit "entry")
-                       Slow             -> ptext (sLit "slow")
-                       RednCounts       -> ptext (sLit "ct")
-                       ConEntry         -> ptext (sLit "con_entry")
-                       ConInfoTable     -> ptext (sLit "con_info")
-                       StaticConEntry   -> ptext (sLit "static_entry")
-                       StaticInfoTable  -> ptext (sLit "static_info")
-                       ClosureTable     -> ptext (sLit "closure_tbl")
+                       Closure          -> text "closure"
+                       SRT              -> text "srt"
+                       InfoTable        -> text "info"
+                       LocalInfoTable   -> text "info"
+                       Entry            -> text "entry"
+                       LocalEntry       -> text "entry"
+                       Slow             -> text "slow"
+                       RednCounts       -> text "ct"
+                       ConEntry         -> text "con_entry"
+                       ConInfoTable     -> text "con_info"
+                       StaticConEntry   -> text "static_entry"
+                       StaticInfoTable  -> text "static_info"
+                       ClosureTable     -> text "closure_tbl"
                       )
 
 
@@ -1161,10 +1263,10 @@ underscorePrefix :: Bool   -- leading underscore on assembler labels?
 underscorePrefix = (cLeadingUnderscore == "YES")
 
 asmTempLabelPrefix :: Platform -> LitString  -- for formatting labels
-asmTempLabelPrefix platform =
-    if platformOS platform == OSDarwin
-    then sLit "L"
-    else sLit ".L"
+asmTempLabelPrefix platform = case platformOS platform of
+    OSDarwin -> sLit "L"
+    OSAIX    -> sLit "__L" -- follow IBM XL C's convention
+    _        -> sLit ".L"
 
 pprDynamicLinkerAsmLabel :: Platform -> DynamicLinkerLabelInfo -> CLabel -> SDoc
 pprDynamicLinkerAsmLabel platform dllInfo lbl
@@ -1178,6 +1280,11 @@ pprDynamicLinkerAsmLabel platform dllInfo lbl
         else case dllInfo of
              CodeStub  -> char 'L' <> ppr lbl <> text "$stub"
              SymbolPtr -> char 'L' <> ppr lbl <> text "$non_lazy_ptr"
+             _         -> panic "pprDynamicLinkerAsmLabel"
+
+   else if platformOS platform == OSAIX
+        then case dllInfo of
+             SymbolPtr -> text "LC.." <> ppr lbl -- GCC's naming convention
              _         -> panic "pprDynamicLinkerAsmLabel"
 
    else if osElfTarget (platformOS platform)

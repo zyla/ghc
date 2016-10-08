@@ -1,6 +1,14 @@
 -- (c) The University of Glasgow 2006
 
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE KindSignatures #-}
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE BangPatterns #-}
+#if __GLASGOW_HASKELL__ < 800
+-- For CallStack business
+{-# LANGUAGE ImplicitParams #-}
+{-# LANGUAGE FlexibleContexts #-}
+#endif
 
 -- | Highly random utility functions
 --
@@ -14,7 +22,9 @@ module Util (
         zipEqual, zipWithEqual, zipWith3Equal, zipWith4Equal,
         zipLazy, stretchZipWith, zipWithAndUnzip,
 
-        filterByList, partitionByList,
+        zipWithLazy, zipWith3Lazy,
+
+        filterByList, filterByLists, partitionByList,
 
         unzipWith,
 
@@ -34,6 +44,8 @@ module Util (
         notNull, snocView,
 
         isIn, isn'tIn,
+
+        chunkList,
 
         -- * Tuples
         fstOf3, sndOf3, thdOf3,
@@ -74,6 +86,9 @@ module Util (
         -- * Argument processing
         getCmd, toCmdArgs, toArgs,
 
+        -- * Integers
+        exactLog2,
+
         -- * Floating point
         readRational,
 
@@ -103,6 +118,12 @@ module Util (
 
         -- * Hashing
         hashString,
+
+        -- * Call stacks
+        GHC.Stack.CallStack,
+        HasCallStack,
+        HasDebugCallStack,
+        prettyCurrentCallStack,
     ) where
 
 #include "HsVersions.h"
@@ -116,10 +137,8 @@ import System.IO.Unsafe ( unsafePerformIO )
 import Data.List        hiding (group)
 
 import GHC.Exts
+import qualified GHC.Stack
 
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative)
-#endif
 import Control.Applicative ( liftA2 )
 import Control.Monad    ( liftM )
 import GHC.IO.Encoding (mkTextEncoding, textEncodingName)
@@ -323,6 +342,20 @@ zipLazy :: [a] -> [b] -> [(a,b)]
 zipLazy []     _       = []
 zipLazy (x:xs) ~(y:ys) = (x,y) : zipLazy xs ys
 
+-- | 'zipWithLazy' is like 'zipWith' but is lazy in the second list.
+-- The length of the output is always the same as the length of the first
+-- list.
+zipWithLazy :: (a -> b -> c) -> [a] -> [b] -> [c]
+zipWithLazy _ []     _       = []
+zipWithLazy f (a:as) ~(b:bs) = f a b : zipWithLazy f as bs
+
+-- | 'zipWith3Lazy' is like 'zipWith3' but is lazy in the second and third lists.
+-- The length of the output is always the same as the length of the first
+-- list.
+zipWith3Lazy :: (a -> b -> c -> d) -> [a] -> [b] -> [c] -> [d]
+zipWith3Lazy _ []     _       _       = []
+zipWith3Lazy f (a:as) ~(b:bs) ~(c:cs) = f a b c : zipWith3Lazy f as bs cs
+
 -- | 'filterByList' takes a list of Bools and a list of some elements and
 -- filters out these elements for which the corresponding value in the list of
 -- Bools is False. This function does not check whether the lists have equal
@@ -331,6 +364,23 @@ filterByList :: [Bool] -> [a] -> [a]
 filterByList (True:bs)  (x:xs) = x : filterByList bs xs
 filterByList (False:bs) (_:xs) =     filterByList bs xs
 filterByList _          _      = []
+
+-- | 'filterByLists' takes a list of Bools and two lists as input, and
+-- outputs a new list consisting of elements from the last two input lists. For
+-- each Bool in the list, if it is 'True', then it takes an element from the
+-- former list. If it is 'False', it takes an element from the latter list.
+-- The elements taken correspond to the index of the Bool in its list.
+-- For example:
+--
+-- @
+-- filterByLists [True, False, True, False] \"abcd\" \"wxyz\" = \"axcz\"
+-- @
+--
+-- This function does not check whether the lists have equal length.
+filterByLists :: [Bool] -> [a] -> [a] -> [a]
+filterByLists (True:bs)  (x:xs) (_:ys) = x : filterByLists bs xs ys
+filterByLists (False:bs) (_:xs) (y:ys) = y : filterByLists bs xs ys
+filterByLists _          _      _      = []
 
 -- | 'partitionByList' takes a list of Bools and a list of some elements and
 -- partitions the list according to the list of Bools. Elements corresponding
@@ -411,9 +461,9 @@ atLength :: ([a] -> b)   -- Called when length ls >= n, passed (drop n ls)
          -> [a]
          -> Int
          -> b
-atLength atLenPred atEnd ls n
-  | n < 0     = atLenPred ls
-  | otherwise = go n ls
+atLength atLenPred atEnd ls0 n0
+  | n0 < 0    = atLenPred ls0
+  | otherwise = go n0 ls0
   where
     -- go's first arg n >= 0
     go 0 ls     = atLenPred ls
@@ -422,15 +472,24 @@ atLength atLenPred atEnd ls n
 
 -- Some special cases of atLength:
 
+-- | @(lengthExceeds xs n) = (length xs > n)@
 lengthExceeds :: [a] -> Int -> Bool
--- ^ > (lengthExceeds xs n) = (length xs > n)
-lengthExceeds = atLength notNull False
+lengthExceeds lst n
+  | n < 0
+  = True
+  | otherwise
+  = atLength notNull False lst n
 
 lengthAtLeast :: [a] -> Int -> Bool
 lengthAtLeast = atLength (const True) False
 
+-- | @(lengthIs xs n) = (length xs == n)@
 lengthIs :: [a] -> Int -> Bool
-lengthIs = atLength null False
+lengthIs lst n
+  | n < 0
+  = False
+  | otherwise
+  = atLength null False lst n
 
 listLengthCmp :: [a] -> Int -> Ordering
 listLengthCmp = atLength atLen atEnd
@@ -506,6 +565,12 @@ isn'tIn msg x ys
       | otherwise = x /= y && notElem100 (i + 1) x ys
 # endif /* DEBUG */
 
+
+-- | Split a list into chunks of /n/ elements
+chunkList :: Int -> [a] -> [[a]]
+chunkList _ [] = []
+chunkList n xs = as : chunkList n bs where (as,bs) = splitAt n xs
+
 {-
 ************************************************************************
 *                                                                      *
@@ -572,9 +637,10 @@ all2 _ _      _      = False
 -- Count the number of times a predicate is true
 
 count :: (a -> Bool) -> [a] -> Int
-count _ [] = 0
-count p (x:xs) | p x       = 1 + count p xs
-               | otherwise = count p xs
+count p = go 0
+  where go !n [] = n
+        go !n (x:xs) | p x       = go (n+1) xs
+                     | otherwise = go n xs
 
 {-
 @splitAt@, @take@, and @drop@ but with length of another
@@ -937,6 +1003,27 @@ toArgs str
                     Right (arg, rest)
                 _ ->
                     Left ("Couldn't read " ++ show s ++ " as String")
+-----------------------------------------------------------------------------
+-- Integers
+
+-- This algorithm for determining the $\log_2$ of exact powers of 2 comes
+-- from GCC.  It requires bit manipulation primitives, and we use GHC
+-- extensions.  Tough.
+
+exactLog2 :: Integer -> Maybe Integer
+exactLog2 x
+  = if (x <= 0 || x >= 2147483648) then
+       Nothing
+    else
+       if (x .&. (-x)) /= x then
+          Nothing
+       else
+          Just (pow2 x)
+  where
+    pow2 x | x == 1 = 0
+           | otherwise = 1 + pow2 (x `shiftR` 1)
+
+
 {-
 -- -----------------------------------------------------------------------------
 -- Floats
@@ -1188,3 +1275,32 @@ mulHi :: Int32 -> Int32 -> Int32
 mulHi a b = fromIntegral (r `shiftR` 32)
    where r :: Int64
          r = fromIntegral a * fromIntegral b
+
+-- | A compatibility wrapper for the @GHC.Stack.HasCallStack@ constraint.
+#if __GLASGOW_HASKELL__ >= 800
+type HasCallStack = GHC.Stack.HasCallStack
+#elif MIN_VERSION_GLASGOW_HASKELL(7,10,2,0)
+type HasCallStack = (?callStack :: GHC.Stack.CallStack)
+-- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
+#else
+type HasCallStack = (() :: Constraint)
+#endif
+
+-- | A call stack constraint, but only when 'isDebugOn'.
+#if DEBUG
+type HasDebugCallStack = HasCallStack
+#else
+type HasDebugCallStack = (() :: Constraint)
+#endif
+
+-- | Pretty-print the current callstack
+#if __GLASGOW_HASKELL__ >= 800
+prettyCurrentCallStack :: HasCallStack => String
+prettyCurrentCallStack = GHC.Stack.prettyCallStack GHC.Stack.callStack
+#elif MIN_VERSION_GLASGOW_HASKELL(7,10,2,0)
+prettyCurrentCallStack :: (?callStack :: GHC.Stack.CallStack) => String
+prettyCurrentCallStack = GHC.Stack.showCallStack ?callStack
+#else
+prettyCurrentCallStack :: HasCallStack => String
+prettyCurrentCallStack = "Call stack unavailable"
+#endif

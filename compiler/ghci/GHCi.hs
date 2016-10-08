@@ -6,15 +6,20 @@
 --
 module GHCi
   ( -- * High-level interface to the interpreter
-    evalStmt, EvalStatus(..), EvalResult(..), EvalExpr(..)
+    evalStmt, EvalStatus_(..), EvalStatus, EvalResult(..), EvalExpr(..)
   , resumeStmt
   , abandonStmt
   , evalIO
   , evalString
   , evalStringToIOString
   , mallocData
-  , mkCostCentre
+  , createBCOs
+  , mkCostCentres
   , costCentreStackInfo
+  , newBreakArray
+  , enableBreakpoint
+  , breakpointStatus
+  , getBreakpointVar
 
   -- * The object-code linker
   , initObjLinker
@@ -43,31 +48,41 @@ module GHCi
 import GHCi.Message
 import GHCi.Run
 import GHCi.RemoteTypes
+import GHCi.ResolvedBCO
+import GHCi.BreakArray (BreakArray)
 import HscTypes
 import UniqFM
 import Panic
 import DynFlags
-#ifndef mingw32_HOST_OS
 import ErrUtils
 import Outputable
-#endif
 import Exception
 import BasicTypes
 import FastString
+import Util
+import Hooks
 
 import Control.Concurrent
 import Control.Monad
 import Control.Monad.IO.Class
 import Data.Binary
+import Data.Binary.Put
 import Data.ByteString (ByteString)
+import qualified Data.ByteString.Lazy as LB
 import Data.IORef
-import Foreign
+import Foreign hiding (void)
+import GHC.Stack.CCS (CostCentre,CostCentreStack)
 import System.Exit
-#ifndef mingw32_HOST_OS
 import Data.Maybe
+import GHC.IO.Handle.Types (Handle)
+#ifdef mingw32_HOST_OS
+import Foreign.C
+import GHC.IO.Handle.FD (fdToHandle)
+#else
 import System.Posix as Posix
 #endif
 import System.Process
+import GHC.Conc (getNumProcessors, pseq, par)
 
 {- Note [Remote GHCi]
 
@@ -123,6 +138,13 @@ Things that do not work with -fexternal-interpreter
 dynCompileExpr cannot work, because we have no way to run code of an
 unknown type in the remote process.  This API fails with an error
 message if it is used with -fexternal-interpreter.
+
+Other Notes on Remote GHCi
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+  * This wiki page has an implementation overview:
+    https://ghc.haskell.org/trac/ghc/wiki/Commentary/Compiler/ExternalInterpreter
+  * Note [External GHCi pointers] in compiler/ghci/GHCi.hs
+  * Note [Remote Template Haskell] in libraries/ghci/GHCi/TH.hs
 -}
 
 -- | Run a command in the interpreter's context.  With
@@ -178,7 +200,8 @@ withIServ HscEnv{..} action =
 -- | Execute an action of type @IO [a]@, returning 'ForeignHValue's for
 -- each of the results.
 evalStmt
-  :: HscEnv -> Bool -> EvalExpr ForeignHValue -> IO (EvalStatus [ForeignHValue])
+  :: HscEnv -> Bool -> EvalExpr ForeignHValue
+  -> IO (EvalStatus_ [ForeignHValue] [HValueRef])
 evalStmt hsc_env step foreign_expr = do
   let dflags = hsc_dflags hsc_env
   status <- withExpr foreign_expr $ \expr ->
@@ -187,29 +210,32 @@ evalStmt hsc_env step foreign_expr = do
  where
   withExpr :: EvalExpr ForeignHValue -> (EvalExpr HValueRef -> IO a) -> IO a
   withExpr (EvalThis fhv) cont =
-    withForeignHValue fhv $ \hvref -> cont (EvalThis hvref)
+    withForeignRef fhv $ \hvref -> cont (EvalThis hvref)
   withExpr (EvalApp fl fr) cont =
     withExpr fl $ \fl' ->
     withExpr fr $ \fr' ->
     cont (EvalApp fl' fr')
 
-resumeStmt :: HscEnv -> Bool -> ForeignHValue -> IO (EvalStatus [ForeignHValue])
+resumeStmt
+  :: HscEnv -> Bool -> ForeignRef (ResumeContext [HValueRef])
+  -> IO (EvalStatus_ [ForeignHValue] [HValueRef])
 resumeStmt hsc_env step resume_ctxt = do
   let dflags = hsc_dflags hsc_env
-  status <- withForeignHValue resume_ctxt $ \rhv ->
+  status <- withForeignRef resume_ctxt $ \rhv ->
     iservCmd hsc_env (ResumeStmt (mkEvalOpts dflags step) rhv)
   handleEvalStatus hsc_env status
 
-abandonStmt :: HscEnv -> ForeignHValue -> IO ()
+abandonStmt :: HscEnv -> ForeignRef (ResumeContext [HValueRef]) -> IO ()
 abandonStmt hsc_env resume_ctxt = do
-  withForeignHValue resume_ctxt $ \rhv ->
+  withForeignRef resume_ctxt $ \rhv ->
     iservCmd hsc_env (AbandonStmt rhv)
 
 handleEvalStatus
-  :: HscEnv -> EvalStatus [HValueRef] -> IO (EvalStatus [ForeignHValue])
+  :: HscEnv -> EvalStatus [HValueRef]
+  -> IO (EvalStatus_ [ForeignHValue] [HValueRef])
 handleEvalStatus hsc_env status =
   case status of
-    EvalBreak a b c d e -> return (EvalBreak a b c d e)
+    EvalBreak a b c d e f -> return (EvalBreak a b c d e f)
     EvalComplete alloc res ->
       EvalComplete alloc <$> addFinalizer res
  where
@@ -220,37 +246,88 @@ handleEvalStatus hsc_env status =
 -- | Execute an action of type @IO ()@
 evalIO :: HscEnv -> ForeignHValue -> IO ()
 evalIO hsc_env fhv = do
-  liftIO $ withForeignHValue fhv $ \fhv ->
+  liftIO $ withForeignRef fhv $ \fhv ->
     iservCmd hsc_env (EvalIO fhv) >>= fromEvalResult
 
 -- | Execute an action of type @IO String@
 evalString :: HscEnv -> ForeignHValue -> IO String
 evalString hsc_env fhv = do
-  liftIO $ withForeignHValue fhv $ \fhv ->
+  liftIO $ withForeignRef fhv $ \fhv ->
     iservCmd hsc_env (EvalString fhv) >>= fromEvalResult
 
 -- | Execute an action of type @String -> IO String@
 evalStringToIOString :: HscEnv -> ForeignHValue -> String -> IO String
 evalStringToIOString hsc_env fhv str = do
-  liftIO $ withForeignHValue fhv $ \fhv ->
+  liftIO $ withForeignRef fhv $ \fhv ->
     iservCmd hsc_env (EvalStringToString fhv str) >>= fromEvalResult
 
 
 -- | Allocate and store the given bytes in memory, returning a pointer
 -- to the memory in the remote process.
-mallocData :: HscEnv -> ByteString -> IO (Ptr ())
-mallocData hsc_env bs = fromRemotePtr <$> iservCmd hsc_env (MallocData bs)
+mallocData :: HscEnv -> ByteString -> IO (RemotePtr ())
+mallocData hsc_env bs = iservCmd hsc_env (MallocData bs)
 
-mkCostCentre
-  :: HscEnv -> RemotePtr {- CChar -} -> String -> String
-  -> IO RemotePtr {- CCostCentre -}
-mkCostCentre hsc_env c_module name src =
-  iservCmd hsc_env (MkCostCentre c_module name src)
+mkCostCentres
+  :: HscEnv -> String -> [(String,String)] -> IO [RemotePtr CostCentre]
+mkCostCentres hsc_env mod ccs =
+  iservCmd hsc_env (MkCostCentres mod ccs)
 
+-- | Create a set of BCOs that may be mutually recursive.
+createBCOs :: HscEnv -> [ResolvedBCO] -> IO [HValueRef]
+createBCOs hsc_env rbcos = do
+  n_jobs <- case parMakeCount (hsc_dflags hsc_env) of
+              Nothing -> liftIO getNumProcessors
+              Just n  -> return n
+  -- Serializing ResolvedBCO is expensive, so if we're in parallel mode
+  -- (-j<n>) parallelise the serialization.
+  if (n_jobs == 1)
+    then
+      iservCmd hsc_env (CreateBCOs [runPut (put rbcos)])
 
-costCentreStackInfo :: HscEnv -> RemotePtr {- CCostCentreStack -} -> IO [String]
+    else do
+      old_caps <- getNumCapabilities
+      if old_caps == n_jobs
+         then void $ evaluate puts
+         else bracket_ (setNumCapabilities n_jobs)
+                       (setNumCapabilities old_caps)
+                       (void $ evaluate puts)
+      iservCmd hsc_env (CreateBCOs puts)
+ where
+  puts = parMap doChunk (chunkList 100 rbcos)
+
+  -- make sure we force the whole lazy ByteString
+  doChunk c = pseq (LB.length bs) bs
+    where bs = runPut (put c)
+
+  -- We don't have the parallel package, so roll our own simple parMap
+  parMap _ [] = []
+  parMap f (x:xs) = fx `par` (fxs `pseq` (fx : fxs))
+    where fx = f x; fxs = parMap f xs
+
+costCentreStackInfo :: HscEnv -> RemotePtr CostCentreStack -> IO [String]
 costCentreStackInfo hsc_env ccs =
   iservCmd hsc_env (CostCentreStackInfo ccs)
+
+newBreakArray :: HscEnv -> Int -> IO (ForeignRef BreakArray)
+newBreakArray hsc_env size = do
+  breakArray <- iservCmd hsc_env (NewBreakArray size)
+  mkFinalizedHValue hsc_env breakArray
+
+enableBreakpoint :: HscEnv -> ForeignRef BreakArray -> Int -> Bool -> IO ()
+enableBreakpoint hsc_env ref ix b = do
+  withForeignRef ref $ \breakarray ->
+    iservCmd hsc_env (EnableBreakpoint breakarray ix b)
+
+breakpointStatus :: HscEnv -> ForeignRef BreakArray -> Int -> IO Bool
+breakpointStatus hsc_env ref ix = do
+  withForeignRef ref $ \breakarray ->
+    iservCmd hsc_env (BreakpointStatus breakarray ix)
+
+getBreakpointVar :: HscEnv -> ForeignHValue -> Int -> IO (Maybe ForeignHValue)
+getBreakpointVar hsc_env ref ix =
+  withForeignRef ref $ \apStack -> do
+    mb <- iservCmd hsc_env (GetBreakpointVar apStack ix)
+    mapM (mkFinalizedHValue hsc_env) mb
 
 -- -----------------------------------------------------------------------------
 -- Interface to the object-code linker
@@ -365,11 +442,6 @@ handleIServFailure IServ{..} e = do
 -- Starting and stopping the iserv process
 
 startIServ :: DynFlags -> IO IServ
-#ifdef mingw32_HOST_OS
-startIServ _ = panic "startIServ"
-  -- should not be called, because we disable -fexternal-interpreter on Windows.
-  -- (see DynFlags.makeDynFlagsConsistent)
-#else
 startIServ dflags = do
   let flavour
         | WayProf `elem` ways dflags = "-prof"
@@ -378,16 +450,11 @@ startIServ dflags = do
       prog = pgm_i dflags ++ flavour
       opts = getOpts dflags opt_i
   debugTraceMsg dflags 3 $ text "Starting " <> text prog
-  (rfd1, wfd1) <- Posix.createPipe -- we read on rfd1
-  (rfd2, wfd2) <- Posix.createPipe -- we write on wfd2
-  setFdOption rfd1 CloseOnExec True
-  setFdOption wfd2 CloseOnExec True
-  let args = show wfd1 : show rfd2 : opts
-  (_, _, _, ph) <- createProcess (proc prog args)
-  closeFd wfd1
-  closeFd rfd2
-  rh <- fdToHandle rfd1
-  wh <- fdToHandle wfd2
+  let createProc = lookupHook createIservProcessHook
+                              (\cp -> do { (_,_,_,ph) <- createProcess cp
+                                         ; return ph })
+                              dflags
+  (ph, rh, wh) <- runWithPipes createProc prog opts
   lo_ref <- newIORef Nothing
   cache_ref <- newIORef emptyUFM
   return $ IServ
@@ -398,12 +465,8 @@ startIServ dflags = do
     , iservLookupSymbolCache = cache_ref
     , iservPendingFrees = []
     }
-#endif
 
 stopIServ :: HscEnv -> IO ()
-#ifdef mingw32_HOST_OS
-stopIServ _ = return ()
-#else
 stopIServ HscEnv{..} =
   gmask $ \_restore -> do
     m <- takeMVar hsc_iserv
@@ -415,6 +478,41 @@ stopIServ HscEnv{..} =
     if isJust ex
        then return ()
        else iservCall iserv Shutdown
+
+runWithPipes :: (CreateProcess -> IO ProcessHandle)
+             -> FilePath -> [String] -> IO (ProcessHandle, Handle, Handle)
+#ifdef mingw32_HOST_OS
+foreign import ccall "io.h _close"
+   c__close :: CInt -> IO CInt
+
+foreign import ccall unsafe "io.h _get_osfhandle"
+   _get_osfhandle :: CInt -> IO CInt
+
+runWithPipes createProc prog opts = do
+    (rfd1, wfd1) <- createPipeFd -- we read on rfd1
+    (rfd2, wfd2) <- createPipeFd -- we write on wfd2
+    wh_client    <- _get_osfhandle wfd1
+    rh_client    <- _get_osfhandle rfd2
+    let args = show wh_client : show rh_client : opts
+    ph <- createProc (proc prog args)
+    rh <- mkHandle rfd1
+    wh <- mkHandle wfd2
+    return (ph, rh, wh)
+      where mkHandle :: CInt -> IO Handle
+            mkHandle fd = (fdToHandle fd) `onException` (c__close fd)
+#else
+runWithPipes createProc prog opts = do
+    (rfd1, wfd1) <- Posix.createPipe -- we read on rfd1
+    (rfd2, wfd2) <- Posix.createPipe -- we write on wfd2
+    setFdOption rfd1 CloseOnExec True
+    setFdOption wfd2 CloseOnExec True
+    let args = show wfd1 : show rfd2 : opts
+    ph <- createProc (proc prog args)
+    closeFd wfd1
+    closeFd rfd2
+    rh <- fdToHandle rfd1
+    wh <- fdToHandle wfd2
+    return (ph, rh, wh)
 #endif
 
 -- -----------------------------------------------------------------------------
@@ -429,44 +527,45 @@ HValue is a direct reference to an value in the local heap.  Obviously
 we cannot use this to refer to things in the external process.
 
 
-HValueRef
+RemoteRef
 ---------
 
-HValueRef is a StablePtr to a heap-resident value.  When
+RemoteRef is a StablePtr to a heap-resident value.  When
 -fexternal-interpreter is used, this value resides in the external
-process's heap.  HValueRefs are mostly used to send pointers in
+process's heap.  RemoteRefs are mostly used to send pointers in
 messages between GHC and iserv.
 
-An HValueRef must be explicitly freed when no longer required, using
+A RemoteRef must be explicitly freed when no longer required, using
 freeHValueRefs, or by attaching a finalizer with mkForeignHValue.
 
-To get from an HValueRef to an HValue you can use 'wormholeRef', which
+To get from a RemoteRef to an HValue you can use 'wormholeRef', which
 fails with an error message if -fexternal-interpreter is in use.
 
-ForeignHValue
--------------
+ForeignRef
+----------
 
-A ForeignHValue is an HValueRef with a finalizer that will free the
-'HValueRef' when it is gargabe collected.  We mostly use ForeignHValue
+A ForeignRef is a RemoteRef with a finalizer that will free the
+'RemoteRef' when it is gargabe collected.  We mostly use ForeignHValue
 on the GHC side.
 
-The finalizer adds the HValueRef to the iservPendingFrees list in the
-IServ record.  The next call to iservCmd will free any HValueRefs in
+The finalizer adds the RemoteRef to the iservPendingFrees list in the
+IServ record.  The next call to iservCmd will free any RemoteRefs in
 the list.  It was done this way rather than calling iservCmd directly,
 because I didn't want to have arbitrary threads calling iservCmd.  In
 principle it would probably be ok, but it seems less hairy this way.
 -}
 
--- | Creates a 'ForeignHValue' that will automatically release the
--- 'HValueRef' when it is no longer referenced.
-mkFinalizedHValue :: HscEnv -> HValueRef -> IO ForeignHValue
-mkFinalizedHValue HscEnv{..} hvref = mkForeignHValue hvref free
+-- | Creates a 'ForeignRef' that will automatically release the
+-- 'RemoteRef' when it is no longer referenced.
+mkFinalizedHValue :: HscEnv -> RemoteRef a -> IO (ForeignRef a)
+mkFinalizedHValue HscEnv{..} rref = mkForeignRef rref free
  where
   !external = gopt Opt_ExternalInterpreter hsc_dflags
+  hvref = toHValueRef rref
 
   free :: IO ()
   free
-    | not external = freeHValueRef hvref
+    | not external = freeRemoteRef hvref
     | otherwise =
       modifyMVar_ hsc_iserv $ \mb_iserv ->
         case mb_iserv of
@@ -478,22 +577,22 @@ freeHValueRefs :: HscEnv -> [HValueRef] -> IO ()
 freeHValueRefs _ [] = return ()
 freeHValueRefs hsc_env refs = iservCmd hsc_env (FreeHValueRefs refs)
 
--- | Convert a 'ForeignHValue' to an 'HValue' directly.  This only works
--- when the interpreter is running in the same process as the compiler,
--- so it fails when @-fexternal-interpreter@ is on.
-wormhole :: DynFlags -> ForeignHValue -> IO HValue
-wormhole dflags r = wormholeRef dflags (unsafeForeignHValueToHValueRef r)
+-- | Convert a 'ForeignRef' to the value it references directly.  This
+-- only works when the interpreter is running in the same process as
+-- the compiler, so it fails when @-fexternal-interpreter@ is on.
+wormhole :: DynFlags -> ForeignRef a -> IO a
+wormhole dflags r = wormholeRef dflags (unsafeForeignRefToRemoteRef r)
 
--- | Convert an 'HValueRef' to an 'HValue' directly.  This only works
--- when the interpreter is running in the same process as the compiler,
--- so it fails when @-fexternal-interpreter@ is on.
-wormholeRef :: DynFlags -> HValueRef -> IO HValue
+-- | Convert an 'RemoteRef' to the value it references directly.  This
+-- only works when the interpreter is running in the same process as
+-- the compiler, so it fails when @-fexternal-interpreter@ is on.
+wormholeRef :: DynFlags -> RemoteRef a -> IO a
 wormholeRef dflags r
   | gopt Opt_ExternalInterpreter dflags
   = throwIO (InstallationError
       "this operation requires -fno-external-interpreter")
   | otherwise
-  = localHValueRef r
+  = localRef r
 
 -- -----------------------------------------------------------------------------
 -- Misc utils

@@ -38,11 +38,13 @@ import DataCon
 import DynFlags
 import FastString
 import Id
+import RepType (countConRepArgs)
 import Literal
 import PrelInfo
 import Outputable
 import Platform
 import Util
+import MonadUtils (mapMaybeM)
 
 import Control.Monad
 import Data.Char
@@ -56,7 +58,7 @@ import Data.Char
 cgTopRhsCon :: DynFlags
             -> Id               -- Name of thing bound to this RHS
             -> DataCon          -- Id
-            -> [StgArg]         -- Args
+            -> [NonVoid StgArg] -- Args
             -> (CgIdInfo, FCode ())
 cgTopRhsCon dflags id con args =
     let id_info = litIdInfo dflags id (mkConLFInfo con) (CmmLabel closure_label)
@@ -70,8 +72,8 @@ cgTopRhsCon dflags id con args =
      do { this_mod <- getModuleName
         ; when (platformOS (targetPlatform dflags) == OSMinGW32) $
               -- Windows DLLs have a problem with static cross-DLL refs.
-              ASSERT( not (isDllConApp dflags this_mod con args) ) return ()
-        ; ASSERT( args `lengthIs` dataConRepRepArity con ) return ()
+              MASSERT( not (isDllConApp dflags this_mod con (map fromNonVoid args)) )
+        ; ASSERT( args `lengthIs` countConRepArgs con ) return ()
 
         -- LAY IT OUT
         ; let
@@ -92,6 +94,7 @@ cgTopRhsCon dflags id con args =
         ; payload <- mapM get_lit nv_args_w_offsets
                 -- NB1: nv_args_w_offsets is sorted into ptrs then non-ptrs
                 -- NB2: all the amodes should be Lits!
+                --      TODO (osa): Why?
 
         ; let closure_rep = mkStaticClosureFields
                              dflags
@@ -112,11 +115,12 @@ cgTopRhsCon dflags id con args =
 
 buildDynCon :: Id                 -- Name of the thing to which this constr will
                                   -- be bound
-            -> Bool   -- is it genuinely bound to that name, or just for profiling?
+            -> Bool               -- is it genuinely bound to that name, or just
+                                  -- for profiling?
             -> CostCentreStack    -- Where to grab cost centre from;
                                   -- current CCS if currentOrSubsumedCCS
             -> DataCon            -- The data constructor
-            -> [StgArg]           -- Its args
+            -> [NonVoid StgArg]   -- Its args
             -> FCode (CgIdInfo, FCode CmmAGraph)
                -- Return details about how to find it and initialization code
 buildDynCon binder actually_bound cc con args
@@ -129,7 +133,7 @@ buildDynCon' :: DynFlags
              -> Id -> Bool
              -> CostCentreStack
              -> DataCon
-             -> [StgArg]
+             -> [NonVoid StgArg]
              -> FCode (CgIdInfo, FCode CmmAGraph)
 
 {- We used to pass a boolean indicating whether all the
@@ -154,6 +158,7 @@ premature looking at the args will cause the compiler to black-hole!
 -- at all.
 
 buildDynCon' dflags _ binder _ _cc con []
+  | isNullaryRepDataCon con
   = return (litIdInfo dflags binder (mkConLFInfo con)
                 (CmmLabel (mkClosureLabel (dataConName con) (idCafInfo binder))),
             return mkNop)
@@ -187,7 +192,7 @@ because they don't support cross package data references well.
 buildDynCon' dflags platform binder _ _cc con [arg]
   | maybeIntLikeCon con
   , platformOS platform /= OSMinGW32 || not (gopt Opt_PIC dflags)
-  , StgLitArg (MachInt val) <- arg
+  , NonVoid (StgLitArg (MachInt val)) <- arg
   , val <= fromIntegral (mAX_INTLIKE dflags) -- Comparisons at type Integer!
   , val >= fromIntegral (mIN_INTLIKE dflags) -- ...ditto...
   = do  { let intlike_lbl   = mkCmmClosureLabel rtsUnitId (fsLit "stg_INTLIKE")
@@ -201,7 +206,7 @@ buildDynCon' dflags platform binder _ _cc con [arg]
 buildDynCon' dflags platform binder _ _cc con [arg]
   | maybeCharLikeCon con
   , platformOS platform /= OSMinGW32 || not (gopt Opt_PIC dflags)
-  , StgLitArg (MachChar val) <- arg
+  , NonVoid (StgLitArg (MachChar val)) <- arg
   , let val_int = ord val :: Int
   , val_int <= mAX_CHARLIKE dflags
   , val_int >= mIN_CHARLIKE dflags
@@ -223,7 +228,6 @@ buildDynCon' dflags _ binder actually_bound ccs con args
   gen_code reg
     = do  { let (tot_wds, ptr_wds, args_w_offsets)
                   = mkVirtConstrOffsets dflags (addArgReps args)
-                  -- No void args in args_w_offsets
                 nonptr_wds = tot_wds - ptr_wds
                 info_tbl = mkDataConInfoTable dflags con False
                                 ptr_wds nonptr_wds
@@ -245,7 +249,7 @@ buildDynCon' dflags _ binder actually_bound ccs con args
 --      Binding constructor arguments
 ---------------------------------------------------------------
 
-bindConArgs :: AltCon -> LocalReg -> [Id] -> FCode [LocalReg]
+bindConArgs :: AltCon -> LocalReg -> [NonVoid Id] -> FCode [LocalReg]
 -- bindConArgs is called from cgAlt of a case
 -- (bindConArgs con args) augments the environment with bindings for the
 -- binders args, assuming that we have just returned from a 'case' which
@@ -258,12 +262,18 @@ bindConArgs (DataAlt con) base args
 
            -- The binding below forces the masking out of the tag bits
            -- when accessing the constructor field.
-           bind_arg :: (NonVoid Id, VirtualHpOffset) -> FCode LocalReg
-           bind_arg (arg, offset)
-               = do emit $ mkTaggedObjectLoad dflags (idToReg dflags arg) base offset tag
-                    bindArgToReg arg
-       mapM bind_arg args_w_offsets
+           bind_arg :: (NonVoid Id, VirtualHpOffset) -> FCode (Maybe LocalReg)
+           bind_arg (arg@(NonVoid b), offset)
+             | isDeadBinder b =
+                 -- Do not load unused fields from objects to local variables.
+                 -- (CmmSink can optimize this, but it's cheap and common enough
+                 -- to handle here)
+                 return Nothing
+             | otherwise      = do
+                 emit $ mkTaggedObjectLoad dflags (idToReg dflags arg) base offset tag
+                 Just <$> bindArgToReg arg
+
+       mapMaybeM bind_arg args_w_offsets
 
 bindConArgs _other_con _base args
   = ASSERT( null args ) return []
-

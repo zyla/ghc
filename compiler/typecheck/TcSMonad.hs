@@ -6,17 +6,19 @@ module TcSMonad (
     -- The work list
     WorkList(..), isEmptyWorkList, emptyWorkList,
     extendWorkListNonEq, extendWorkListCt, extendWorkListDerived,
-    extendWorkListCts, extendWorkListEq, appendWorkList,
+    extendWorkListCts, extendWorkListEq, extendWorkListFunEq,
+    appendWorkList,
     selectNextWorkItem,
     workListSize, workListWantedCount,
-    updWorkListTcS,
+    getWorkList, updWorkListTcS,
 
     -- The TcS monad
-    TcS, runTcS, runTcSDeriveds, runTcSWithEvBinds, failTcS,
+    TcS, runTcS, runTcSDeriveds, runTcSWithEvBinds,
+    failTcS, warnTcS, addErrTcS,
     runTcSEqualities,
-    nestTcS, nestImplicTcS,
+    nestTcS, nestImplicTcS, setEvBindsTcS,
 
-    runTcPluginTcS, addUsedDataCons, addUsedGRE, deferTcSForAllEq,
+    runTcPluginTcS, addUsedGRE, addUsedGREs, deferTcSForAllEq,
 
     -- Tracing etc
     panicTcS, traceTcS,
@@ -52,9 +54,9 @@ module TcSMonad (
     emptyInert, getTcSInerts, setTcSInerts, takeGivenInsolubles,
     matchableGivens, prohibitedSuperClassSolve,
     getUnsolvedInerts,
-    removeInertCts, getPendingScDicts, isPendingScDict,
+    removeInertCts, getPendingScDicts,
     addInertCan, addInertEq, insertFunEq,
-    emitInsoluble, emitWorkNC, emitWorkCt,
+    emitInsoluble, emitWorkNC, emitWork,
 
     -- The Model
     InertModel, kickOutAfterUnification,
@@ -65,7 +67,7 @@ module TcSMonad (
 
     -- Inert CDictCans
     lookupInertDict, findDictsByClass, addDict, addDictsByClass,
-    delDict, partitionDicts, foldDicts, filterDicts,
+    delDict, foldDicts, filterDicts,
 
     -- Inert CTyEqCans
     EqualCtList, findTyEqs, foldTyEqs, isInInertEqs,
@@ -80,8 +82,8 @@ module TcSMonad (
     lookupFlatCache, extendFlatCache, newFlattenSkolem,            -- Flatten skolems
 
     -- Inert CFunEqCans
-    updInertFunEqs, findFunEq, sizeFunEqMap, filterFunEqs,
-    findFunEqsByTyCon, partitionFunEqs, foldFunEqs,
+    updInertFunEqs, findFunEq, sizeFunEqMap,
+    findFunEqsByTyCon,
 
     instDFunType,                              -- Instantiation
 
@@ -92,6 +94,7 @@ module TcSMonad (
     TcLevel, isTouchableMetaTyVarTcS,
     isFilledMetaTyVar_maybe, isFilledMetaTyVar,
     zonkTyCoVarsAndFV, zonkTcType, zonkTcTypes, zonkTcTyVar, zonkCo,
+    zonkTyCoVarsAndFVList,
     zonkSimples, zonkWC,
 
     -- References
@@ -142,14 +145,15 @@ import VarSet
 import Outputable
 import Bag
 import UniqSupply
-import FastString
 import Util
 import TcRnTypes
 
 import Unique
 import UniqFM
+import UniqDFM
 import Maybes
 
+import StaticFlags( opt_PprStyle_Debug )
 import TrieMap
 import Control.Monad
 #if __GLASGOW_HASKELL__ > 710
@@ -244,7 +248,7 @@ extendWorkListDerived loc ev wl
 extendWorkListDeriveds :: CtLoc -> [CtEvidence] -> WorkList -> WorkList
 extendWorkListDeriveds loc evs wl
   | isDroppableDerivedLoc loc = wl { wl_deriv = evs ++ wl_deriv wl }
-  | otherwise                  = extendWorkListEqs (map mkNonCanonical evs) wl
+  | otherwise                 = extendWorkListEqs (map mkNonCanonical evs) wl
 
 extendWorkListImplic :: Implication -> WorkList -> WorkList
 extendWorkListImplic implic wl = wl { wl_implics = implic `consBag` wl_implics wl }
@@ -283,6 +287,10 @@ selectWorkItem wl@(WL { wl_eqs = eqs, wl_funeqs = feqs
   | ct:cts <- rest = Just (ct, wl { wl_rest   = cts })
   | otherwise      = Nothing
 
+getWorkList :: TcS WorkList
+getWorkList = do { wl_var <- getTcSWorkListRef
+                 ; wrapTcS (TcM.readTcRef wl_var) }
+
 selectDerivedWorkItem  :: WorkList -> Maybe (Ct, WorkList)
 selectDerivedWorkItem wl@(WL { wl_deriv = ders })
   | ev:evs <- ders = Just (mkNonCanonical ev, wl { wl_deriv  = evs })
@@ -316,15 +324,17 @@ instance Outputable WorkList where
           , wl_rest = rest, wl_implics = implics, wl_deriv = ders })
    = text "WL" <+> (braces $
      vcat [ ppUnless (null eqs) $
-            ptext (sLit "Eqs =") <+> vcat (map ppr eqs)
+            text "Eqs =" <+> vcat (map ppr eqs)
           , ppUnless (null feqs) $
-            ptext (sLit "Funeqs =") <+> vcat (map ppr feqs)
+            text "Funeqs =" <+> vcat (map ppr feqs)
           , ppUnless (null rest) $
-            ptext (sLit "Non-eqs =") <+> vcat (map ppr rest)
+            text "Non-eqs =" <+> vcat (map ppr rest)
           , ppUnless (null ders) $
-            ptext (sLit "Derived =") <+> vcat (map ppr ders)
+            text "Derived =" <+> vcat (map ppr ders)
           , ppUnless (isEmptyBag implics) $
-            ptext (sLit "Implics =") <+> vcat (map ppr (bagToList implics))
+            if opt_PprStyle_Debug  -- Typically we only want the work list for this level
+            then text "Implics =" <+> vcat (map ppr (bagToList implics))
+            else text "(Implics omitted)"
           ])
 
 
@@ -367,13 +377,13 @@ instance Outputable InertSet where
 emptyInert :: InertSet
 emptyInert
   = IS { inert_cans = IC { inert_count    = 0
-                         , inert_eqs      = emptyVarEnv
+                         , inert_eqs      = emptyDVarEnv
                          , inert_dicts    = emptyDicts
                          , inert_safehask = emptyDicts
                          , inert_funeqs   = emptyFunEqs
                          , inert_irreds   = emptyCts
                          , inert_insols   = emptyCts
-                         , inert_model    = emptyVarEnv }
+                         , inert_model    = emptyDVarEnv }
        , inert_flat_cache    = emptyExactFunEqs
        , inert_solved_dicts  = emptyDictMap }
 
@@ -547,19 +557,25 @@ Result
 
 data InertCans   -- See Note [Detailed InertCans Invariants] for more
   = IC { inert_model :: InertModel
+              -- See Note [inert_model: the inert model]
 
-       , inert_eqs :: TyVarEnv EqualCtList
+       , inert_eqs :: DTyVarEnv EqualCtList
+              -- See Note [inert_eqs: the inert equalities]
               -- All Given/Wanted CTyEqCans; index is the LHS tyvar
 
        , inert_funeqs :: FunEqMap Ct
               -- All CFunEqCans; index is the whole family head type.
               -- All Nominal (that's an invarint of all CFunEqCans)
+              -- LHS is fully rewritten (modulo eqCanRewrite constraints)
+              --     wrt inert_eqs/inert_model
               -- We can get Derived ones from e.g.
               --   (a) flattening derived equalities
               --   (b) emitDerivedShadows
 
        , inert_dicts :: DictMap Ct
               -- Dictionaries only
+              -- All fully rewritten (modulo flavour constraints)
+              --     wrt inert_eqs/inert_model
 
        , inert_safehask :: DictMap Ct
               -- Failed dictionary resolution due to Safe Haskell overlapping
@@ -583,7 +599,7 @@ data InertCans   -- See Note [Detailed InertCans Invariants] for more
               -- When non-zero, keep trying to solved
        }
 
-type InertModel  = TyVarEnv Ct
+type InertModel  = DTyVarEnv Ct
      -- If a -> ct, then ct is a
      --    nominal, Derived, canonical CTyEqCan for [D] (a ~N rhs)
      -- The index of the TyVarEnv is the 'a'
@@ -635,34 +651,42 @@ Type-family equations, of form (ev : F tys ~ ty), live in three places
 Note [inert_model: the inert model]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 * Part of the inert set is the “model”
+
    * The “Model” is an non-idempotent but no-occurs-check
      substitution, reflecting *all* *Nominal* equalities (a ~N ty)
      that are not immediately soluble by unification.
 
-   * The principal reason for maintaining the model is to generate equalities
-     that tell us how unify a variable: that is, what Mark Jones calls
-     "improvement". The same idea is sometimes also called "saturation";
-     find all the equalities that must hold in any solution.
+   * All the constraints in the model are Derived CTyEqCans
+     That is if (a -> ty) is in the model, then
+     we have an inert constraint [D] a ~N ty.
 
    * There are two sources of constraints in the model:
+
      - Derived constraints arising from functional dependencies, or
-       decomposing injective arguments of type functions, and suchlike.
+       decomposing injective arguments of type functions, and
+       suchlike.
 
-     - A "shadow copy" for every Given or Wanted (a ~N ty) in
-       inert_eqs.  We imagine that every G/W immediately generates its shadow
-       constraint, but we refrain from actually generating the constraint itself
-       until necessary.  See (DShadow) and (GWShadow) in
-       Note [Adding an inert canonical constraint the InertCans]
+     - A Derived "shadow copy" for every Given or Wanted (a ~N ty) in
+       inert_eqs.
 
-   * If (a -> ty) is in the model, then it is
-     as if we had an inert constraint [D] a ~N ty.
+   * The model is not subject to "kicking-out". Reason: we make a Derived
+     shadow copy of any Given/Wanted (a ~ ty), and that Derived copy will
+     be fully rewritten by the model before it is added
 
-   * Domain of the model = skolems + untouchables
+   * The principal reason for maintaining the model is to generate
+     equalities that tell us how to unify a variable: that is, what
+     Mark Jones calls "improvement". The same idea is sometimes also
+     called "saturation"; find all the equalities that must hold in
+     any solution.
+
+   * Domain of the model = skolems + untouchables.
+     A touchable unification variable would have been unified first.
 
    * The inert_eqs are all Given/Wanted.  The Derived ones are in the
      inert_model only.
 
-   * However inert_dicts, inert_irreds may well contain derived costraints.
+   * However inert_dicts, inert_funeqs, inert_irreds
+     may well contain derived constraints.
 
 Note [inert_eqs: the inert equalities]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -784,7 +808,7 @@ The idea is that
 
 * Lemma (L2): if not (fw >= fw), then K1-K3 all hold.
   Proof: using Definition [Can-rewrite relation], fw can't rewrite anything
-         and so K1-K3 hold.  Intuitivel, since fw can't rewrite anything,
+         and so K1-K3 hold.  Intuitively, since fw can't rewrite anything,
          adding it cannot cause any loops
   This is a common case, because Wanteds cannot rewrite Wanteds.
 
@@ -908,9 +932,9 @@ Note [Flavours with roles]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 The system described in Note [inert_eqs: the inert equalities]
 discusses an abstract
-set of flavours. In GHC, flavours have three components: the flavour proper,
-taken from {Wanted, Derived, Given}; the equality relation (often called
-role), taken from {NomEq, ReprEq}; and the levity, taken from {Lifted, Unlifted}.
+set of flavours. In GHC, flavours have two components: the flavour proper,
+taken from {Wanted, Derived, Given} and the equality relation (often called
+role), taken from {NomEq, ReprEq}.
 When substituting w.r.t. the inert set,
 as described in Note [inert_eqs: the inert equalities],
 we must be careful to respect all components of a flavour.
@@ -924,7 +948,7 @@ For example, if we have
 and we wish to compute S(W/R, T a b), the correct answer is T a Bool, NOT
 T Int Bool. The reason is that T's first parameter has a nominal role, and
 thus rewriting a to Int in T a b is wrong. Indeed, this non-congruence of
-subsitution means that the proof in Note [The inert equalities] may need
+substitution means that the proof in Note [The inert equalities] may need
 to be revisited, but we don't think that the end conclusion is wrong.
 
 Note [Examples of how the inert_model helps completeness]
@@ -1050,21 +1074,21 @@ instance Outputable InertCans where
           , inert_safehask = safehask, inert_irreds = irreds
           , inert_insols = insols, inert_count = count })
     = braces $ vcat
-      [ ppUnless (isEmptyVarEnv eqs) $
-        ptext (sLit "Equalities:")
-          <+> pprCts (foldVarEnv (\eqs rest -> listToBag eqs `andCts` rest) emptyCts eqs)
+      [ ppUnless (isEmptyDVarEnv eqs) $
+        text "Equalities:"
+          <+> pprCts (foldDVarEnv (\eqs rest -> listToBag eqs `andCts` rest) emptyCts eqs)
       , ppUnless (isEmptyTcAppMap funeqs) $
-        ptext (sLit "Type-function equalities =") <+> pprCts (funEqsToBag funeqs)
+        text "Type-function equalities =" <+> pprCts (funEqsToBag funeqs)
       , ppUnless (isEmptyTcAppMap dicts) $
-        ptext (sLit "Dictionaries =") <+> pprCts (dictsToBag dicts)
+        text "Dictionaries =" <+> pprCts (dictsToBag dicts)
       , ppUnless (isEmptyTcAppMap safehask) $
-        ptext (sLit "Safe Haskell unsafe overlap =") <+> pprCts (dictsToBag safehask)
+        text "Safe Haskell unsafe overlap =" <+> pprCts (dictsToBag safehask)
       , ppUnless (isEmptyCts irreds) $
-        ptext (sLit "Irreds =") <+> pprCts irreds
+        text "Irreds =" <+> pprCts irreds
       , ppUnless (isEmptyCts insols) $
         text "Insolubles =" <+> pprCts insols
-      , ppUnless (isEmptyVarEnv model) $
-        text "Model =" <+> pprCts (foldVarEnv consCts emptyCts model)
+      , ppUnless (isEmptyDVarEnv model) $
+        text "Model =" <+> pprCts (foldDVarEnv consCts emptyCts model)
       , text "Unsolved goals =" <+> int count
       ]
 
@@ -1086,47 +1110,44 @@ Note [Adding an inert canonical constraint the InertCans]
 
 * Adding a *nominal* CTyEqCan (a ~N ty) to the inert set (TcSMonad.addInertEq).
 
-    * We always (G/W/D) kick out constraints that can be rewritten
-      (respecting flavours) by the new constraint.
-        - This is done by kickOutRewritable;
-          see Note [inert_eqs: the inert equalities].
+    (A) Always (G/W/D) kick out constraints that can be rewritten
+        (respecting flavours) by the new constraint. This is done
+        by kickOutRewritable.
 
-        - We do not need to kick anything out from the model; we only
-          add [D] constraints to the model (in effect) and they are
-          fully rewritten by the model, so (K2b) holds
+    (B) Applies only to nominal equalities: a ~ ty.  Four cases:
 
-        - A Derived equality can kick out [D] constraints in inert_dicts,
-          inert_irreds etc.  Nothing in inert_eqs because there are no
-          Derived constraints in inert_eqs (they are in the model)
+        [Representational]   [G/W/D] a ~R ty:
+          Just add it to inert_eqs
 
-  Then, when adding:
+        [Derived Nominal]  [D] a ~N ty:
+          1. Add (a~ty) to the model
+             NB: 'a' cannot be in fv(ty), because the constraint is canonical.
 
-     * [Derived] a ~N ty
-        1. Add (a~ty) to the model
-           NB: 'a' cannot be in fv(ty), because the constraint is canonical.
+          2. (DShadow) Do emitDerivedShadows
+               For every inert G/W constraint c, st
+                (a) (a~ty) can rewrite c (see Note [Emitting shadow constraints]),
+                    and
+                (b) the model cannot rewrite c
+               kick out a Derived *copy*, leaving the original unchanged.
+               Reason for (b) if the model can rewrite c, then we have already
+               generated a shadow copy
 
-        2. (DShadow) Emit shadow-copies (emitDerivedShadows):
-             For every inert G/W constraint c, st
-              (a) (a~ty) can rewrite c (see Note [Emitting shadow constraints]),
-                  and
-              (b) the model cannot rewrite c
-             kick out a Derived *copy*, leaving the original unchanged.
-             Reason for (b) if the model can rewrite c, then we have already
-             generated a shadow copy
+       [Given/Wanted Nominal]  [G/W] a ~N ty:
+          1. Add it to inert_eqs
+          2. Emit [D] a~ty
+          Step (2) is needed to allow the current model to fully
+          rewrite [D] a~ty before adding it using the [Derived Nominal]
+          steps above.
 
-     * [Given/Wanted] a ~N ty
-        1. Add it to inert_eqs
-        2. If the model can rewrite (a~ty)
-           then (GWShadow) emit [D] a~ty
-           else (GWModel)  Use emitDerivedShadows just like (DShadow)
-                           and add a~ty to the model
-                           (Reason:[D] a~ty is inert wrt model, and (K2b) holds)
-
-     * [Given/Wanted] a ~R ty: just add it to inert_eqs
+          We must do this even for Givens, because
+             work-item [G] a ~ [b], model has [D] b ~ a.
+          We need a shadow [D] a ~ [b] in the work-list
+          When we process it, we'll rewrite to a ~ [a] and get an occurs check
 
 
-* Unifying a:=ty, is like adding [G] a~ty, but we can't make a [D] a~ty, as in
-  step (1) of the [G/W] case above.  So instead, do kickOutAfterUnification:
+* Unifying a:=ty, is like adding [G] a~ty, but we can't make a [D]
+  a~ty, as in step (1) of the [G/W] case above.  So instead, do
+  kickOutAfterUnification:
     - Kick out from the model any equality (b~ty2) that mentions 'a'
       (i.e. a=b or a in ty2).  Example:
             [G] a ~ [b],    model [D] b ~ [a]
@@ -1185,7 +1206,7 @@ addInertEq ct@(CTyEqCan { cc_tyvar = tv })
        ; unless (isEmptyWorkList kicked_out) $
          do { updWorkListTcS (appendWorkList kicked_out)
             ; csTraceTcS $
-               hang (ptext (sLit "Kick out, tv =") <+> ppr tv)
+               hang (text "Kick out, tv =" <+> ppr tv)
                   2 (vcat [ text "n-kicked =" <+> int (workListSize kicked_out)
                           , ppr kicked_out ]) }
 
@@ -1197,33 +1218,22 @@ add_inert_eq ics@(IC { inert_count = n
                      , inert_eqs = old_eqs
                      , inert_model = old_model })
              ct@(CTyEqCan { cc_ev = ev, cc_eq_rel = eq_rel, cc_tyvar = tv
-                          , cc_rhs = rhs })
-  | isDerived ev
-  = do { emitDerivedShadows ics tv
-       ; return (ics { inert_model = extendVarEnv old_model tv ct }) }
-
+                          , cc_rhs = _rhs })
   | ReprEq <- eq_rel
   = return new_ics
 
-  -- Nominal equality (tv ~N ty), Given/Wanted
-  -- See Note [Emitting shadow constraints]
-  | modelCanRewrite old_model rw_tvs   -- Shadow of new ct isn't inert; emit it
-  = do { emitNewDerivedEq loc (eqRelRole eq_rel) (mkTyVarTy tv) rhs
-       ; return new_ics }
-
-  | otherwise   -- Shadow of new constraint is inert wrt model
-                -- so extend model, and create shadows it can now rewrite
+  | isDerived ev
   = do { emitDerivedShadows ics tv
-       ; return (new_ics { inert_model = new_model }) }
+       ; return (ics { inert_model = extendDVarEnv old_model tv ct }) }
 
+  | otherwise   -- Given/Wanted Nominal equality [W] tv ~N ty
+  = do { emitNewDerived loc pred
+       ; return new_ics }
   where
     loc     = ctEvLoc ev
     pred    = ctEvPred ev
-    rw_tvs  = tyCoVarsOfType pred
     new_ics = ics { inert_eqs   = addTyEq old_eqs tv ct
                   , inert_count = bumpUnsolvedCount ev n }
-    new_model = extendVarEnv old_model tv derived_ct
-    derived_ct = ct { cc_ev = CtDerived { ctev_loc = loc, ctev_pred = pred } }
 
 add_inert_eq _ ct = pprPanic "addInertEq" (ppr ct)
 
@@ -1234,14 +1244,14 @@ emitDerivedShadows IC { inert_eqs      = tv_eqs
                       , inert_funeqs   = funeqs
                       , inert_irreds   = irreds
                       , inert_model    = model } new_tv
-  = mapM_ emit_shadow shadows
+  | null shadows
+  = return ()
+  | otherwise
+  = do { traceTcS "Emit derived shadows:" $
+         vcat [ text "tyvar =" <+> ppr new_tv
+              , text "shadows =" <+> vcat (map ppr shadows) ]
+       ; emitWork shadows }
   where
-    emit_shadow ct = emitNewDerived loc pred
-      where
-        ev = ctEvidence ct
-        pred = ctEvPred ev
-        loc  = ctEvLoc  ev
-
     shadows = foldDicts  get_ct dicts    $
               foldDicts  get_ct safehask $
               foldFunEqs get_ct funeqs   $
@@ -1249,22 +1259,60 @@ emitDerivedShadows IC { inert_eqs      = tv_eqs
               foldTyEqs  get_ct tv_eqs []
       -- Ignore insolubles
 
-    get_ct ct cts | want_shadow ct = ct:cts
+    get_ct ct cts | want_shadow ct = mkShadowCt ct : cts
                   | otherwise      = cts
 
     want_shadow ct
       =  not (isDerivedCt ct)              -- No need for a shadow of a Derived!
       && (new_tv `elemVarSet` rw_tvs)      -- New tv can rewrite ct, yielding a
                                            -- different ct
-      && not (modelCanRewrite model rw_tvs)-- We have not alrady created a
+      && not (modelCanRewrite model rw_tvs)-- We have not already created a
                                            -- shadow
       where
         rw_tvs = rewritableTyCoVars ct
 
+mkShadowCt :: Ct -> Ct
+-- Produce a Derived shadow constraint from the input
+-- If it is a CFunEqCan, make it NonCanonical, to avoid
+--   duplicating the flatten-skolems
+-- Otherwise keep the canonical shape.  This just saves work, but
+-- is sometimes important; see Note [Keep CDictCan shadows as CDictCan]
+mkShadowCt ct
+  | CFunEqCan {} <- ct = CNonCanonical { cc_ev = derived_ev }
+  | otherwise          = ct { cc_ev = derived_ev }
+  where
+    ev = ctEvidence ct
+    derived_ev = CtDerived { ctev_pred = ctEvPred ev
+                           , ctev_loc  = ctEvLoc ev }
+
+{- Note [Keep CDictCan shadows as CDictCan]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose we have
+  class C a => D a b
+and [G] D a b, [G] C a in the inert set.  Now we insert
+[D] b ~ c.  We want to kick out a derived shadow for [D] D a b,
+so we can rewrite it with the new constraint, and perhaps get
+instance reduction or other consequences.
+
+BUT we do not want to kick out a *non-canonical* (D a b). If we
+did, we would do this:
+  - rewrite it to [D] D a c, with pend_sc = True
+  - use expandSuperClasses to add C a
+  - go round again, which solves C a from the givens
+This loop goes on for ever and triggers the simpl_loop limit.
+
+Solution: kick out the CDictCan which will have pend_sc = False,
+because we've already added its superclasses.  So we won't re-add
+them.  If we forget the pend_sc flag, our cunning scheme for avoiding
+generating superclasses repeatedly will fail.
+
+See Trac #11379 for a case of this.
+-}
+
 modelCanRewrite :: InertModel -> TcTyCoVarSet -> Bool
 -- See Note [Emitting shadow constraints]
 -- True if there is any intersection between dom(model) and tvs
-modelCanRewrite model tvs = not (disjointUFM model tvs)
+modelCanRewrite model tvs = not (disjointUdfmUfm model tvs)
      -- The low-level use of disjointUFM might e surprising.
      -- InertModel = TyVarEnv Ct, and we want to see if its domain
      -- is disjoint from that of a TcTyCoVarSet.  So we drop down
@@ -1286,12 +1334,9 @@ addInertCan ct
 
        -- Emit shadow derived if necessary
        -- See Note [Emitting shadow constraints]
-       ; let ev     = ctEvidence ct
-             pred   = ctEvPred ev
-             rw_tvs = rewritableTyCoVars ct
-
-       ; when (not (isDerived ev) && modelCanRewrite (inert_model ics) rw_tvs)
-              (emitNewDerived (ctEvLoc ev) pred)
+       ; let rw_tvs = rewritableTyCoVars ct
+       ; when (not (isDerivedCt ct) && modelCanRewrite (inert_model ics) rw_tvs)
+              (emitWork [mkShadowCt ct])
 
        ; traceTcS "addInertCan }" $ empty }
 
@@ -1329,39 +1374,23 @@ kickOutRewritable :: CtFlavourRole  -- Flavour/role of the equality that
                   -> TcTyVar        -- The new equality is tv ~ ty
                   -> InertCans
                   -> (WorkList, InertCans)
-   -- NB: Notice that don't kick out constraints from
-   -- inert_solved_dicts, and inert_solved_funeqs
-   -- optimistically. But when we lookup we have to
-   -- take the substitution into account
-kickOutRewritable new_fr new_tv ics@(IC { inert_funeqs = funeqmap })
+-- See Note [kickOutRewritable]
+kickOutRewritable new_fr new_tv ics@(IC { inert_eqs      = tv_eqs
+                                        , inert_dicts    = dictmap
+                                        , inert_safehask = safehask
+                                        , inert_funeqs   = funeqmap
+                                        , inert_irreds   = irreds
+                                        , inert_insols   = insols
+                                        , inert_count    = n
+                                        , inert_model    = model })
   | not (new_fr `eqCanRewriteFR` new_fr)
-    -- Lemma (L2) in Note [Extending the inert equalities]
-  = if isFlattenTyVar new_tv
-    then (emptyWorkList { wl_funeqs = feqs_out }, ics { inert_funeqs = feqs_in })
-    else (emptyWorkList,                          ics)
+  = (emptyWorkList, ics)
         -- If new_fr can't rewrite itself, it can't rewrite
         -- anything else, so no need to kick out anything.
         -- (This is a common case: wanteds can't rewrite wanteds)
-        --
-        -- ExCEPT (tiresomely) that we should kick out any CFunEqCans
-        -- that we should re-examine for their fundeps, even though
-        -- they can't be *rewrittten*.
-        -- See Note [Kicking out CFunEqCan for fundeps]
-  where
-    (feqs_out, feqs_in) = partitionFunEqs kick_out_fe funeqmap
+        -- Lemma (L2) in Note [Extending the inert equalities]
 
-    kick_out_fe :: Ct -> Bool
-    kick_out_fe (CFunEqCan { cc_fsk = fsk }) = fsk == new_tv
-    kick_out_fe _ = False  -- Can't happen
-
-kickOutRewritable new_fr new_tv (IC { inert_eqs      = tv_eqs
-                                    , inert_dicts    = dictmap
-                                    , inert_safehask = safehask
-                                    , inert_funeqs   = funeqmap
-                                    , inert_irreds   = irreds
-                                    , inert_insols   = insols
-                                    , inert_count    = n
-                                    , inert_model    = model })
+  | otherwise
   = (kicked_out, inert_cans_in)
   where
     inert_cans_in = IC { inert_eqs      = tv_eqs_in
@@ -1381,7 +1410,7 @@ kickOutRewritable new_fr new_tv (IC { inert_eqs      = tv_eqs
                                              `andCts` insols_out)
                     , wl_implics = emptyBag }
 
-    (tv_eqs_out, tv_eqs_in) = foldVarEnv kick_out_eqs ([], emptyVarEnv) tv_eqs
+    (tv_eqs_out, tv_eqs_in) = foldDVarEnv kick_out_eqs ([], emptyDVarEnv) tv_eqs
     (feqs_out,   feqs_in)   = partitionFunEqs  kick_out_fe funeqmap
     (dicts_out,  dicts_in)  = partitionDicts   kick_out_ct dictmap
     (irs_out,    irs_in)    = partitionBag     kick_out_ct irreds
@@ -1389,27 +1418,31 @@ kickOutRewritable new_fr new_tv (IC { inert_eqs      = tv_eqs
       -- Kick out even insolubles; see Note [Kick out insolubles]
 
     fr_can_rewrite :: CtEvidence -> Bool
-    fr_can_rewrite = (new_fr `eqCanRewriteFR`) . ctEvFlavourRole
+    fr_can_rewrite ev = new_fr `eqCanRewriteFR` (ctEvFlavourRole ev)
 
     kick_out_ct :: Ct -> Bool
-    kick_out_ct ct = kick_out_ctev (ctEvidence ct)
+    -- Kick it out if the new CTyEqCan can rewrite the inert
+    -- one. See Note [kickOutRewritable]
+    kick_out_ct ct
+      = fr_can_rewrite ev
+        && new_tv `elemVarSet` tyCoVarsOfType (ctEvPred ev)
+      where
+        ev = ctEvidence ct
 
     kick_out_fe :: Ct -> Bool
-    kick_out_fe (CFunEqCan { cc_ev = ev, cc_fsk = fsk })
-      =  kick_out_ctev ev || fsk == new_tv
-    kick_out_fe _ = False  -- Can't happen
+    kick_out_fe (CFunEqCan { cc_ev = ev, cc_tyargs = tys, cc_fsk = fsk })
+      = new_tv == fsk  -- If RHS is new_tvs, kick out /regardless of flavour/
+                       -- See Note [Kicking out CFunEqCan for fundeps]
+        || (fr_can_rewrite ev
+            && new_tv `elemVarSet` tyCoVarsOfTypes tys)
+    kick_out_fe ct = pprPanic "kick_out_fe" (ppr ct)
 
-    kick_out_ctev :: CtEvidence -> Bool
-    kick_out_ctev ev =  fr_can_rewrite ev
-                     && new_tv `elemVarSet` tyCoVarsOfType (ctEvPred ev)
-         -- See Note [Kicking out inert constraints]
-
-    kick_out_eqs :: EqualCtList -> ([Ct], TyVarEnv EqualCtList)
-                 -> ([Ct], TyVarEnv EqualCtList)
+    kick_out_eqs :: EqualCtList -> ([Ct], DTyVarEnv EqualCtList)
+                 -> ([Ct], DTyVarEnv EqualCtList)
     kick_out_eqs eqs (acc_out, acc_in)
       = (eqs_out ++ acc_out, case eqs_in of
                                []      -> acc_in
-                               (eq1:_) -> extendVarEnv acc_in (cc_tyvar eq1) eqs_in)
+                               (eq1:_) -> extendDVarEnv acc_in (cc_tyvar eq1) eqs_in)
       where
         (eqs_in, eqs_out) = partition keep_eq eqs
 
@@ -1453,7 +1486,7 @@ kickOutAfterUnification new_tv
 
        ; unless (isEmptyWorkList kicked_out) $
          csTraceTcS $
-         hang (ptext (sLit "Kick out (unify), tv =") <+> ppr new_tv)
+         hang (text "Kick out (unify), tv =" <+> ppr new_tv)
             2 (vcat [ text "n-kicked =" <+> int (workListSize kicked_out)
                     , text "kicked_out =" <+> ppr kicked_out
                     , text "Residual inerts =" <+> ppr ics2 ])
@@ -1461,9 +1494,9 @@ kickOutAfterUnification new_tv
 
 kickOutModel :: TcTyVar -> InertCans -> (WorkList, InertCans)
 kickOutModel new_tv ics@(IC { inert_model = model, inert_eqs = eqs })
-  = (foldVarEnv add emptyWorkList der_out, ics { inert_model = new_model })
+  = (foldDVarEnv add emptyWorkList der_out, ics { inert_model = new_model })
   where
-    (der_out, new_model) = partitionVarEnv kick_out_der model
+    (der_out, new_model) = partitionDVarEnv kick_out_der model
 
     kick_out_der :: Ct -> Bool
     kick_out_der (CTyEqCan { cc_tyvar = tv, cc_rhs = rhs })
@@ -1478,20 +1511,39 @@ kickOutModel new_tv ics@(IC { inert_model = model, inert_eqs = eqs })
       | not (isInInertEqs eqs tv rhs) = extendWorkListDerived (ctEvLoc ev) ev wl
     add _ wl                          = wl
 
-{- Note [Kicking out inert constraints]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Given a new (a -> ty) inert, we want to kick out an existing inert
-constraint if
-  a) the new constraint can rewrite the inert one
-  b) 'a' is free in the inert constraint (so that it *will*)
-     rewrite it if we kick it out.
 
-For (b) we use tyVarsOfCt, which returns the type variables /and
-the kind variables/ that are directly visible in the type. Hence we
-will have exposed all the rewriting we care about to make the most
-precise kinds visible for matching classes etc. No need to kick out
-constraints that mention type variables whose kinds contain this
-variable!
+{- Note [kickOutRewritable]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+See also Note [inert_eqs: the inert equalities].
+
+When we add a new inert equality (a ~N ty) to the inert set,
+we must kick out any inert items that could be rewritten by the
+new equality, to maintain the inert-set invariants.
+
+  - We want to kick out an existing inert constraint if
+    a) the new constraint can rewrite the inert one
+    b) 'a' is free in the inert constraint (so that it *will*)
+       rewrite it if we kick it out.
+
+    For (b) we use tyCoVarsOfCt, which returns the type variables /and
+    the kind variables/ that are directly visible in the type. Hence
+    we will have exposed all the rewriting we care about to make the
+    most precise kinds visible for matching classes etc. No need to
+    kick out constraints that mention type variables whose kinds
+    contain this variable!
+
+  - We do not need to kick anything out from the model; we only
+    add [D] constraints to the model (in effect) and they are
+    fully rewritten by the model, so (K2b) holds
+
+  - A Derived equality can kick out [D] constraints in inert_dicts,
+    inert_irreds etc.  Nothing in inert_eqs because there are no
+    Derived constraints in inert_eqs (they are in the model)
+
+  - We don't kick out constraints from inert_solved_dicts, and
+    inert_solved_funeqs optimistically. But when we lookup we have to
+    take the substitution into account
+
 
 Note [Kick out insolubles]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1514,10 +1566,12 @@ addInertSafehask _ item
   = pprPanic "addInertSafehask: can't happen! Inserting " $ ppr item
 
 insertSafeOverlapFailureTcS :: Ct -> TcS ()
+-- See Note [Safe Haskell Overlapping Instances Implementation] in TcSimplify
 insertSafeOverlapFailureTcS item
   = updInertCans (\ics -> addInertSafehask ics item)
 
 getSafeOverlapFailures :: TcS Cts
+-- See Note [Safe Haskell Overlapping Instances Implementation] in TcSimplify
 getSafeOverlapFailures
  = do { IC { inert_safehask = safehask } <- getInertCans
       ; return $ foldDicts consCts safehask emptyCts }
@@ -1578,7 +1632,7 @@ After solving the Givens we take two things out of the inert set
            We get [D] 1 <= n, and we must remove it!
          Otherwise we unflatten it more then once, and assign
          to its fmv more than once...disaster.
-     It's ok to remove them because they turned not not to
+     It's ok to remove them because they turned out not to
      yield an insoluble, and hence have now done their work.
 -}
 
@@ -1616,7 +1670,7 @@ updInertIrreds :: (Cts -> Cts) -> TcS ()
 updInertIrreds upd_fn
   = updInertCans $ \ ics -> ics { inert_irreds = upd_fn (inert_irreds ics) }
 
-getInertEqs :: TcS (TyVarEnv EqualCtList)
+getInertEqs :: TcS (DTyVarEnv EqualCtList)
 getInertEqs = do { inert <- getInertCans; return (inert_eqs inert) }
 
 getInertModel :: TcS InertModel
@@ -1629,7 +1683,7 @@ getInertGivens
   = do { inerts <- getInertCans
        ; let all_cts = foldDicts (:) (inert_dicts inerts)
                      $ foldFunEqs (:) (inert_funeqs inerts)
-                     $ concat (varEnvElts (inert_eqs inerts))
+                     $ concat (dVarEnvElts (inert_eqs inerts))
        ; return (filter isGivenCt all_cts) }
 
 getPendingScDicts :: TcS [Ct]
@@ -1656,16 +1710,13 @@ getPendingScDicts = updRetInertCans get_sc_dicts
         = addDict dicts cls tys ct
     add ct _ = pprPanic "getPendingScDicts" (ppr ct)
 
-isPendingScDict :: Ct -> Maybe Ct
-isPendingScDict ct@(CDictCan { cc_pend_sc = True })
-                  = Just (ct { cc_pend_sc = False })
-isPendingScDict _ = Nothing
-
 getUnsolvedInerts :: TcS ( Bag Implication
                          , Cts     -- Tyvar eqs: a ~ ty
                          , Cts     -- Fun eqs:   F a ~ ty
                          , Cts     -- Insoluble
                          , Cts )   -- All others
+-- Return all the unsolved [Wanted] or [Derived] constraints
+--
 -- Post-condition: the returned simple constraints are all fully zonked
 --                     (because they come from the inert set)
 --                 the unsolved implics may not be
@@ -1676,8 +1727,10 @@ getUnsolvedInerts
            , inert_dicts  = idicts
            , inert_insols = insols
            , inert_model  = model } <- getInertCans
+      ; keep_derived <- keepSolvingDeriveds
 
-      ; let der_tv_eqs       = foldVarEnv (add_der tv_eqs) emptyCts model  -- Want to float these
+      ; let der_tv_eqs       = foldDVarEnv (add_der_eq keep_derived tv_eqs)
+                                          emptyCts model
             unsolved_tv_eqs  = foldTyEqs add_if_unsolved tv_eqs der_tv_eqs
             unsolved_fun_eqs = foldFunEqs add_if_unsolved fun_eqs emptyCts
             unsolved_irreds  = Bag.filterBag is_unsolved irreds
@@ -1697,8 +1750,10 @@ getUnsolvedInerts
               -- Keep even the given insolubles
               -- so that we can report dead GADT pattern match branches
   where
-    add_der tv_eqs ct cts
+    add_der_eq keep_derived tv_eqs ct cts
+       -- See Note [Unsolved Derived equalities]
        | CTyEqCan { cc_tyvar = tv, cc_rhs = rhs } <- ct
+       , isMetaTyVar tv || keep_derived
        , not (isInInertEqs tv_eqs tv rhs) = ct `consBag` cts
        | otherwise                        = cts
     add_if_unsolved :: Ct -> Cts -> Cts
@@ -1707,10 +1762,10 @@ getUnsolvedInerts
 
     is_unsolved ct = not (isGivenCt ct)   -- Wanted or Derived
 
-isInInertEqs :: TyVarEnv EqualCtList -> TcTyVar -> TcType -> Bool
+isInInertEqs :: DTyVarEnv EqualCtList -> TcTyVar -> TcType -> Bool
 -- True if (a ~N ty) is in the inert set, in either Given or Wanted
 isInInertEqs eqs tv rhs
-  = case lookupVarEnv eqs tv of
+  = case lookupDVarEnv eqs tv of
       Nothing  -> False
       Just cts -> any (same_pred rhs) cts
   where
@@ -1720,19 +1775,23 @@ isInInertEqs eqs tv rhs
       , rhs `eqType` rhs2 = True
       | otherwise         = False
 
-getNoGivenEqs :: TcLevel     -- TcLevel of this implication
+getNoGivenEqs :: TcLevel          -- TcLevel of this implication
                -> [TcTyVar]       -- Skolems of this implication
+               -> Cts             -- Given insolubles from solveGivens
                -> TcS Bool        -- True <=> definitely no residual given equalities
 -- See Note [When does an implication have given equalities?]
-getNoGivenEqs tclvl skol_tvs
-  = do { inerts@(IC { inert_eqs = ieqs, inert_irreds = iirreds, inert_funeqs = funeqs })
+getNoGivenEqs tclvl skol_tvs given_insols
+  = do { inerts@(IC { inert_eqs = ieqs, inert_irreds = iirreds
+                    , inert_funeqs = funeqs })
              <- getInertCans
        ; let local_fsks = foldFunEqs add_fsk funeqs emptyVarSet
 
-             has_given_eqs = foldrBag ((||) . ev_given_here . ctEvidence)  False iirreds
-                          || foldVarEnv ((||) . eqs_given_here local_fsks) False ieqs
+             has_given_eqs = foldrBag ((||) . ev_given_here . ctEvidence) False
+                                      (iirreds `unionBags` given_insols)
+                          || anyDVarEnv (eqs_given_here local_fsks) ieqs
 
-       ; traceTcS "getNoGivenEqs" (vcat [ppr has_given_eqs, ppr inerts])
+       ; traceTcS "getNoGivenEqs" (vcat [ ppr has_given_eqs, ppr inerts
+                                        , ppr given_insols])
        ; return (not has_given_eqs) }
   where
     eqs_given_here :: VarSet -> EqualCtList -> Bool
@@ -1810,7 +1869,20 @@ prohibitedSuperClassSolve from_loc solve_loc
   | otherwise
   = False
 
-{-
+{- Note [Unsolved Derived equalities]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In getUnsolvedInerts, we return a derived equality from the model
+for two possible reasons:
+
+  * Because it is a candidate for floating out of this implication.
+    We only float equalities with a meta-tyvar on the left, so we only
+    pull those out here.
+
+  * If we are only solving derived constraints (i.e. tcs_need_derived
+    is true; see Note [Solving for Derived constraints]), then we
+    those Derived constraints are effectively unsolved, and we need
+    them!
+
 Note [When does an implication have given equalities?]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Consider an implication
@@ -1972,19 +2044,19 @@ type EqualCtList = [Ct]
    - Any number of Wanteds and/or Deriveds
 -}
 
-addTyEq :: TyVarEnv EqualCtList -> TcTyVar -> Ct -> TyVarEnv EqualCtList
-addTyEq old_list tv it = extendVarEnv_C (\old_eqs _new_eqs -> it : old_eqs)
+addTyEq :: DTyVarEnv EqualCtList -> TcTyVar -> Ct -> DTyVarEnv EqualCtList
+addTyEq old_list tv it = extendDVarEnv_C (\old_eqs _new_eqs -> it : old_eqs)
                                         old_list tv [it]
 
-foldTyEqs :: (Ct -> b -> b) -> TyVarEnv EqualCtList -> b -> b
+foldTyEqs :: (Ct -> b -> b) -> DTyVarEnv EqualCtList -> b -> b
 foldTyEqs k eqs z
-  = foldVarEnv (\cts z -> foldr k z cts) z eqs
+  = foldDVarEnv (\cts z -> foldr k z cts) z eqs
 
 findTyEqs :: InertCans -> TyVar -> EqualCtList
-findTyEqs icans tv = lookupVarEnv (inert_eqs icans) tv `orElse` []
+findTyEqs icans tv = lookupDVarEnv (inert_eqs icans) tv `orElse` []
 
-delTyEq :: TyVarEnv EqualCtList -> TcTyVar -> TcType -> TyVarEnv EqualCtList
-delTyEq m tv t = modifyVarEnv (filter (not . isThisOne)) m tv
+delTyEq :: DTyVarEnv EqualCtList -> TcTyVar -> TcType -> DTyVarEnv EqualCtList
+delTyEq m tv t = modifyDVarEnv (filter (not . isThisOne)) m tv
   where isThisOne (CTyEqCan { cc_rhs = t1 }) = eqType t t1
         isThisOne _                          = False
 
@@ -2005,37 +2077,38 @@ not match the requsted info exactly!
 
 -}
 
-type TcAppMap a = UniqFM (ListMap LooseTypeMap a)
+type TcAppMap a = UniqDFM (ListMap LooseTypeMap a)
     -- Indexed by tycon then the arg types, using "loose" matching, where
     -- we don't require kind equality. This allows, for example, (a |> co)
     -- to match (a).
     -- See Note [Use loose types in inert set]
-    -- Used for types and classes; hence UniqFM
+    -- Used for types and classes; hence UniqDFM
+    -- See Note [foldTM determinism] for why we use UniqDFM here
 
 isEmptyTcAppMap :: TcAppMap a -> Bool
-isEmptyTcAppMap m = isNullUFM m
+isEmptyTcAppMap m = isNullUDFM m
 
 emptyTcAppMap :: TcAppMap a
-emptyTcAppMap = emptyUFM
+emptyTcAppMap = emptyUDFM
 
 findTcApp :: TcAppMap a -> Unique -> [Type] -> Maybe a
-findTcApp m u tys = do { tys_map <- lookupUFM m u
+findTcApp m u tys = do { tys_map <- lookupUDFM m u
                        ; lookupTM tys tys_map }
 
 delTcApp :: TcAppMap a -> Unique -> [Type] -> TcAppMap a
-delTcApp m cls tys = adjustUFM (deleteTM tys) m cls
+delTcApp m cls tys = adjustUDFM (deleteTM tys) m cls
 
 insertTcApp :: TcAppMap a -> Unique -> [Type] -> a -> TcAppMap a
-insertTcApp m cls tys ct = alterUFM alter_tm m cls
+insertTcApp m cls tys ct = alterUDFM alter_tm m cls
   where
     alter_tm mb_tm = Just (insertTM tys ct (mb_tm `orElse` emptyTM))
 
 -- mapTcApp :: (a->b) -> TcAppMap a -> TcAppMap b
--- mapTcApp f = mapUFM (mapTM f)
+-- mapTcApp f = mapUDFM (mapTM f)
 
 filterTcAppMap :: (Ct -> Bool) -> TcAppMap Ct -> TcAppMap Ct
 filterTcAppMap f m
-  = mapUFM do_tm m
+  = mapUDFM do_tm m
   where
     do_tm tm = foldTM insert_mb tm emptyTM
     insert_mb ct tm
@@ -2051,7 +2124,7 @@ tcAppMapToBag :: TcAppMap a -> Bag a
 tcAppMapToBag m = foldTcAppMap consBag m emptyBag
 
 foldTcAppMap :: (a -> b -> b) -> TcAppMap a -> b -> b
-foldTcAppMap k m z = foldUFM (foldTM k) z m
+foldTcAppMap k m z = foldUDFM (foldTM k) z m
 
 
 {- *********************************************************************
@@ -2073,7 +2146,7 @@ findDict m cls tys = findTcApp m (getUnique cls) tys
 
 findDictsByClass :: DictMap a -> Class -> Bag a
 findDictsByClass m cls
-  | Just tm <- lookupUFM m cls = foldTM consBag tm emptyBag
+  | Just tm <- lookupUDFM m cls = foldTM consBag tm emptyBag
   | otherwise                  = emptyBag
 
 delDict :: DictMap a -> Class -> [Type] -> DictMap a
@@ -2084,7 +2157,7 @@ addDict m cls tys item = insertTcApp m (getUnique cls) tys item
 
 addDictsByClass :: DictMap Ct -> Class -> Bag Ct -> DictMap Ct
 addDictsByClass m cls items
-  = addToUFM m cls (foldrBag add emptyTM items)
+  = addToUDFM m cls (foldrBag add emptyTM items)
   where
     add ct@(CDictCan { cc_tyargs = tys }) tm = insertTM tys ct tm
     add ct _ = pprPanic "addDictsByClass" (ppr ct)
@@ -2137,7 +2210,7 @@ findFunEqsByTyCon :: FunEqMap a -> TyCon -> [a]
 -- We use this to check for derived interactions with built-in type-function
 -- constructors.
 findFunEqsByTyCon m tc
-  | Just tm <- lookupUFM m tc = foldTM (:) tm []
+  | Just tm <- lookupUDFM m tc = foldTM (:) tm []
   | otherwise                 = []
 
 foldFunEqs :: (a -> b -> b) -> FunEqMap a -> b -> b
@@ -2151,11 +2224,6 @@ filterFunEqs = filterTcAppMap
 
 insertFunEq :: FunEqMap a -> TyCon -> [Type] -> a -> FunEqMap a
 insertFunEq m tc tys val = insertTcApp m (getUnique tc) tys val
-
--- insertFunEqCt :: FunEqMap Ct -> Ct -> FunEqMap Ct
--- insertFunEqCt m ct@(CFunEqCan { cc_fun = tc, cc_tyargs = tys })
---  = insertFunEq m tc tys ct
--- insertFunEqCt _ ct = pprPanic "insertFunEqCt" (ppr ct)
 
 partitionFunEqs :: (Ct -> Bool) -> FunEqMap Ct -> ([Ct], FunEqMap Ct)
 -- Optimise for the case where the predicate is false
@@ -2206,6 +2274,16 @@ All you can do is
 Filling in a dictionary evidence variable means to create a binding
 for it, so TcS carries a mutable location where the binding can be
 added.  This is initialised from the innermost implication constraint.
+
+Note [Solving for Derived constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Sometimes we invoke the solver on a bunch of Derived constraints, not to
+generate any evidence, but just to cause unification side effects or to
+produce a simpler set of constraints.  If that is what we are doing, we
+should do two things differently:
+  a) Don't stop when you've solved all the Wanteds; instead keep going
+     if there are any Deriveds in the work queue.
+  b) In getInertUnsolved, include Derived ones
 -}
 
 data TcSEnv
@@ -2231,9 +2309,8 @@ data TcSEnv
         -- See also Note [Tracking redundant constraints] in TcSimplify
 
       tcs_need_deriveds :: Bool
-        -- should we keep trying to solve even if all the unsolved
-        -- constraints are Derived? Usually False, but used whenever
-        -- toDerivedWC is used.
+        -- Keep solving, even if all the unsolved constraints are Derived
+        -- See Note [Solving for Derived constraints]
     }
 
 ---------------
@@ -2247,7 +2324,6 @@ instance Applicative TcS where
   (<*>) = ap
 
 instance Monad TcS where
-  return = pure
   fail err  = TcS (\_ -> fail err)
   m >>= k   = TcS (\ebs -> unTcS m ebs >>= \r -> unTcS (k r) ebs)
 
@@ -2277,8 +2353,12 @@ wrapWarnTcS :: TcM a -> TcS a
 -- There's no static check; it's up to the user
 wrapWarnTcS = wrapTcS
 
-failTcS, panicTcS :: SDoc -> TcS a
+failTcS, panicTcS  :: SDoc -> TcS a
+warnTcS   :: WarningFlag -> SDoc -> TcS ()
+addErrTcS :: SDoc -> TcS ()
 failTcS      = wrapTcS . TcM.failWith
+warnTcS flag = wrapTcS . TcM.addWarn (Reason flag)
+addErrTcS    = wrapTcS . TcM.addErr
 panicTcS doc = pprPanic "TcCanonical" doc
 
 traceTcS :: String -> SDoc -> TcS ()
@@ -2300,8 +2380,11 @@ bumpStepCountTcS = TcS $ \env -> do { let ref = tcs_count env
 
 -- | Mark variables as used filling a coercion hole
 useVars :: TyCoVarSet -> TcS ()
-useVars vars = TcS $ \env -> do { let ref = tcs_used_tcvs env
-                                ; TcM.updTcRef ref (`unionVarSet` vars) }
+useVars vars = TcS $ \env -> useVarsTcM (tcs_used_tcvs env) vars
+
+-- | Like 'useVars' but in the TcM monad
+useVarsTcM :: IORef TyCoVarSet -> TyCoVarSet -> TcM ()
+useVarsTcM ref vars = TcM.updTcRef ref (`unionVarSet` vars)
 
 csTraceTcS :: SDoc -> TcS ()
 csTraceTcS doc
@@ -2313,7 +2396,7 @@ traceFireTcS ev doc
   = TcS $ \env -> csTraceTcM 1 $
     do { n <- TcM.readTcRef (tcs_count env)
        ; tclvl <- TcM.getTcLevel
-       ; return (hang (int n <> brackets (ptext (sLit "U:") <> ppr tclvl
+       ; return (hang (int n <> brackets (text "U:" <> ppr tclvl
                                           <> ppr (ctLocDepth (ctEvLoc ev)))
                        <+> doc <> colon)
                      4 (ppr ev)) }
@@ -2372,7 +2455,7 @@ runTcSWithEvBinds solve_deriveds ev_binds_var tcs
 
        ; count <- TcM.readTcRef step_count
        ; when (count > 0) $
-         csTraceTcM 0 $ return (ptext (sLit "Constraint solver steps =") <+> int count)
+         csTraceTcM 0 $ return (text "Constraint solver steps =" <+> int count)
 
 #ifdef DEBUG
        ; whenIsJust ev_binds_var $ \ebv ->
@@ -2393,15 +2476,23 @@ checkForCyclicBinds ev_binds
   = pprPanic "Cycle in coercion bindings" $ ppr coercion_cycles
   where
     cycles :: [[EvBind]]
-    cycles = [c | CyclicSCC c <- stronglyConnCompFromEdgedVertices edges]
+    cycles = [c | CyclicSCC c <- stronglyConnCompFromEdgedVerticesUniq edges]
 
     coercion_cycles = [c | c <- cycles, any is_co_bind c]
     is_co_bind (EvBind { eb_lhs = b }) = isEqPred (varType b)
 
     edges :: [(EvBind, EvVar, [EvVar])]
-    edges = [ (bind, bndr, varSetElems (evVarsOfTerm rhs))
+    edges = [ (bind, bndr, nonDetEltsUFM (evVarsOfTerm rhs))
             | bind@(EvBind { eb_lhs = bndr, eb_rhs = rhs}) <- bagToList ev_binds ]
+            -- It's OK to use nonDetEltsUFM here as
+            -- stronglyConnCompFromEdgedVertices is still deterministic even
+            -- if the edges are in nondeterministic order as explained in
+            -- Note [Deterministic SCC] in Digraph.
 #endif
+
+setEvBindsTcS :: Maybe EvBindsVar -> TcS a -> TcS a
+setEvBindsTcS m_ref (TcS thing_inside)
+ = TcS $ \ env -> thing_inside (env { tcs_ev_binds = m_ref })
 
 nestImplicTcS :: Maybe EvBindsVar -> TyCoVarSet -- bound in this implication
               -> TcLevel -> TcS a
@@ -2409,45 +2500,44 @@ nestImplicTcS :: Maybe EvBindsVar -> TyCoVarSet -- bound in this implication
                                       -- coercion holes (for redundant-constraint
                                       -- tracking)
 nestImplicTcS m_ref bound_tcvs inner_tclvl (TcS thing_inside)
-  = do { (res, used_tcvs) <-
-         TcS $ \ TcSEnv { tcs_unified       = unified_var
-                        , tcs_inerts        = old_inert_var
-                        , tcs_count         = count
-                        , tcs_need_deriveds = solve_deriveds
-                        } ->
-      do { inerts <- TcM.readTcRef old_inert_var
-         ; let nest_inert = inerts { inert_flat_cache = emptyExactFunEqs }
+  = TcS $ \ TcSEnv { tcs_unified       = unified_var
+                   , tcs_inerts        = old_inert_var
+                   , tcs_count         = count
+                   , tcs_used_tcvs     = used_var
+                   , tcs_need_deriveds = solve_deriveds
+                   } ->
+    do { inerts <- TcM.readTcRef old_inert_var
+       ; let nest_inert = inerts { inert_flat_cache = emptyExactFunEqs }
                                      -- See Note [Do not inherit the flat cache]
-         ; new_inert_var <- TcM.newTcRef nest_inert
-         ; new_wl_var    <- TcM.newTcRef emptyWorkList
-         ; new_used_var  <- TcM.newTcRef emptyVarSet
-         ; let nest_env = TcSEnv { tcs_ev_binds      = m_ref
-                                 , tcs_unified       = unified_var
-                                 , tcs_count         = count
-                                 , tcs_inerts        = new_inert_var
-                                 , tcs_worklist      = new_wl_var
-                                 , tcs_used_tcvs     = new_used_var
-                                 , tcs_need_deriveds = solve_deriveds }
-         ; res <- TcM.setTcLevel inner_tclvl $
-                  thing_inside nest_env
+       ; new_inert_var <- TcM.newTcRef nest_inert
+       ; new_wl_var    <- TcM.newTcRef emptyWorkList
+       ; new_used_var  <- TcM.newTcRef emptyVarSet
+       ; let nest_env = TcSEnv { tcs_ev_binds      = m_ref
+                               , tcs_unified       = unified_var
+                               , tcs_count         = count
+                               , tcs_inerts        = new_inert_var
+                               , tcs_worklist      = new_wl_var
+                               , tcs_used_tcvs     = new_used_var
+                               , tcs_need_deriveds = solve_deriveds }
+       ; res <- TcM.setTcLevel inner_tclvl $
+                thing_inside nest_env
 
 #ifdef DEBUG
-         -- Perform a check that the thing_inside did not cause cycles
-         ; whenIsJust m_ref $ \ ref ->
-           do { ev_binds <- TcM.getTcEvBinds ref
-              ; checkForCyclicBinds ev_binds }
+       -- Perform a check that the thing_inside did not cause cycles
+       ; whenIsJust m_ref $ \ ref ->
+         do { ev_binds <- TcM.getTcEvBinds ref
+            ; checkForCyclicBinds ev_binds }
 #endif
-         ; used_tcvs <- TcM.readTcRef new_used_var
-         ; return (res, used_tcvs) }
+       ; used_tcvs <- TcM.readTcRef new_used_var
 
        ; local_ev_vars <- case m_ref of
            Nothing  -> return emptyVarSet
-           Just ref -> do { binds <- wrapTcS $ TcM.getTcEvBinds ref
+           Just ref -> do { binds <- TcM.getTcEvBinds ref
                           ; return $ mkVarSet $ map evBindVar $ bagToList binds }
        ; let all_locals = bound_tcvs `unionVarSet` local_ev_vars
              (inner_used_tcvs, outer_used_tcvs)
                = partitionVarSet (`elemVarSet` all_locals) used_tcvs
-       ; useVars outer_used_tcvs
+       ; useVarsTcM used_var outer_used_tcvs
 
        ; return (res, inner_used_tcvs) }
 
@@ -2550,11 +2640,6 @@ emitWork cts
   = do { traceTcS "Emitting fresh work" (vcat (map ppr cts))
        ; updWorkListTcS (extendWorkListCts cts) }
 
-emitWorkCt :: Ct -> TcS ()
-emitWorkCt ct
-  = do { traceTcS "Emitting fresh (canonical) work" (ppr ct)
-       ; updWorkListTcS (extendWorkListCt ct) }
-
 emitInsoluble :: Ct -> TcS ()
 -- Emits a non-canonical constraint that will stand for a frozen error in the inerts.
 emitInsoluble ct
@@ -2654,8 +2739,8 @@ tcLookupId n = wrapTcS $ TcM.tcLookupId n
 -- Setting names as used (used in the deriving of Coercible evidence)
 -- Too hackish to expose it to TcS? In that case somehow extract the used
 -- constructors from the result of solveInteract
-addUsedDataCons :: GlobalRdrEnv -> TyCon -> TcS ()
-addUsedDataCons rdr_env tycon = wrapTcS  $ TcM.addUsedDataCons rdr_env tycon
+addUsedGREs :: [GlobalRdrElt] -> TcS ()
+addUsedGREs gres = wrapTcS  $ TcM.addUsedGREs gres
 
 addUsedGRE :: Bool -> GlobalRdrElt -> TcS ()
 addUsedGRE warn_if_deprec gre = wrapTcS $ TcM.addUsedGRE warn_if_deprec gre
@@ -2670,7 +2755,7 @@ checkWellStagedDFun pred dfun_id loc
     do { use_stage <- TcM.getStage
        ; TcM.checkWellStaged pp_thing bind_lvl (thLevel use_stage) }
   where
-    pp_thing = ptext (sLit "instance for") <+> quotes (ppr pred)
+    pp_thing = text "instance for" <+> quotes (ppr pred)
     bind_lvl = TcM.topIdLvl dfun_id
 
 pprEq :: TcType -> TcType -> SDoc
@@ -2696,6 +2781,9 @@ isFilledMetaTyVar tv = wrapTcS (TcM.isFilledMetaTyVar tv)
 
 zonkTyCoVarsAndFV :: TcTyCoVarSet -> TcS TcTyCoVarSet
 zonkTyCoVarsAndFV tvs = wrapTcS (TcM.zonkTyCoVarsAndFV tvs)
+
+zonkTyCoVarsAndFVList :: [TcTyCoVar] -> TcS [TcTyCoVar]
+zonkTyCoVarsAndFVList tvs = wrapTcS (TcM.zonkTyCoVarsAndFVList tvs)
 
 zonkCo :: Coercion -> TcS Coercion
 zonkCo = wrapTcS . TcM.zonkCo
@@ -2826,8 +2914,8 @@ instFlexiTcS tvs = wrapTcS (mapAccumLM inst_one emptyTCvSubst tvs)
   where
      inst_one subst tv
          = do { ty' <- instFlexiTcSHelper (tyVarName tv)
-                                          (substTy subst (tyVarKind tv))
-              ; return (extendTCvSubst subst tv ty', ty') }
+                                          (substTyUnchecked subst (tyVarKind tv))
+              ; return (extendTvSubst subst tv ty', ty') }
 
 instFlexiTcSHelper :: Name -> Kind -> TcM TcType
 instFlexiTcSHelper tvname kind
@@ -3005,8 +3093,19 @@ matchFam tycon args = wrapTcS $ matchFamTcM tycon args
 matchFamTcM :: TyCon -> [Type] -> TcM (Maybe (Coercion, TcType))
 -- Given (F tys) return (ty, co), where co :: F tys ~ ty
 matchFamTcM tycon args
-  = do { fam_envs <- FamInst.tcGetFamInstEnvs
-       ; return $ reduceTyFamApp_maybe fam_envs Nominal tycon args }
+  = do { fam_envs@(_,lcl) <- FamInst.tcGetFamInstEnvs
+       ; let match_fam_result
+              = reduceTyFamApp_maybe fam_envs Nominal tycon args
+       ; TcM.traceTc "matchFamTcM" $
+         vcat [ text "Matching:" <+> ppr (mkTyConApp tycon args)
+              , ppr_res match_fam_result
+              , text "Lcl fam env:" <+> ppr lcl ]
+       ; return match_fam_result }
+  where
+    ppr_res Nothing        = text "Match failed"
+    ppr_res (Just (co,ty)) = hang (text "Match succeeded:")
+                                2 (vcat [ text "Rewrites to:" <+> ppr ty
+                                        , text "Coercion:" <+> ppr co ])
 
 {-
 Note [Residual implications]
@@ -3026,17 +3125,17 @@ See TcSMonad.deferTcSForAllEq
 deferTcSForAllEq :: Role -- Nominal or Representational
                  -> CtLoc  -- Original wanted equality flavor
                  -> [Coercion]        -- among the kinds of the binders
-                 -> ([TyBinder],TcType)   -- ForAll tvs1 body1
-                 -> ([TyBinder],TcType)   -- ForAll tvs2 body2
+                 -> ([TyVarBinder],TcType)   -- ForAll tvs1 body1
+                 -> ([TyVarBinder],TcType)   -- ForAll tvs2 body2
                  -> TcS Coercion
 deferTcSForAllEq role loc kind_cos (bndrs1,body1) (bndrs2,body2)
  = do { let tvs1'  = zipWithEqual "deferTcSForAllEq"
                        mkCastTy (mkTyVarTys tvs1) kind_cos
-            body2' = substTyWith tvs2 tvs1' body2
+            body2' = substTyWithUnchecked tvs2 tvs1' body2
       ; (subst, skol_tvs) <- wrapTcS $ TcM.tcInstSkolTyVars tvs1
-      ; let phi1  = Type.substTy subst body1
-            phi2  = Type.substTy subst body2'
-            skol_info = UnifyForAllSkol skol_tvs phi1
+      ; let phi1  = Type.substTyUnchecked subst body1
+            phi2  = Type.substTyUnchecked subst body2'
+            skol_info = UnifyForAllSkol phi1
 
       ; (ctev, hole_co) <- newWantedEq loc role phi1 phi2
       ; env <- getLclEnv
@@ -3057,5 +3156,5 @@ deferTcSForAllEq role loc kind_cos (bndrs1,body1) (bndrs2,body2)
       ; let cobndrs    = zip skol_tvs kind_cos
       ; return $ mkForAllCos cobndrs hole_co }
    where
-     tvs1 = map (binderVar "deferTcSForAllEq") bndrs1
-     tvs2 = map (binderVar "deferTcSForAllEq") bndrs2
+     tvs1 = binderVars bndrs1
+     tvs2 = binderVars bndrs2

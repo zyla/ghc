@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, NondecreasingIndentation, TupleSections #-}
+{-# LANGUAGE CPP, NondecreasingIndentation, TupleSections, RecordWildCards #-}
 {-# OPTIONS_GHC -fno-cse #-}
 --
 --  (c) The University of Glasgow 2002-2006
@@ -37,8 +37,6 @@ import Finder
 import HscTypes
 import Name
 import NameEnv
-import NameSet
-import UniqFM
 import Module
 import ListSetOps
 import DynFlags
@@ -49,7 +47,7 @@ import Util
 import ErrUtils
 import SrcLoc
 import qualified Maybes
-import UniqSet
+import UniqDSet
 import FastString
 import Platform
 import SysTools
@@ -118,7 +116,7 @@ data PersistentLinkerState
         -- The currently-loaded packages; always object code
         -- Held, as usual, in dependency order; though I am not sure if
         -- that is really important
-        pkgs_loaded :: ![UnitId],
+        pkgs_loaded :: ![LinkerUnitId],
 
         -- we need to remember the name of previous temporary DLL/.so
         -- libraries so we can link them (see #10322)
@@ -139,10 +137,10 @@ emptyPLS _ = PersistentLinkerState {
   --
   -- The linker's symbol table is populated with RTS symbols using an
   -- explicit list.  See rts/Linker.c for details.
-  where init_pkgs = [rtsUnitId]
+  where init_pkgs = map toInstalledUnitId [rtsUnitId]
 
 
-extendLoadedPkgs :: [UnitId] -> IO ()
+extendLoadedPkgs :: [InstalledUnitId] -> IO ()
 extendLoadedPkgs pkgs =
   modifyPLS_ $ \s ->
       return s{ pkgs_loaded = pkgs ++ pkgs_loaded s }
@@ -235,7 +233,7 @@ withExtendedLinkEnv new_env action
 showLinkerState :: DynFlags -> IO ()
 showLinkerState dflags
   = do pls <- readIORef v_PersistentLinkerState >>= readMVar
-       log_action dflags dflags SevDump noSrcSpan defaultDumpStyle
+       log_action dflags dflags NoReason SevDump noSrcSpan defaultDumpStyle
                  (vcat [text "----- Linker state -----",
                         text "Pkgs:" <+> ppr (pkgs_loaded pls),
                         text "Objs:" <+> ppr (objs_loaded pls),
@@ -374,7 +372,7 @@ classifyLdInput dflags f
   | isObjectFilename platform f = return (Just (Object f))
   | isDynLibFilename platform f = return (Just (DLLPath f))
   | otherwise          = do
-        log_action dflags dflags SevInfo noSrcSpan defaultUserStyle
+        log_action dflags dflags NoReason SevInfo noSrcSpan defaultUserStyle
             (text ("Warning: ignoring unrecognised input `" ++ f ++ "'"))
         return Nothing
     where platform = targetPlatform dflags
@@ -496,12 +494,15 @@ linkExpr hsc_env span root_ul_bco
 
      -- Link the necessary packages and linkables
 
-   ; [(_,root_hvref)] <- linkSomeBCOs hsc_env ie ce [root_ul_bco]
+   ; let nobreakarray = error "no break array"
+         bco_ix = mkNameEnv [(unlinkedBCOName root_ul_bco, 0)]
+   ; resolved <- linkBCO hsc_env ie ce bco_ix nobreakarray root_ul_bco
+   ; [root_hvref] <- createBCOs hsc_env [resolved]
    ; fhv <- mkFinalizedHValue hsc_env root_hvref
    ; return (pls, fhv)
    }}}
    where
-     free_names = nameSetElems (bcoFreeNames root_ul_bco)
+     free_names = uniqDSetToList (bcoFreeNames root_ul_bco)
 
      needed_mods :: [Module]
      needed_mods = [ nameModule n | n <- free_names,
@@ -543,29 +544,29 @@ normalObjectSuffix = phaseInputExt StopLn
 
 failNonStd :: DynFlags -> SrcSpan -> IO (Maybe FilePath)
 failNonStd dflags srcspan = dieWith dflags srcspan $
-  ptext (sLit "Cannot load") <+> compWay <+>
-     ptext (sLit "objects when GHC is built") <+> ghciWay $$
-  ptext (sLit "To fix this, either:") $$
-  ptext (sLit "  (1) Use -fexternal-interprter, or") $$
-  ptext (sLit "  (2) Build the program twice: once") <+>
-                       ghciWay <> ptext (sLit ", and then") $$
-  ptext (sLit "      with") <+> compWay <+>
-     ptext (sLit "using -osuf to set a different object file suffix.")
+  text "Cannot load" <+> compWay <+>
+     text "objects when GHC is built" <+> ghciWay $$
+  text "To fix this, either:" $$
+  text "  (1) Use -fexternal-interprter, or" $$
+  text "  (2) Build the program twice: once" <+>
+                       ghciWay <> text ", and then" $$
+  text "      with" <+> compWay <+>
+     text "using -osuf to set a different object file suffix."
     where compWay
-            | WayDyn `elem` ways dflags = ptext (sLit "-dynamic")
-            | WayProf `elem` ways dflags = ptext (sLit "-prof")
-            | otherwise = ptext (sLit "normal")
+            | WayDyn `elem` ways dflags = text "-dynamic"
+            | WayProf `elem` ways dflags = text "-prof"
+            | otherwise = text "normal"
           ghciWay
-            | dynamicGhc = ptext (sLit "with -dynamic")
-            | rtsIsProfiled = ptext (sLit "with -prof")
-            | otherwise = ptext (sLit "the normal way")
+            | dynamicGhc = text "with -dynamic"
+            | rtsIsProfiled = text "with -prof"
+            | otherwise = text "the normal way"
 
 getLinkDeps :: HscEnv -> HomePackageTable
             -> PersistentLinkerState
             -> Maybe FilePath                   -- replace object suffices?
             -> SrcSpan                          -- for error messages
             -> [Module]                         -- If you need these
-            -> IO ([Linkable], [UnitId])     -- ... then link these first
+            -> IO ([Linkable], [InstalledUnitId])     -- ... then link these first
 -- Fails with an IO exception if it can't find enough files
 
 getLinkDeps hsc_env hpt pls replace_osuf span mods
@@ -574,7 +575,7 @@ getLinkDeps hsc_env hpt pls replace_osuf span mods
         -- 1.  Find the dependent home-pkg-modules/packages from each iface
         -- (omitting modules from the interactive package, which is already linked)
       ; (mods_s, pkgs_s) <- follow_deps (filterOut isInteractiveModule mods)
-                                        emptyUniqSet emptyUniqSet;
+                                        emptyUniqDSet emptyUniqDSet;
 
       ; let {
         -- 2.  Exclude ones already linked
@@ -602,14 +603,14 @@ getLinkDeps hsc_env hpt pls replace_osuf span mods
         -- dependencies of that.  Hence we need to traverse the dependency
         -- tree recursively.  See bug #936, testcase ghci/prog007.
     follow_deps :: [Module]             -- modules to follow
-                -> UniqSet ModuleName         -- accum. module dependencies
-                -> UniqSet UnitId          -- accum. package dependencies
-                -> IO ([ModuleName], [UnitId]) -- result
+                -> UniqDSet ModuleName         -- accum. module dependencies
+                -> UniqDSet InstalledUnitId          -- accum. package dependencies
+                -> IO ([ModuleName], [InstalledUnitId]) -- result
     follow_deps []     acc_mods acc_pkgs
-        = return (uniqSetToList acc_mods, uniqSetToList acc_pkgs)
+        = return (uniqDSetToList acc_mods, uniqDSetToList acc_pkgs)
     follow_deps (mod:mods) acc_mods acc_pkgs
         = do
-          mb_iface <- initIfaceCheck hsc_env $
+          mb_iface <- initIfaceCheck (text "getLinkDeps") hsc_env $
                         loadInterface msg mod (ImportByUser False)
           iface <- case mb_iface of
                     Maybes.Failed err      -> throwGhcExceptionIO (ProgramError (showSDoc dflags err))
@@ -626,12 +627,12 @@ getLinkDeps hsc_env hpt pls replace_osuf span mods
                     where is_boot (m,True)  = Left m
                           is_boot (m,False) = Right m
 
-            boot_deps' = filter (not . (`elementOfUniqSet` acc_mods)) boot_deps
-            acc_mods'  = addListToUniqSet acc_mods (moduleName mod : mod_deps)
-            acc_pkgs'  = addListToUniqSet acc_pkgs $ map fst pkg_deps
+            boot_deps' = filter (not . (`elementOfUniqDSet` acc_mods)) boot_deps
+            acc_mods'  = addListToUniqDSet acc_mods (moduleName mod : mod_deps)
+            acc_pkgs'  = addListToUniqDSet acc_pkgs $ map fst pkg_deps
           --
           if pkg /= this_pkg
-             then follow_deps mods acc_mods (addOneToUniqSet acc_pkgs' pkg)
+             then follow_deps mods acc_mods (addOneToUniqDSet acc_pkgs' (toInstalledUnitId pkg))
              else follow_deps (map (mkModule this_pkg) boot_deps' ++ mods)
                               acc_mods' acc_pkgs'
         where
@@ -646,16 +647,16 @@ getLinkDeps hsc_env hpt pls replace_osuf span mods
 
     no_obj :: Outputable a => a -> IO b
     no_obj mod = dieWith dflags span $
-                     ptext (sLit "cannot find object file for module ") <>
+                     text "cannot find object file for module " <>
                         quotes (ppr mod) $$
                      while_linking_expr
 
-    while_linking_expr = ptext (sLit "while linking an interpreted expression")
+    while_linking_expr = text "while linking an interpreted expression"
 
         -- This one is a build-system bug
 
     get_linkable osuf mod_name      -- A home-package module
-        | Just mod_info <- lookupUFM hpt mod_name
+        | Just mod_info <- lookupHpt hpt mod_name
         = adjust_linkable (Maybes.expectJust "getLinkDeps" (hm_linkable mod_info))
         | otherwise
         = do    -- It's not in the HPT because we are in one shot mode,
@@ -683,12 +684,12 @@ getLinkDeps hsc_env hpt pls replace_osuf span mods
 
             adjust_ul new_osuf (DotO file) = do
                 MASSERT(osuf `isSuffixOf` file)
-                let file_base = dropTail (length osuf + 1) file
+                let file_base = fromJust (stripExtension osuf file)
                     new_file = file_base <.> new_osuf
                 ok <- doesFileExist new_file
                 if (not ok)
                    then dieWith dflags span $
-                          ptext (sLit "cannot find object file ")
+                          text "cannot find object file "
                                 <> quotes (text new_file) $$ while_linking_expr
                    else return (DotO new_file)
             adjust_ul _ (DotA fp) = panic ("adjust_ul DotA " ++ show fp)
@@ -703,7 +704,7 @@ getLinkDeps hsc_env hpt pls replace_osuf span mods
   ********************************************************************* -}
 
 linkDecls :: HscEnv -> SrcSpan -> CompiledByteCode -> IO ()
-linkDecls hsc_env span (ByteCode unlinkedBCOs itblEnv _) = do
+linkDecls hsc_env span cbc@CompiledByteCode{..} = do
     -- Initialise the linker (if it's not been done already)
     initDynLinker hsc_env
 
@@ -717,17 +718,18 @@ linkDecls hsc_env span (ByteCode unlinkedBCOs itblEnv _) = do
       else do
 
     -- Link the expression itself
-    let ie = plusNameEnv (itbl_env pls) itblEnv
+    let ie = plusNameEnv (itbl_env pls) bc_itbls
         ce = closure_env pls
 
     -- Link the necessary packages and linkables
-    new_bindings <- linkSomeBCOs hsc_env ie ce unlinkedBCOs
+    new_bindings <- linkSomeBCOs hsc_env ie ce [cbc]
     nms_fhvs <- makeForeignNamedHValueRefs hsc_env new_bindings
     let pls2 = pls { closure_env = extendClosureEnv ce nms_fhvs
                    , itbl_env    = ie }
     return (pls2, ())
   where
-    free_names =  concatMap (nameSetElems . bcoFreeNames) unlinkedBCOs
+    free_names = uniqDSetToList $
+      foldr (unionUniqDSets . bcoFreeNames) emptyUniqDSet bc_bcos
 
     needed_mods :: [Module]
     needed_mods = [ nameModule n | n <- free_names,
@@ -843,6 +845,8 @@ dynLoadObjs _       pls []   = return pls
 dynLoadObjs hsc_env pls objs = do
     let dflags = hsc_dflags hsc_env
     let platform = targetPlatform dflags
+    let minus_ls = [ lib | Option ('-':'l':lib) <- ldInputs dflags ]
+    let minus_big_ls = [ lib | Option ('-':'L':lib) <- ldInputs dflags ]
     (soFile, libPath , libName) <- newTempLibName dflags (soExt platform)
     let
         dflags2 = dflags {
@@ -860,7 +864,17 @@ dynLoadObjs hsc_env pls objs = do
                                  , Option ("-Wl," ++ lp)
                                  , Option ("-l" ++  l)
                                  ])
-                            (temp_sos pls),
+                            (temp_sos pls)
+                        ++ concatMap
+                             (\lp ->
+                                 [ Option ("-L" ++ lp)
+                                 , Option ("-Wl,-rpath")
+                                 , Option ("-Wl," ++ lp)
+                                 ])
+                             minus_big_ls
+                        ++ map (\l -> Option ("-l" ++ l)) minus_ls,
+                      -- Add -l options and -L options from dflags.
+                      --
                       -- When running TH for a non-dynamic way, we still
                       -- need to make -l flags to link against the dynamic
                       -- libraries, so we need to add WayDyn to ways.
@@ -914,12 +928,11 @@ dynLinkBCOs hsc_env pls bcos = do
             cbcs      = map byteCodeOfObject unlinkeds
 
 
-            ul_bcos    = [b | ByteCode bs _ _  <- cbcs, b <- bs]
-            ies        = [ie | ByteCode _ ie _ <- cbcs]
+            ies        = map bc_itbls cbcs
             gce       = closure_env pls
             final_ie  = foldr plusNameEnv (itbl_env pls) ies
 
-        names_and_refs <- linkSomeBCOs hsc_env final_ie gce ul_bcos
+        names_and_refs <- linkSomeBCOs hsc_env final_ie gce cbcs
 
         -- We only want to add the external ones to the ClosureEnv
         let (to_add, to_drop) = partition (isExternalName.fst) names_and_refs
@@ -929,28 +942,36 @@ dynLinkBCOs hsc_env pls bcos = do
         -- Wrap finalizers on the ones we want to keep
         new_binds <- makeForeignNamedHValueRefs hsc_env to_add
 
-        let pls2 = pls1 { closure_env = extendClosureEnv gce new_binds,
-                          itbl_env    = final_ie }
-
-        return pls2
+        return pls1 { closure_env = extendClosureEnv gce new_binds,
+                      itbl_env    = final_ie }
 
 -- Link a bunch of BCOs and return references to their values
 linkSomeBCOs :: HscEnv
              -> ItblEnv
              -> ClosureEnv
-             -> [UnlinkedBCO]
+             -> [CompiledByteCode]
              -> IO [(Name,HValueRef)]
                         -- The returned HValueRefs are associated 1-1 with
                         -- the incoming unlinked BCOs.  Each gives the
                         -- value of the corresponding unlinked BCO
 
-linkSomeBCOs _ _ _ [] = return []
-linkSomeBCOs hsc_env ie ce ul_bcos = do
-  let names = map unlinkedBCOName ul_bcos
-      bco_ix = mkNameEnv (zip names [0..])
-  resolved <- mapM (linkBCO hsc_env ie ce bco_ix) ul_bcos
-  hvrefs <- iservCmd hsc_env (CreateBCOs resolved)
-  return (zip names hvrefs)
+linkSomeBCOs hsc_env ie ce mods = foldr fun do_link mods []
+ where
+  fun CompiledByteCode{..} inner accum =
+    case bc_breaks of
+      Nothing -> inner ((panic "linkSomeBCOs: no break array", bc_bcos) : accum)
+      Just mb -> withForeignRef (modBreaks_flags mb) $ \breakarray ->
+                   inner ((breakarray, bc_bcos) : accum)
+
+  do_link [] = return []
+  do_link mods = do
+    let flat = [ (breakarray, bco) | (breakarray, bcos) <- mods, bco <- bcos ]
+        names = map (unlinkedBCOName . snd) flat
+        bco_ix = mkNameEnv (zip names [0..])
+    resolved <- sequence [ linkBCO hsc_env ie ce bco_ix breakarray bco
+                         | (breakarray, bco) <- flat ]
+    hvrefs <- createBCOs hsc_env resolved
+    return (zip names hvrefs)
 
 -- | Useful to apply to the result of 'linkSomeBCOs'
 makeForeignNamedHValueRefs
@@ -1105,12 +1126,15 @@ showLS (DLL nm)       = "(dynamic) " ++ nm
 showLS (DLLPath nm)   = "(dynamic) " ++ nm
 showLS (Framework nm) = "(framework) " ++ nm
 
+-- TODO: Make this type more precise
+type LinkerUnitId = InstalledUnitId
+
 -- | Link exactly the specified packages, and their dependents (unless of
 -- course they are already linked).  The dependents are linked
 -- automatically, and it doesn't matter what order you specify the input
 -- packages.
 --
-linkPackages :: HscEnv -> [UnitId] -> IO ()
+linkPackages :: HscEnv -> [LinkerUnitId] -> IO ()
 -- NOTE: in fact, since each module tracks all the packages it depends on,
 --       we don't really need to use the package-config dependencies.
 --
@@ -1126,7 +1150,7 @@ linkPackages hsc_env new_pkgs = do
   modifyPLS_ $ \pls -> do
     linkPackages' hsc_env new_pkgs pls
 
-linkPackages' :: HscEnv -> [UnitId] -> PersistentLinkerState
+linkPackages' :: HscEnv -> [LinkerUnitId] -> PersistentLinkerState
              -> IO PersistentLinkerState
 linkPackages' hsc_env new_pks pls = do
     pkgs' <- link (pkgs_loaded pls) new_pks
@@ -1134,7 +1158,7 @@ linkPackages' hsc_env new_pks pls = do
   where
      dflags = hsc_dflags hsc_env
 
-     link :: [UnitId] -> [UnitId] -> IO [UnitId]
+     link :: [LinkerUnitId] -> [LinkerUnitId] -> IO [LinkerUnitId]
      link pkgs new_pkgs =
          foldM link_one pkgs new_pkgs
 
@@ -1142,7 +1166,7 @@ linkPackages' hsc_env new_pks pls = do
         | new_pkg `elem` pkgs   -- Already linked
         = return pkgs
 
-        | Just pkg_cfg <- lookupPackage dflags new_pkg
+        | Just pkg_cfg <- lookupInstalledPackage dflags new_pkg
         = do {  -- Link dependents first
                pkgs' <- link pkgs (depends pkg_cfg)
                 -- Now link the package itself
@@ -1150,7 +1174,7 @@ linkPackages' hsc_env new_pks pls = do
              ; return (new_pkg : pkgs') }
 
         | otherwise
-        = throwGhcExceptionIO (CmdLineError ("unknown package: " ++ unitIdString new_pkg))
+        = throwGhcExceptionIO (CmdLineError ("unknown package: " ++ unpackFS (installedUnitIdFS new_pkg)))
 
 
 linkPackage :: HscEnv -> PackageConfig -> IO ()
@@ -1205,9 +1229,6 @@ linkPackage hsc_env pkg
             mapM_ (load_dyn hsc_env)
               (known_dlls ++ map (mkSOName platform) dlls)
 
-        -- DLLs are loaded, reset the search paths
-        mapM_ (removeLibrarySearchPath hsc_env) $ reverse pathCache
-
         -- After loading all the DLLs, we can load the static objects.
         -- Ordering isn't important here, because we do one final link
         -- step to resolve everything.
@@ -1216,6 +1237,13 @@ linkPackage hsc_env pkg
 
         maybePutStr dflags "linking ... "
         ok <- resolveObjs hsc_env
+
+        -- DLLs are loaded, reset the search paths
+        -- Import libraries will be loaded via loadArchive so only
+        -- reset the DLL search path after all archives are loaded
+        -- as well.
+        mapM_ (removeLibrarySearchPath hsc_env) $ reverse pathCache
+
         if succeeded ok
            then maybePutStrLn dflags "done."
            else let errmsg = "unable to load package `"
@@ -1259,9 +1287,10 @@ locateLib hsc_env is_hs dirs lib
     -- For non-Haskell libraries (e.g. gmp, iconv):
     --   first look in library-dirs for a dynamic library (libfoo.so)
     --   then  look in library-dirs for a static library (libfoo.a)
-    --   first look in library-dirs and inplace GCC for a dynamic library (libfoo.so)
+    --   then look in library-dirs and inplace GCC for a dynamic library (libfoo.so)
     --   then  check for system dynamic libraries (e.g. kernel32.dll on windows)
     --   then  try "gcc --print-file-name" to search gcc's search path
+    --   then  try looking for import libraries on Windows (.dll.a, .lib)
     --   then  look in library-dirs and inplace GCC for a static library (libfoo.a)
     --       for a dynamic library (#5289)
     --   otherwise, assume loadDLL can find it
@@ -1269,6 +1298,7 @@ locateLib hsc_env is_hs dirs lib
   = findDll     `orElse`
     findSysDll  `orElse`
     tryGcc      `orElse`
+    tryImpLib   `orElse`
     findArchive `orElse`
     assumeDll
 
@@ -1299,30 +1329,42 @@ locateLib hsc_env is_hs dirs lib
      loading_profiled_hs_libs = interpreterProfiled dflags
      loading_dynamic_hs_libs  = interpreterDynamic dflags
 
+     import_libs  = [lib <.> "lib", "lib" ++ lib <.> "lib", "lib" ++ lib <.> "dll.a"]
+
      hs_dyn_lib_name = lib ++ '-':programName dflags ++ projectVersion dflags
      hs_dyn_lib_file = mkHsSOName platform hs_dyn_lib_name
 
-     so_name = mkSOName platform lib
+     so_name     = mkSOName platform lib
      lib_so_name = "lib" ++ so_name
      dyn_lib_file = case (arch, os) of
                              (ArchX86_64, OSSolaris2) -> "64" </> so_name
                              _ -> so_name
 
-     findObject     = liftM (fmap Object)  $ findFile dirs obj_file
-     findDynObject  = liftM (fmap Object)  $ findFile dirs dyn_obj_file
-     findArchive    = let local  = liftM (fmap Archive) $ findFile dirs arch_file
-                          linked = liftM (fmap Archive) $ searchForLibUsingGcc dflags arch_file dirs
-                      in liftM2 (<|>) local linked
-     findHSDll      = liftM (fmap DLLPath) $ findFile dirs hs_dyn_lib_file
-     findDll        = liftM (fmap DLLPath) $ findFile dirs dyn_lib_file
-     findSysDll     = fmap (fmap $ DLL . takeFileName) $ findSystemLibrary hsc_env so_name
-     tryGcc         = let short = liftM (fmap DLLPath) $ searchForLibUsingGcc dflags so_name     dirs
-                          full  = liftM (fmap DLLPath) $ searchForLibUsingGcc dflags lib_so_name dirs
-                      in liftM2 (<|>) short full
+     findObject    = liftM (fmap Object)  $ findFile dirs obj_file
+     findDynObject = liftM (fmap Object)  $ findFile dirs dyn_obj_file
+     findArchive   = let local  = liftM (fmap Archive) $ findFile dirs arch_file
+                         linked = liftM (fmap Archive) $ searchForLibUsingGcc dflags arch_file dirs
+                     in liftM2 (<|>) local linked
+     findHSDll     = liftM (fmap DLLPath) $ findFile dirs hs_dyn_lib_file
+     findDll       = liftM (fmap DLLPath) $ findFile dirs dyn_lib_file
+     findSysDll    = fmap (fmap $ DLL . takeFileName) $ findSystemLibrary hsc_env so_name
+     tryGcc        = let short = liftM (fmap DLLPath) $ searchForLibUsingGcc dflags so_name     dirs
+                         full  = liftM (fmap DLLPath) $ searchForLibUsingGcc dflags lib_so_name dirs
+                     in liftM2 (<|>) short full
+     tryImpLib     = case os of
+                       OSMinGW32 -> let check name = liftM (fmap Archive) $ searchForLibUsingGcc dflags name dirs
+                                    in apply (map check import_libs)
+                       _         -> return Nothing
 
      assumeDll   = return (DLL lib)
      infixr `orElse`
      f `orElse` g = f >>= maybe g return
+
+     apply []     = return Nothing
+     apply (x:xs) = do x' <- x
+                       if isJust x'
+                          then return x'
+                          else apply xs
 
      platform = targetPlatform dflags
      arch = platformArch platform
@@ -1375,7 +1417,12 @@ maybePutStr :: DynFlags -> String -> IO ()
 maybePutStr dflags s
     = when (verbosity dflags > 1) $
           do let act = log_action dflags
-             act dflags SevInteractive noSrcSpan defaultUserStyle (text s)
+             act dflags
+                 NoReason
+                 SevInteractive
+                 noSrcSpan
+                 defaultUserStyle
+                 (text s)
 
 maybePutStrLn :: DynFlags -> String -> IO ()
 maybePutStrLn dflags s = maybePutStr dflags (s ++ "\n")

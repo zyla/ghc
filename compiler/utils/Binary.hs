@@ -70,7 +70,7 @@ import SrcLoc
 import Foreign
 import Data.Array
 import Data.ByteString (ByteString)
-import qualified Data.ByteString.Internal as BS
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Unsafe   as BS
 import Data.IORef
 import Data.Char                ( ord, chr )
@@ -420,6 +420,17 @@ instance (Binary a, Binary b, Binary c, Binary d, Binary e, Binary f) => Binary 
                                  f <- get bh
                                  return (a,b,c,d,e,f)
 
+instance (Binary a, Binary b, Binary c, Binary d, Binary e, Binary f, Binary g) => Binary (a,b,c,d,e,f,g) where
+    put_ bh (a,b,c,d,e,f,g) = do put_ bh a; put_ bh b; put_ bh c; put_ bh d; put_ bh e; put_ bh f; put_ bh g
+    get bh                  = do a <- get bh
+                                 b <- get bh
+                                 c <- get bh
+                                 d <- get bh
+                                 e <- get bh
+                                 f <- get bh
+                                 g <- get bh
+                                 return (a,b,c,d,e,f,g)
+
 instance Binary a => Binary (Maybe a) where
     put_ bh Nothing  = putByte bh 0
     put_ bh (Just a) = do putByte bh 1; put_ bh a
@@ -650,7 +661,9 @@ type Dictionary = Array Int FastString -- The dictionary
 putDictionary :: BinHandle -> Int -> UniqFM (Int,FastString) -> IO ()
 putDictionary bh sz dict = do
   put_ bh sz
-  mapM_ (putFS bh) (elems (array (0,sz-1) (eltsUFM dict)))
+  mapM_ (putFS bh) (elems (array (0,sz-1) (nonDetEltsUFM dict)))
+    -- It's OK to use nonDetEltsUFM here because the elements have indices
+    -- that array uses to create order
 
 getDictionary :: BinHandle -> IO Dictionary
 getDictionary bh = do
@@ -662,7 +675,7 @@ getDictionary bh = do
 -- The Symbol Table
 ---------------------------------------------------------
 
--- On disk, the symbol table is an array of IfaceExtName, when
+-- On disk, the symbol table is an array of IfExtName, when
 -- reading it in we turn it into a SymbolTable.
 
 type SymbolTable = Array Int Name
@@ -690,25 +703,18 @@ putBS bh bs =
                 go (n+1)
   go 0
 
-{- -- possible faster version, not quite there yet:
-getBS bh@BinMem{} = do
-  (I# l) <- get bh
-  arr <- readIORef (arr_r bh)
-  off <- readFastMutInt (off_r bh)
-  return $! (mkFastSubBytesBA# arr off l)
--}
 getBS :: BinHandle -> IO ByteString
 getBS bh = do
-  l <- get bh
-  fp <- mallocForeignPtrBytes l
-  withForeignPtr fp $ \ptr -> do
-    let go n | n == l = return $ BS.fromForeignPtr fp 0 l
-             | otherwise = do
-                b <- getByte bh
-                pokeElemOff ptr n b
-                go (n+1)
-    --
-    go 0
+  l <- get bh :: IO Int
+  arr <- readIORef (_arr_r bh)
+  sz <- readFastMutInt (_sz_r bh)
+  off <- readFastMutInt (_off_r bh)
+  when (off + l > sz) $
+        ioError (mkIOError eofErrorType "Data.Binary.getBS" Nothing Nothing)
+  writeFastMutInt (_off_r bh) (off+l)
+  withForeignPtr arr $ \ptr -> do
+      bs <- BS.unsafePackCStringLen (castPtr $ ptr `plusPtr` off, fromIntegral l)
+      return $! BS.copy bs
 
 instance Binary ByteString where
   put_ bh f = putBS bh f
@@ -755,21 +761,25 @@ instance Binary Activation where
             putByte bh 0
     put_ bh AlwaysActive = do
             putByte bh 1
-    put_ bh (ActiveBefore aa) = do
+    put_ bh (ActiveBefore src aa) = do
             putByte bh 2
+            put_ bh src
             put_ bh aa
-    put_ bh (ActiveAfter ab) = do
+    put_ bh (ActiveAfter src ab) = do
             putByte bh 3
+            put_ bh src
             put_ bh ab
     get bh = do
             h <- getByte bh
             case h of
               0 -> do return NeverActive
               1 -> do return AlwaysActive
-              2 -> do aa <- get bh
-                      return (ActiveBefore aa)
-              _ -> do ab <- get bh
-                      return (ActiveAfter ab)
+              2 -> do src <- get bh
+                      aa <- get bh
+                      return (ActiveBefore src aa)
+              _ -> do src <- get bh
+                      ab <- get bh
+                      return (ActiveAfter src ab)
 
 instance Binary InlinePragma where
     put_ bh (InlinePragma s a b c d) = do
@@ -859,13 +869,15 @@ instance Binary FixityDirection where
               _ -> do return InfixN
 
 instance Binary Fixity where
-    put_ bh (Fixity aa ab) = do
+    put_ bh (Fixity src aa ab) = do
+            put_ bh src
             put_ bh aa
             put_ bh ab
     get bh = do
+          src <- get bh
           aa <- get bh
           ab <- get bh
-          return (Fixity aa ab)
+          return (Fixity src aa ab)
 
 instance Binary WarningTxt where
     put_ bh (WarningTxt s w) = do

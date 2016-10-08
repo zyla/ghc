@@ -232,8 +232,9 @@ vectTypeEnv tycons vectTypeDecls vectClassDecls
        ; traceVt " convert        : " $ ppr conv_tcs
 
            -- warn the user about unvectorised type constructors
-       ; let explanation    = ptext (sLit "(They use unsupported language extensions") $$
-                              ptext (sLit "or depend on type constructors that are not vectorised)")
+       ; let explanation    = text "(They use unsupported language extensions"
+                          $$  text "or depend on type constructors that are" <+>
+                              text "not vectorised)"
              drop_tcs_nosyn = filter (not . isTypeFamilyTyCon) .
                               filter (not . isTypeSynonymTyCon) $ drop_tcs
        ; unless (null drop_tcs_nosyn) $
@@ -359,7 +360,7 @@ vectTypeEnv tycons vectTypeDecls vectClassDecls
         origName  = tyConName origTyCon
         vectName  = tyConName vectTyCon
 
-        mkSyn canonName ty = mkSynonymTyCon canonName (typeKind ty) [] [] ty
+        mkSyn canonName ty = mkSynonymTyCon canonName [] (typeKind ty) [] ty
 
         defDataCons
           | isAbstract = return ()

@@ -106,10 +106,11 @@ typeArity ty
   = go initRecTc ty
   where
     go rec_nts ty
-      | Just (bndr, ty')  <- splitPiTy_maybe ty
-      = if isIdLikeBinder bndr
-        then typeOneShot (binderType bndr) : go rec_nts ty'
-        else go rec_nts ty'
+      | Just (_, ty')  <- splitForAllTy_maybe ty
+      = go rec_nts ty'
+
+      | Just (arg,res) <- splitFunTy_maybe ty
+      = typeOneShot arg : go rec_nts res
 
       | Just (tc,tys) <- splitTyConApp_maybe ty
       , Just (ty', _) <- instNewTyCon_maybe tc tys
@@ -140,8 +141,9 @@ exprBotStrictness_maybe e
         Just ar -> Just (ar, sig ar)
   where
     env    = AE { ae_ped_bot = True, ae_cheap_fn = \ _ _ -> False }
-    sig ar = mkClosedStrictSig (replicate ar topDmd) botRes
+    sig ar = mkClosedStrictSig (replicate ar topDmd) exnRes
                   -- For this purpose we can be very simple
+                  -- exnRes is a bit less aggressive than botRes
 
 {-
 Note [exprArity invariant]
@@ -632,7 +634,7 @@ when saturated" so we don't want to be too gung-ho about saturating!
 -}
 
 arityLam :: Id -> ArityType -> ArityType
-arityLam id (ATop as) = ATop (idOneShotInfo id : as)
+arityLam id (ATop as) = ATop (idStateHackOneShotInfo id : as)
 arityLam _  (ABot n)  = ABot (n+1)
 
 floatIn :: Bool -> ArityType -> ArityType
@@ -710,7 +712,7 @@ arityType env (Cast e co)
 
 arityType _ (Var v)
   | strict_sig <- idStrictness v
-  , not $ isNopSig strict_sig
+  , not $ isTopSig strict_sig
   , (ds, res) <- splitStrictSig strict_sig
   , let arity = length ds
   = if isBotRes res then ABot arity
@@ -840,12 +842,12 @@ to re-add floats on the top.
 
 -}
 
--- | @etaExpand n us e ty@ returns an expression with
+-- | @etaExpand n e@ returns an expression with
 -- the same meaning as @e@, but with arity @n@.
 --
 -- Given:
 --
--- > e' = etaExpand n us e ty
+-- > e' = etaExpand n e
 --
 -- We should have that:
 --
@@ -853,6 +855,9 @@ to re-add floats on the top.
 etaExpand :: Arity              -- ^ Result should have this number of value args
           -> CoreExpr           -- ^ Expression to expand
           -> CoreExpr
+-- etaExpand arity e = res
+-- Then 'res' has at least 'arity' lambdas at the top
+--
 -- etaExpand deals with for-alls. For example:
 --              etaExpand 1 E
 -- where  E :: forall a. a -> a
@@ -893,8 +898,8 @@ data EtaInfo = EtaVar Var       -- /\a. [],   [] a
              | EtaCo Coercion   -- [] |> co,  [] |> (sym co)
 
 instance Outputable EtaInfo where
-   ppr (EtaVar v) = ptext (sLit "EtaVar") <+> ppr v
-   ppr (EtaCo co) = ptext (sLit "EtaCo")  <+> ppr co
+   ppr (EtaVar v) = text "EtaVar" <+> ppr v
+   ppr (EtaCo co) = text "EtaCo"  <+> ppr co
 
 pushCoercion :: Coercion -> [EtaInfo] -> [EtaInfo]
 pushCoercion co1 (EtaCo co2 : eis)
@@ -969,13 +974,15 @@ mkEtaWW orig_n orig_expr in_scope orig_ty
        | n == 0
        = (getTCvInScope subst, reverse eis)
 
-       | Just (bndr,ty') <- splitPiTy_maybe ty
-       = let ((subst', eta_id'), new_n) = caseBinder bndr
-               (\tv -> (Type.substTyVarBndr subst tv, n))
-               (\arg_ty -> (freshEtaVar n subst arg_ty, n-1))
-         in
-            -- Avoid free vars of the original expression
-         go new_n subst' ty' (EtaVar eta_id' : eis)
+       | Just (tv,ty') <- splitForAllTy_maybe ty
+       , let (subst', tv') = Type.substTyVarBndr subst tv
+           -- Avoid free vars of the original expression
+       = go n subst' ty' (EtaVar tv' : eis)
+
+       | Just (arg_ty, res_ty) <- splitFunTy_maybe ty
+       , let (subst', eta_id') = freshEtaId n subst arg_ty
+           -- Avoid free vars of the original expression
+       = go (n-1) subst' res_ty (EtaVar eta_id' : eis)
 
        | Just (co, ty') <- topNormaliseNewType_maybe ty
        =        -- Given this:
@@ -1008,7 +1015,7 @@ subst_bind = substBindSC
 
 
 --------------
-freshEtaVar :: Int -> TCvSubst -> Type -> (TCvSubst, Var)
+freshEtaId :: Int -> TCvSubst -> Type -> (TCvSubst, Id)
 -- Make a fresh Id, with specified type (after applying substitution)
 -- It should be "fresh" in the sense that it's not in the in-scope set
 -- of the TvSubstEnv; and it should itself then be added to the in-scope
@@ -1016,7 +1023,7 @@ freshEtaVar :: Int -> TCvSubst -> Type -> (TCvSubst, Var)
 --
 -- The Int is just a reasonable starting point for generating a unique;
 -- it does not necessarily have to be unique itself.
-freshEtaVar n subst ty
+freshEtaId n subst ty
       = (subst', eta_id')
       where
         ty'     = Type.substTy subst ty

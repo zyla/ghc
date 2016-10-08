@@ -11,7 +11,7 @@ module Language.Haskell.TH.Lib where
 
 import Language.Haskell.TH.Syntax hiding (Role, InjectivityAnn)
 import qualified Language.Haskell.TH.Syntax as TH
-import Control.Monad( liftM, liftM2, liftM3 )
+import Control.Monad( liftM, liftM2 )
 import Data.Word( Word8 )
 
 ----------------------------------------------------------
@@ -30,6 +30,7 @@ type TypeQ               = Q Type
 type TyLitQ              = Q TyLit
 type CxtQ                = Q Cxt
 type PredQ               = Q Pred
+type DerivClauseQ        = Q DerivClause
 type MatchQ              = Q Match
 type ClauseQ             = Q Clause
 type BodyQ               = Q Body
@@ -46,6 +47,8 @@ type VarStrictTypeQ      = Q VarStrictType
 type FieldExpQ           = Q FieldExp
 type RuleBndrQ           = Q RuleBndr
 type TySynEqnQ           = Q TySynEqn
+type PatSynDirQ          = Q PatSynDir
+type PatSynArgsQ         = Q PatSynArgs
 
 -- must be defined here for DsMeta to find it
 type Role                = TH.Role
@@ -78,12 +81,19 @@ rationalL   = RationalL
 
 litP :: Lit -> PatQ
 litP l = return (LitP l)
+
 varP :: Name -> PatQ
 varP v = return (VarP v)
+
 tupP :: [PatQ] -> PatQ
 tupP ps = do { ps1 <- sequence ps; return (TupP ps1)}
+
 unboxedTupP :: [PatQ] -> PatQ
 unboxedTupP ps = do { ps1 <- sequence ps; return (UnboxedTupP ps1)}
+
+unboxedSumP :: PatQ -> SumAlt -> SumArity -> PatQ
+unboxedSumP p alt arity = do { p1 <- p; return (UnboxedSumP p1 alt arity) }
+
 conP :: Name -> [PatQ] -> PatQ
 conP n ps = do ps' <- sequence ps
                return (ConP n ps')
@@ -223,6 +233,9 @@ litE c = return (LitE c)
 appE :: ExpQ -> ExpQ -> ExpQ
 appE x y = do { a <- x; b <- y; return (AppE a b)}
 
+appTypeE :: ExpQ -> TypeQ -> ExpQ
+appTypeE x t = do { a <- x; s <- t; return (AppTypeE a s) }
+
 parensE :: ExpQ -> ExpQ
 parensE x = do { x' <- x; return (ParensE x') }
 
@@ -263,6 +276,9 @@ tupE es = do { es1 <- sequence es; return (TupE es1)}
 
 unboxedTupE :: [ExpQ] -> ExpQ
 unboxedTupE es = do { es1 <- sequence es; return (UnboxedTupE es1)}
+
+unboxedSumE :: ExpQ -> SumAlt -> SumArity -> ExpQ
+unboxedSumE e alt arity = do { e1 <- e; return (UnboxedSumE e1 alt arity) }
 
 condE :: ExpQ -> ExpQ -> ExpQ -> ExpQ
 condE x y z =  do { a <- x; b <- y; c <- z; return (CondE a b c)}
@@ -345,20 +361,22 @@ funD nm cs =
 tySynD :: Name -> [TyVarBndr] -> TypeQ -> DecQ
 tySynD tc tvs rhs = do { rhs1 <- rhs; return (TySynD tc tvs rhs1) }
 
-dataD :: CxtQ -> Name -> [TyVarBndr] -> Maybe Kind -> [ConQ] -> CxtQ -> DecQ
+dataD :: CxtQ -> Name -> [TyVarBndr] -> Maybe Kind -> [ConQ] -> [DerivClauseQ]
+      -> DecQ
 dataD ctxt tc tvs ksig cons derivs =
   do
     ctxt1 <- ctxt
     cons1 <- sequence cons
-    derivs1 <- derivs
+    derivs1 <- sequence derivs
     return (DataD ctxt1 tc tvs ksig cons1 derivs1)
 
-newtypeD :: CxtQ -> Name -> [TyVarBndr] -> Maybe Kind -> ConQ -> CxtQ -> DecQ
+newtypeD :: CxtQ -> Name -> [TyVarBndr] -> Maybe Kind -> ConQ -> [DerivClauseQ]
+         -> DecQ
 newtypeD ctxt tc tvs ksig con derivs =
   do
     ctxt1 <- ctxt
     con1 <- con
-    derivs1 <- derivs
+    derivs1 <- sequence derivs
     return (NewtypeD ctxt1 tc tvs ksig con1 derivs1)
 
 classD :: CxtQ -> Name -> [TyVarBndr] -> [FunDep] -> [DecQ] -> DecQ
@@ -369,12 +387,17 @@ classD ctxt cls tvs fds decs =
     return $ ClassD ctxt1 cls tvs fds decs1
 
 instanceD :: CxtQ -> TypeQ -> [DecQ] -> DecQ
-instanceD ctxt ty decs =
+instanceD = instanceWithOverlapD Nothing
+
+instanceWithOverlapD :: Maybe Overlap -> CxtQ -> TypeQ -> [DecQ] -> DecQ
+instanceWithOverlapD o ctxt ty decs =
   do
     ctxt1 <- ctxt
     decs1 <- sequence decs
     ty1   <- ty
-    return $ InstanceD ctxt1 ty1 decs1
+    return $ InstanceD o ctxt1 ty1 decs1
+
+
 
 sigD :: Name -> TypeQ -> DecQ
 sigD fun ty = liftM (SigD fun) $ ty
@@ -432,22 +455,24 @@ pragAnnD target expr
 pragLineD :: Int -> String -> DecQ
 pragLineD line file = return $ PragmaD $ LineP line file
 
-dataInstD :: CxtQ -> Name -> [TypeQ] -> Maybe Kind -> [ConQ] -> CxtQ -> DecQ
+dataInstD :: CxtQ -> Name -> [TypeQ] -> Maybe Kind -> [ConQ] -> [DerivClauseQ]
+          -> DecQ
 dataInstD ctxt tc tys ksig cons derivs =
   do
     ctxt1 <- ctxt
     tys1  <- sequence tys
     cons1 <- sequence cons
-    derivs1 <- derivs
+    derivs1 <- sequence derivs
     return (DataInstD ctxt1 tc tys1 ksig cons1 derivs1)
 
-newtypeInstD :: CxtQ -> Name -> [TypeQ] -> Maybe Kind -> ConQ -> CxtQ -> DecQ
+newtypeInstD :: CxtQ -> Name -> [TypeQ] -> Maybe Kind -> ConQ -> [DerivClauseQ]
+             -> DecQ
 newtypeInstD ctxt tc tys ksig con derivs =
   do
     ctxt1 <- ctxt
     tys1  <- sequence tys
     con1  <- con
-    derivs1 <- derivs
+    derivs1 <- sequence derivs
     return (NewtypeInstD ctxt1 tc tys1 ksig con1 derivs1)
 
 tySynInstD :: Name -> TySynEqnQ -> DecQ
@@ -471,14 +496,14 @@ closedTypeFamilyD tc tvs result injectivity eqns =
   do eqns1 <- sequence eqns
      return (ClosedTypeFamilyD (TypeFamilyHead tc tvs result injectivity) eqns1)
 
--- These were deprecated in GHC 7.12 with a plan to remove them in 7.14. If you
+-- These were deprecated in GHC 8.0 with a plan to remove them in 8.2. If you
 -- remove this check please also:
 --   1. remove deprecated functions
 --   2. remove CPP language extension from top of this module
 --   3. remove the FamFlavour data type from Syntax module
 --   4. make sure that all references to FamFlavour are gone from DsMeta,
 --      Convert, TcSplice (follows from 3)
-#if __GLASGOW_HASKELL__ > 800
+#if __GLASGOW_HASKELL__ >= 802
 #error Remove deprecated familyNoKindD, familyKindD, closedTypeFamilyNoKindD and closedTypeFamilyKindD
 #endif
 
@@ -514,17 +539,34 @@ roleAnnotD :: Name -> [Role] -> DecQ
 roleAnnotD name roles = return $ RoleAnnotD name roles
 
 standaloneDerivD :: CxtQ -> TypeQ -> DecQ
-standaloneDerivD ctxtq tyq =
+standaloneDerivD = standaloneDerivWithStrategyD Nothing
+
+standaloneDerivWithStrategyD :: Maybe DerivStrategy -> CxtQ -> TypeQ -> DecQ
+standaloneDerivWithStrategyD ds ctxtq tyq =
   do
     ctxt <- ctxtq
     ty   <- tyq
-    return $ StandaloneDerivD ctxt ty
+    return $ StandaloneDerivD ds ctxt ty
 
 defaultSigD :: Name -> TypeQ -> DecQ
 defaultSigD n tyq =
   do
     ty <- tyq
     return $ DefaultSigD n ty
+
+-- | Pattern synonym declaration
+patSynD :: Name -> PatSynArgsQ -> PatSynDirQ -> PatQ -> DecQ
+patSynD name args dir pat = do
+  args'    <- args
+  dir'     <- dir
+  pat'     <- pat
+  return (PatSynD name args' dir' pat')
+
+-- | Pattern synonym type signature
+patSynSigD :: Name -> TypeQ -> DecQ
+patSynSigD nm ty =
+  do ty' <- ty
+     return $ PatSynSigD nm ty'
 
 tySynEqn :: [TypeQ] -> TypeQ -> TySynEqnQ
 tySynEqn lhs rhs =
@@ -535,6 +577,10 @@ tySynEqn lhs rhs =
 
 cxt :: [PredQ] -> CxtQ
 cxt = sequence
+
+derivClause :: Maybe DerivStrategy -> [PredQ] -> DerivClauseQ
+derivClause ds p = do p' <- cxt p
+                      return $ DerivClause ds p'
 
 normalC :: Name -> [BangTypeQ] -> ConQ
 normalC con strtys = liftM (NormalC con) $ sequence strtys
@@ -550,13 +596,11 @@ infixC st1 con st2 = do st1' <- st1
 forallC :: [TyVarBndr] -> CxtQ -> ConQ -> ConQ
 forallC ns ctxt con = liftM2 (ForallC ns) ctxt con
 
-gadtC :: [Name] -> [StrictTypeQ] -> Name -> [TypeQ] -> ConQ
-gadtC cons strtys ty idx = liftM3 (GadtC cons) (sequence strtys)
-                                  (return ty)  (sequence idx)
+gadtC :: [Name] -> [StrictTypeQ] -> TypeQ -> ConQ
+gadtC cons strtys ty = liftM2 (GadtC cons) (sequence strtys) ty
 
-recGadtC :: [Name] -> [VarStrictTypeQ] -> Name -> [TypeQ] -> ConQ
-recGadtC cons varstrtys ty idx = liftM3 (RecGadtC cons) (sequence varstrtys)
-                                        (return ty)     (sequence idx)
+recGadtC :: [Name] -> [VarStrictTypeQ] -> TypeQ -> ConQ
+recGadtC cons varstrtys ty = liftM2 (RecGadtC cons) (sequence varstrtys) ty
 
 -------------------------------------------------------------------------------
 -- *   Type
@@ -608,6 +652,9 @@ tupleT i = return (TupleT i)
 unboxedTupleT :: Int -> TypeQ
 unboxedTupleT i = return (UnboxedTupleT i)
 
+unboxedSumT :: SumArity -> TypeQ
+unboxedSumT arity = return (UnboxedSumT arity)
+
 sigT :: TypeQ -> Kind -> TypeQ
 sigT t k
   = do
@@ -658,6 +705,20 @@ noSourceStrictness = return NoSourceStrictness
 sourceLazy         = return SourceLazy
 sourceStrict       = return SourceStrict
 
+{-# DEPRECATED isStrict
+    ["Use 'bang'. See https://ghc.haskell.org/trac/ghc/wiki/Migration/8.0. ",
+     "Example usage: 'bang noSourceUnpackedness sourceStrict'"] #-}
+{-# DEPRECATED notStrict
+    ["Use 'bang'. See https://ghc.haskell.org/trac/ghc/wiki/Migration/8.0. ",
+     "Example usage: 'bang noSourceUnpackedness noSourceStrictness'"] #-}
+{-# DEPRECATED unpacked
+    ["Use 'bang'. See https://ghc.haskell.org/trac/ghc/wiki/Migration/8.0. ",
+     "Example usage: 'bang sourceUnpack sourceStrict'"] #-}
+isStrict, notStrict, unpacked :: Q Strict
+isStrict = bang noSourceUnpackedness sourceStrict
+notStrict = bang noSourceUnpackedness noSourceStrictness
+unpacked = bang sourceUnpack sourceStrict
+
 bang :: SourceUnpackednessQ -> SourceStrictnessQ -> BangQ
 bang u s = do u' <- u
               s' <- s
@@ -688,8 +749,6 @@ numTyLit n = if n >= 0 then return (NumTyLit n)
 
 strTyLit :: String -> TyLitQ
 strTyLit s = return (StrTyLit s)
-
-
 
 -------------------------------------------------------------------------------
 -- *   Kind
@@ -800,6 +859,27 @@ typeAnnotation = TypeAnnotation
 
 moduleAnnotation :: AnnTarget
 moduleAnnotation = ModuleAnnotation
+
+-------------------------------------------------------------------------------
+-- * Pattern Synonyms (sub constructs)
+
+unidir, implBidir :: PatSynDirQ
+unidir    = return Unidir
+implBidir = return ImplBidir
+
+explBidir :: [ClauseQ] -> PatSynDirQ
+explBidir cls = do
+  cls' <- sequence cls
+  return (ExplBidir cls')
+
+prefixPatSyn :: [Name] -> PatSynArgsQ
+prefixPatSyn args = return $ PrefixPatSyn args
+
+recordPatSyn :: [Name] -> PatSynArgsQ
+recordPatSyn sels = return $ RecordPatSyn sels
+
+infixPatSyn :: Name -> Name -> PatSynArgsQ
+infixPatSyn arg1 arg2 = return $ InfixPatSyn arg1 arg2
 
 --------------------------------------------------------------
 -- * Useful helper function

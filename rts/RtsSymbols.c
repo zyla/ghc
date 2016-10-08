@@ -58,18 +58,6 @@
 #if defined(mingw32_HOST_OS)
 #define RTS_POSIX_ONLY_SYMBOLS  /**/
 
-#if HAVE_GETTIMEOFDAY
-#define RTS_MINGW_GETTIMEOFDAY_SYM SymI_NeedsProto(gettimeofday)
-#else
-#define RTS_MINGW_GETTIMEOFDAY_SYM /**/
-#endif
-
-#if HAVE___MINGW_VFPRINTF
-#define RTS___MINGW_VFPRINTF_SYM SymI_HasProto(__mingw_vfprintf)
-#else
-#define RTS___MINGW_VFPRINTF_SYM /**/
-#endif
-
 #if defined(i386_HOST_ARCH)
 #define RTS_WIN32_ONLY(X) X
 #else
@@ -82,327 +70,135 @@
 #define RTS_WIN64_ONLY(X) /**/
 #endif
 
-/* These are statically linked from the mingw libraries into the ghc
-   executable, so we have to employ this hack. */
 #define RTS_MINGW_ONLY_SYMBOLS                           \
       SymI_HasProto(stg_asyncReadzh)                     \
       SymI_HasProto(stg_asyncWritezh)                    \
       SymI_HasProto(stg_asyncDoProczh)                   \
       SymI_HasProto(getWin32ProgArgv)                    \
       SymI_HasProto(setWin32ProgArgv)                    \
-      SymI_HasProto(memset)                              \
-      SymI_HasProto(inet_ntoa)                           \
-      SymI_HasProto(inet_addr)                           \
-      SymI_HasProto(htonl)                               \
-      SymI_HasProto(recvfrom)                            \
-      SymI_HasProto(listen)                              \
-      SymI_HasProto(bind)                                \
-      SymI_HasProto(shutdown)                            \
-      SymI_HasProto(connect)                             \
-      SymI_HasProto(htons)                               \
-      SymI_HasProto(ntohs)                               \
-      SymI_HasProto(getservbyname)                       \
-      SymI_HasProto(getservbyport)                       \
-      SymI_HasProto(getprotobynumber)                    \
-      SymI_HasProto(getprotobyname)                      \
-      SymI_HasProto(gethostbyname)                       \
-      SymI_HasProto(gethostbyaddr)                       \
-      SymI_HasProto(gethostname)                         \
-      SymI_HasProto(strcpy)                              \
-      SymI_HasProto(strncpy)                             \
-      SymI_HasProto(abort)                               \
-      SymI_HasProto(isxdigit)                            \
-      SymI_HasProto(isupper)                             \
-      SymI_HasProto(ispunct)                             \
-      SymI_HasProto(islower)                             \
-      SymI_HasProto(isspace)                             \
-      SymI_HasProto(isprint)                             \
-      SymI_HasProto(isdigit)                             \
-      SymI_HasProto(iscntrl)                             \
-      SymI_HasProto(isalpha)                             \
-      SymI_HasProto(isalnum)                             \
-      SymI_HasProto(isascii)                             \
-      RTS___MINGW_VFPRINTF_SYM                           \
-      SymI_HasProto(strcmp)                              \
-      SymI_HasProto(memmove)                             \
-      SymI_HasProto(realloc)                             \
-      SymI_HasProto(malloc)                              \
-      SymI_HasProto(pow)                                 \
-      SymI_HasProto(tanh)                                \
-      SymI_HasProto(cosh)                                \
-      SymI_HasProto(sinh)                                \
-      SymI_HasProto(atan)                                \
-      SymI_HasProto(acos)                                \
-      SymI_HasProto(asin)                                \
-      SymI_HasProto(tan)                                 \
-      SymI_HasProto(cos)                                 \
-      SymI_HasProto(sin)                                 \
-      SymI_HasProto(exp)                                 \
-      SymI_HasProto(log)                                 \
-      SymI_HasProto(sqrt)                                \
-      SymI_HasProto(powf)                                \
-      SymI_HasProto(tanhf)                               \
-      SymI_HasProto(coshf)                               \
-      SymI_HasProto(sinhf)                               \
-      SymI_HasProto(atanf)                               \
-      SymI_HasProto(acosf)                               \
-      SymI_HasProto(asinf)                               \
-      SymI_HasProto(tanf)                                \
-      SymI_HasProto(cosf)                                \
-      SymI_HasProto(sinf)                                \
-      SymI_HasProto(expf)                                \
-      SymI_HasProto(logf)                                \
-      SymI_HasProto(sqrtf)                               \
-      SymI_HasProto(erf)                                 \
-      SymI_HasProto(erfc)                                \
-      SymI_HasProto(erff)                                \
-      SymI_HasProto(erfcf)                               \
-      SymI_HasProto(expm1)                               \
-      SymI_HasProto(expm1f)                              \
-      SymI_HasProto(log1p)                               \
-      SymI_HasProto(log1pf)                              \
-      SymI_HasProto(memcpy)                              \
       SymI_HasProto(rts_InstallConsoleEvent)             \
       SymI_HasProto(rts_ConsoleHandlerDone)              \
-      SymI_NeedsProto(mktime)                            \
-      SymI_NeedsProto(localtime)                         \
-      SymI_NeedsProto(gmtime)                            \
-      SymI_NeedsProto(opendir)                           \
-      SymI_NeedsProto(readdir)                           \
-      SymI_NeedsProto(rewinddir)                         \
+      SymI_HasProto(atexit)                              \
       RTS_WIN32_ONLY(SymI_NeedsProto(__chkstk_ms))       \
       RTS_WIN64_ONLY(SymI_NeedsProto(___chkstk_ms))      \
-      SymI_NeedsProto(localeconv)                        \
-      SymI_HasProto(close)                               \
-      SymI_HasProto(read)                                \
-      SymI_HasProto(dup)                                 \
-      SymI_HasProto(dup2)                                \
-      SymI_HasProto(write)                               \
-      SymI_NeedsProto(getpid)                            \
-      SymI_HasProto(access)                              \
-      SymI_HasProto(chmod)                               \
-      SymI_HasProto(creat)                               \
-      SymI_HasProto(umask)                               \
-      SymI_HasProto(unlink)                              \
-      SymI_HasProto(_errno)                              \
-      SymI_NeedsProto(ftruncate64)                       \
-      SymI_HasProto(setmode)                             \
-      SymI_HasProto(_wstat64)                            \
-      SymI_HasProto(_fstat64)                            \
-      SymI_HasProto(_wsopen)                             \
       RTS_WIN32_ONLY(SymI_HasProto(_imp___environ))      \
       RTS_WIN64_ONLY(SymI_HasProto(__imp__environ))      \
       RTS_WIN32_ONLY(SymI_HasProto(_imp___iob))          \
-      RTS_WIN64_ONLY(SymI_HasProto(__iob_func))          \
-      SymI_HasProto(GetFileAttributesA)                  \
-      SymI_HasProto(GetFileInformationByHandle)          \
-      SymI_HasProto(GetFileType)                         \
-      SymI_HasProto(GetLastError)                        \
-      SymI_HasProto(QueryPerformanceFrequency)           \
-      SymI_HasProto(QueryPerformanceCounter)             \
-      SymI_HasProto(GetTickCount)                        \
-      SymI_HasProto(WaitForSingleObject)                 \
-      SymI_HasProto(PeekConsoleInputA)                   \
-      SymI_HasProto(ReadConsoleInputA)                   \
-      SymI_HasProto(PeekNamedPipe)                       \
-      SymI_HasProto(select)                              \
-      SymI_HasProto(isatty)                              \
-      SymI_HasProto(_get_osfhandle)                      \
-      SymI_HasProto(GetConsoleMode)                      \
-      SymI_HasProto(SetConsoleMode)                      \
-      SymI_HasProto(FlushConsoleInputBuffer)             \
-      SymI_HasProto(free)                                \
-      SymI_NeedsProto(raise)                             \
-      SymI_NeedsProto(_getpid)                           \
-      SymI_HasProto(getc)                                \
-      SymI_HasProto(ungetc)                              \
-      SymI_HasProto(puts)                                \
-      SymI_HasProto(putc)                                \
-      SymI_HasProto(putchar)                             \
-      SymI_HasProto(fputc)                               \
-      SymI_HasProto(fread)                               \
-      SymI_HasProto(fwrite)                              \
-      SymI_HasProto(ferror)                              \
-      SymI_HasProto(printf)                              \
-      SymI_HasProto(fprintf)                             \
-      SymI_HasProto(sprintf)                             \
-      SymI_HasProto(vsprintf)                            \
-      SymI_HasProto(sscanf)                              \
-      SymI_HasProto(ldexp)                               \
-      SymI_HasProto(strlen)                              \
-      SymI_HasProto(strnlen)                             \
-      SymI_HasProto(strchr)                              \
-      SymI_HasProto(strtol)                              \
-      SymI_HasProto(strerror)                            \
-      SymI_HasProto(memchr)                              \
-      SymI_HasProto(memcmp)                              \
-      SymI_HasProto(wcscpy)                              \
-      SymI_HasProto(wcslen)                              \
-      SymI_HasProto(_lseeki64)                           \
-      SymI_HasProto(_wchmod)                             \
-      SymI_HasProto(closesocket)                         \
-      SymI_HasProto(send)                                \
-      SymI_HasProto(recv)                                \
-      SymI_HasProto(bsearch)                             \
-      SymI_HasProto(CommandLineToArgvW)                  \
-      SymI_HasProto(CreateBitmap)                        \
-      SymI_HasProto(CreateBitmapIndirect)                \
-      SymI_HasProto(CreateCompatibleBitmap)              \
-      SymI_HasProto(CreateDIBPatternBrushPt)             \
-      SymI_HasProto(CreateDIBitmap)                      \
-      SymI_HasProto(SetBitmapDimensionEx)                \
-      SymI_HasProto(GetBitmapDimensionEx)                \
-      SymI_HasProto(GetStockObject)                      \
-      SymI_HasProto(GetObjectW)                          \
-      SymI_HasProto(DeleteObject)                        \
-      SymI_HasProto(SetDIBits)                           \
-      SymI_HasProto(GetDIBits)                           \
-      SymI_HasProto(CreateSolidBrush)                    \
-      SymI_HasProto(CreateHatchBrush)                    \
-      SymI_HasProto(CreatePatternBrush)                  \
-      SymI_HasProto(CreateFontW)                         \
-      SymI_HasProto(AngleArc)                            \
-      SymI_HasProto(Arc)                                 \
-      SymI_HasProto(ArcTo)                               \
-      SymI_HasProto(BeginPath)                           \
-      SymI_HasProto(BitBlt)                              \
-      SymI_HasProto(CancelDC)                            \
-      SymI_HasProto(Chord)                               \
-      SymI_HasProto(CloseFigure)                         \
-      SymI_HasProto(CombineRgn)                          \
-      SymI_HasProto(CreateCompatibleDC)                  \
-      SymI_HasProto(CreateEllipticRgn)                   \
-      SymI_HasProto(CreateEllipticRgnIndirect)           \
-      SymI_HasProto(CreatePen)                           \
-      SymI_HasProto(CreatePolygonRgn)                    \
-      SymI_HasProto(CreateRectRgn)                       \
-      SymI_HasProto(CreateRectRgnIndirect)               \
-      SymI_HasProto(CreateRoundRectRgn)                  \
-      SymI_HasProto(DeleteDC)                            \
-      SymI_HasProto(Ellipse)                             \
-      SymI_HasProto(EndPath)                             \
-      SymI_HasProto(EqualRgn)                            \
-      SymI_HasProto(ExtSelectClipRgn)                    \
-      SymI_HasProto(FillPath)                            \
-      SymI_HasProto(FillRgn)                             \
-      SymI_HasProto(FlattenPath)                         \
-      SymI_HasProto(FrameRgn)                            \
-      SymI_HasProto(GetArcDirection)                     \
-      SymI_HasProto(GetBkColor)                          \
-      SymI_HasProto(GetBkMode)                           \
-      SymI_HasProto(GetBrushOrgEx)                       \
-      SymI_HasProto(GetCurrentObject)                    \
-      SymI_HasProto(GetDCOrgEx)                          \
-      SymI_HasProto(GetGraphicsMode)                     \
-      SymI_HasProto(GetMiterLimit)                       \
-      SymI_HasProto(GetPolyFillMode)                     \
-      SymI_HasProto(GetRgnBox)                           \
-      SymI_HasProto(GetStretchBltMode)                   \
-      SymI_HasProto(GetTextAlign)                        \
-      SymI_HasProto(GetTextCharacterExtra)               \
-      SymI_HasProto(GetTextColor)                        \
-      SymI_HasProto(GetTextExtentPoint32W)               \
-      SymI_HasProto(InvertRgn)                           \
-      SymI_HasProto(LineTo)                              \
-      SymI_HasProto(MaskBlt)                             \
-      SymI_HasProto(MoveToEx)                            \
-      SymI_HasProto(OffsetRgn)                           \
-      SymI_HasProto(PaintRgn)                            \
-      SymI_HasProto(PathToRegion)                        \
-      SymI_HasProto(Pie)                                 \
-      SymI_HasProto(PlgBlt)                              \
-      SymI_HasProto(PolyBezier)                          \
-      SymI_HasProto(PolyBezierTo)                        \
-      SymI_HasProto(Polygon)                             \
-      SymI_HasProto(Polyline)                            \
-      SymI_HasProto(PolylineTo)                          \
-      SymI_HasProto(PtInRegion)                          \
-      SymI_HasProto(Rectangle)                           \
-      SymI_HasProto(RectInRegion)                        \
-      SymI_HasProto(RestoreDC)                           \
-      SymI_HasProto(RoundRect)                           \
-      SymI_HasProto(SaveDC)                              \
-      SymI_HasProto(SelectClipPath)                      \
-      SymI_HasProto(SelectClipRgn)                       \
-      SymI_HasProto(SelectObject)                        \
-      SymI_HasProto(SelectPalette)                       \
-      SymI_HasProto(SetArcDirection)                     \
-      SymI_HasProto(SetBkColor)                          \
-      SymI_HasProto(SetBkMode)                           \
-      SymI_HasProto(SetBrushOrgEx)                       \
-      SymI_HasProto(SetGraphicsMode)                     \
-      SymI_HasProto(SetMiterLimit)                       \
-      SymI_HasProto(SetPolyFillMode)                     \
-      SymI_HasProto(SetStretchBltMode)                   \
-      SymI_HasProto(SetTextAlign)                        \
-      SymI_HasProto(SetTextCharacterExtra)               \
-      SymI_HasProto(SetTextColor)                        \
-      SymI_HasProto(StretchBlt)                          \
-      SymI_HasProto(StrokeAndFillPath)                   \
-      SymI_HasProto(StrokePath)                          \
-      SymI_HasProto(TextOutW)                            \
-      SymI_HasProto(timeGetTime)                         \
-      SymI_HasProto(WidenPath)                           \
-      SymI_HasProto(GetFileSecurityW)                    \
-      SymI_HasProto(RegCloseKey)                         \
-      SymI_HasProto(RegConnectRegistryW)                 \
-      SymI_HasProto(RegCreateKeyExW)                     \
-      SymI_HasProto(RegCreateKeyW)                       \
-      SymI_HasProto(RegDeleteKeyW)                       \
-      SymI_HasProto(RegDeleteValueW)                     \
-      SymI_HasProto(RegEnumKeyW)                         \
-      SymI_HasProto(RegEnumValueW)                       \
-      SymI_HasProto(RegFlushKey)                         \
-      SymI_HasProto(RegLoadKeyW)                         \
-      SymI_HasProto(RegNotifyChangeKeyValue)             \
-      SymI_HasProto(RegOpenKeyExW)                       \
-      SymI_HasProto(RegOpenKeyW)                         \
-      SymI_HasProto(RegQueryInfoKeyW)                    \
-      SymI_HasProto(RegQueryValueExW)                    \
-      SymI_HasProto(RegQueryValueW)                      \
-      SymI_HasProto(RegReplaceKeyW)                      \
-      SymI_HasProto(RegRestoreKeyW)                      \
-      SymI_HasProto(RegSaveKeyW)                         \
-      SymI_HasProto(RegSetValueExW)                      \
-      SymI_HasProto(RegSetValueW)                        \
-      SymI_HasProto(RegUnLoadKeyW)                       \
-      SymI_HasProto(SHGetFolderPathW)                    \
-      RTS_WIN32_ONLY(SymI_HasProto(SetWindowLongW))      \
-      RTS_WIN32_ONLY(SymI_HasProto(GetWindowLongW))      \
-      RTS_WIN64_ONLY(SymI_HasProto(SetWindowLongPtrW))   \
-      RTS_WIN64_ONLY(SymI_HasProto(GetWindowLongPtrW))   \
-      SymI_HasProto(MenuItemFromPoint)                   \
-      SymI_HasProto(ChildWindowFromPoint)                \
-      SymI_HasProto(ChildWindowFromPointEx)              \
-      SymI_HasProto(UnmapViewOfFile)                     \
-      SymI_HasProto(CloseHandle)                         \
-      SymI_HasProto(FreeLibrary)                         \
-      SymI_HasProto(GetMessageW)                         \
-      SymI_HasProto(TranslateMessage)                    \
-      SymI_HasProto(DispatchMessageW)                    \
-      SymI_HasProto(DefWindowProcW)                      \
-      SymI_HasProto(GlobalAlloc)                         \
-      SymI_HasProto(GlobalFree)                          \
-      SymI_HasProto(CreateFileW)                         \
-      SymI_HasProto(WriteFile)                           \
-      SymI_HasProto(FormatMessageW)                      \
-      SymI_NeedsProto(_localtime64)                      \
-      SymI_NeedsProto(_tzname)                           \
-      SymI_NeedsProto(_timezone)                         \
-      SymI_HasProto(CreatePipe)                          \
-      SymI_HasProto(SetHandleInformation)                \
-      SymI_HasProto(GetStdHandle)                        \
-      SymI_HasProto(GetCurrentProcess)                   \
-      SymI_HasProto(DuplicateHandle)                     \
-      SymI_HasProto(CreateProcessW)                      \
-      SymI_HasProto(TerminateProcess)                    \
-      SymI_HasProto(_open_osfhandle)                     \
-      SymI_HasProto(GetExitCodeProcess)                  \
-      RTS_MINGW_GETTIMEOFDAY_SYM                         \
-      SymI_NeedsProto(closedir)
+      RTS_WIN64_ONLY(SymI_HasProto(__iob_func))
 
+#define RTS_MINGW_COMPAT_SYMBOLS                         \
+      SymI_HasProto_deprecated(access)                   \
+      SymI_HasProto_deprecated(cabs)                     \
+      SymI_HasProto_deprecated(cgets)                    \
+      SymI_HasProto_deprecated(chdir)                    \
+      SymI_HasProto_deprecated(chmod)                    \
+      SymI_HasProto_deprecated(chsize)                   \
+      SymI_HasProto_deprecated(close)                    \
+      SymI_HasProto_deprecated(cprintf)                  \
+      SymI_HasProto_deprecated(cputs)                    \
+      SymI_HasProto_deprecated(creat)                    \
+      SymI_HasProto_deprecated(cscanf)                   \
+      SymI_HasProto_deprecated(cwait)                    \
+      SymI_HasProto_deprecated(dup)                      \
+      SymI_HasProto_deprecated(dup2)                     \
+      SymI_HasProto_deprecated(ecvt)                     \
+      SymI_HasProto_deprecated(eof)                      \
+      SymI_HasProto_deprecated(execl)                    \
+      SymI_HasProto_deprecated(execle)                   \
+      SymI_HasProto_deprecated(execlp)                   \
+      SymI_HasProto_deprecated(execlpe)                  \
+      SymI_HasProto_deprecated(execv)                    \
+      SymI_HasProto_deprecated(execve)                   \
+      SymI_HasProto_deprecated(execvp)                   \
+      SymI_HasProto_deprecated(execvpe)                  \
+      SymI_HasProto_deprecated(fcloseall)                \
+      SymI_HasProto_deprecated(fcvt)                     \
+      SymI_HasProto_deprecated(fdopen)                   \
+      SymI_HasProto_deprecated(fgetchar)                 \
+      SymI_HasProto_deprecated(filelength)               \
+      SymI_HasProto_deprecated(fileno)                   \
+      SymI_HasProto_deprecated(flushall)                 \
+      SymI_HasProto_deprecated(fputchar)                 \
+      SymI_HasProto_deprecated(gcvt)                     \
+      SymI_HasProto_deprecated(getch)                    \
+      SymI_HasProto_deprecated(getche)                   \
+      SymI_HasProto_deprecated(getcwd)                   \
+      SymI_HasProto_deprecated(getpid)                   \
+      SymI_HasProto_deprecated(getw)                     \
+      SymI_HasProto_deprecated(hypot)                    \
+      SymI_HasProto_deprecated(inp)                      \
+      SymI_HasProto_deprecated(inpw)                     \
+      SymI_HasProto_deprecated(isascii)                  \
+      SymI_HasProto_deprecated(isatty)                   \
+      SymI_HasProto_deprecated(iscsym)                   \
+      SymI_HasProto_deprecated(iscsymf)                  \
+      SymI_HasProto_deprecated(itoa)                     \
+      SymI_HasProto_deprecated(j0)                       \
+      SymI_HasProto_deprecated(j1)                       \
+      SymI_HasProto_deprecated(jn)                       \
+      SymI_HasProto_deprecated(kbhit)                    \
+      SymI_HasProto_deprecated(lfind)                    \
+      SymI_HasProto_deprecated(locking)                  \
+      SymI_HasProto_deprecated(lsearch)                  \
+      SymI_HasProto_deprecated(lseek)                    \
+      SymI_HasProto_deprecated(ltoa)                     \
+      SymI_HasProto_deprecated(memccpy)                  \
+      SymI_HasProto_deprecated(memicmp)                  \
+      SymI_HasProto_deprecated(mkdir)                    \
+      SymI_HasProto_deprecated(mktemp)                   \
+      SymI_HasProto_deprecated(open)                     \
+      SymI_HasProto_deprecated(outp)                     \
+      SymI_HasProto_deprecated(outpw)                    \
+      SymI_HasProto_deprecated(putch)                    \
+      SymI_HasProto_deprecated(putenv)                   \
+      SymI_HasProto_deprecated(putw)                     \
+      SymI_HasProto_deprecated(read)                     \
+      SymI_HasProto_deprecated(rmdir)                    \
+      SymI_HasProto_deprecated(rmtmp)                    \
+      SymI_HasProto_deprecated(setmode)                  \
+      SymI_HasProto_deprecated(sopen)                    \
+      SymI_HasProto_deprecated(spawnl)                   \
+      SymI_HasProto_deprecated(spawnle)                  \
+      SymI_HasProto_deprecated(spawnlp)                  \
+      SymI_HasProto_deprecated(spawnlpe)                 \
+      SymI_HasProto_deprecated(spawnv)                   \
+      SymI_HasProto_deprecated(spawnve)                  \
+      SymI_HasProto_deprecated(spawnvp)                  \
+      SymI_HasProto_deprecated(spawnvpe)                 \
+      SymI_HasProto_deprecated(strcmpi)                  \
+      SymI_HasProto_deprecated(strdup)                   \
+      SymI_HasProto_deprecated(stricmp)                  \
+      SymI_HasProto_deprecated(strlwr)                   \
+      SymI_HasProto_deprecated(strnicmp)                 \
+      SymI_HasProto_deprecated(strnset)                  \
+      SymI_HasProto_deprecated(strrev)                   \
+      SymI_HasProto_deprecated(strset)                   \
+      SymI_HasProto_deprecated(strupr)                   \
+      SymI_HasProto_deprecated(swab)                     \
+      SymI_HasProto_deprecated(tell)                     \
+      SymI_HasProto_deprecated(tempnam)                  \
+      SymI_HasProto_deprecated(toascii)                  \
+      SymI_HasProto_deprecated(tzset)                    \
+      SymI_HasProto_deprecated(ultoa)                    \
+      SymI_HasProto_deprecated(umask)                    \
+      SymI_HasProto_deprecated(ungetch)                  \
+      SymI_HasProto_deprecated(unlink)                   \
+      SymI_HasProto_deprecated(wcsdup)                   \
+      SymI_HasProto_deprecated(wcsicmp)                  \
+      SymI_HasProto_deprecated(wcsicoll)                 \
+      SymI_HasProto_deprecated(wcslwr)                   \
+      SymI_HasProto_deprecated(wcsnicmp)                 \
+      SymI_HasProto_deprecated(wcsnset)                  \
+      SymI_HasProto_deprecated(wcsrev)                   \
+      SymI_HasProto_deprecated(wcsset)                   \
+      SymI_HasProto_deprecated(wcsupr)                   \
+      SymI_HasProto_deprecated(write)                    \
+      SymI_HasProto_deprecated(y0)                       \
+      SymI_HasProto_deprecated(y1)                       \
+      SymI_HasProto_deprecated(yn)
 #else
 #define RTS_MINGW_ONLY_SYMBOLS /**/
+#define RTS_MINGW_COMPAT_SYMBOLS /**/
 #endif
 
 
@@ -644,7 +440,10 @@
       SymI_HasProto(RET_NEW_ctr)                        \
       SymI_HasProto(RET_OLD_ctr)                        \
       SymI_HasProto(RET_UNBOXED_TUP_ctr)                \
-      SymI_HasProto(RET_SEMI_loads_avoided)
+      SymI_HasProto(RET_SEMI_loads_avoided)             \
+      SymI_HasProto(RET_NEW_hst)                        \
+      SymI_HasProto(RET_OLD_hst)                        \
+      SymI_HasProto(RET_UNBOXED_TUP_hst)
 
 
 // On most platforms, the garbage collector rewrites references
@@ -734,6 +533,15 @@
       SymI_HasProto(stg_catchSTMzh)                                     \
       SymI_HasProto(stg_checkzh)                                        \
       SymI_HasProto(stg_clearCCSzh)                                     \
+      SymI_HasProto(stg_compactNewzh)                                   \
+      SymI_HasProto(stg_compactAppendzh)                                \
+      SymI_HasProto(stg_compactResizzezh)                               \
+      SymI_HasProto(stg_compactContainszh)                              \
+      SymI_HasProto(stg_compactContainsAnyzh)                           \
+      SymI_HasProto(stg_compactGetFirstBlockzh)                         \
+      SymI_HasProto(stg_compactGetNextBlockzh)                          \
+      SymI_HasProto(stg_compactAllocateBlockzh)                         \
+      SymI_HasProto(stg_compactFixupPointerszh)                         \
       SymI_HasProto(closure_flags)                                      \
       SymI_HasProto(cmp_thread)                                         \
       SymI_HasProto(createAdjustor)                                     \
@@ -826,6 +634,8 @@
       SymI_HasProto(stg_casMutVarzh)                                    \
       SymI_HasProto(stg_newPinnedByteArrayzh)                           \
       SymI_HasProto(stg_newAlignedPinnedByteArrayzh)                    \
+      SymI_HasProto(stg_isByteArrayPinnedzh)                            \
+      SymI_HasProto(stg_isMutableByteArrayPinnedzh)                     \
       SymI_HasProto(stg_shrinkMutableByteArrayzh)                       \
       SymI_HasProto(stg_resizzeMutableByteArrayzh)                      \
       SymI_HasProto(newSpark)                                           \
@@ -1015,7 +825,13 @@
       SymI_HasProto(stg_waitWritezh)                                    \
       SymI_HasProto(stg_writeTVarzh)                                    \
       SymI_HasProto(stg_yieldzh)                                        \
-      SymI_NeedsProto(stg_interp_constr_entry)                          \
+      SymI_NeedsProto(stg_interp_constr1_entry)                         \
+      SymI_NeedsProto(stg_interp_constr2_entry)                         \
+      SymI_NeedsProto(stg_interp_constr3_entry)                         \
+      SymI_NeedsProto(stg_interp_constr4_entry)                         \
+      SymI_NeedsProto(stg_interp_constr5_entry)                         \
+      SymI_NeedsProto(stg_interp_constr6_entry)                         \
+      SymI_NeedsProto(stg_interp_constr7_entry)                         \
       SymI_HasProto(stg_arg_bitmaps)                                    \
       SymI_HasProto(large_alloc_lim)                                    \
       SymI_HasProto(g0)                                                 \
@@ -1063,6 +879,10 @@
       SymI_NeedsProto(__ashrdi3)                       \
       SymI_NeedsProto(__lshrdi3)                       \
       SymI_NeedsProto(__fixunsdfdi)
+#elif defined(__GNUC__) && SIZEOF_VOID_P == 8
+#define RTS_LIBGCC_SYMBOLS                             \
+      SymI_NeedsProto(__udivti3)                       \
+      SymI_NeedsProto(__umodti3)
 #else
 #define RTS_LIBGCC_SYMBOLS
 #endif
@@ -1095,6 +915,7 @@
 #endif
 #define SymI_HasProto(vvv) /**/
 #define SymI_HasProto_redirect(vvv,xxx) /**/
+#define SymI_HasProto_deprecated(vvv) /**/
 RTS_SYMBOLS
 RTS_RET_SYMBOLS
 RTS_POSIX_ONLY_SYMBOLS
@@ -1107,6 +928,7 @@ RTS_LIBFFI_SYMBOLS
 #undef SymI_NeedsDataProto
 #undef SymI_HasProto
 #undef SymI_HasProto_redirect
+#undef SymI_HasProto_deprecated
 #undef SymE_HasProto
 #undef SymE_HasDataProto
 #undef SymE_NeedsProto
@@ -1132,11 +954,19 @@ RTS_LIBFFI_SYMBOLS
     { MAYBE_LEADING_UNDERSCORE_STR(#vvv), \
       (void*)(&(xxx)) },
 
+// SymI_HasProto_deprecated allows us to redirect references from their deprecated
+// names to the undeprecated ones. e.g. access -> _access.
+// We use the hexspeak for unallocated memory 0xBAADF00D to signal the RTS
+// that this needs to be loaded from somewhere else.
+#define SymI_HasProto_deprecated(vvv)   \
+   { #vvv, (void*)0xBAADF00D },
+
 RtsSymbolVal rtsSyms[] = {
       RTS_SYMBOLS
       RTS_RET_SYMBOLS
       RTS_POSIX_ONLY_SYMBOLS
       RTS_MINGW_ONLY_SYMBOLS
+      RTS_MINGW_COMPAT_SYMBOLS
       RTS_DARWIN_ONLY_SYMBOLS
       RTS_OPENBSD_ONLY_SYMBOLS
       RTS_LIBGCC_SYMBOLS

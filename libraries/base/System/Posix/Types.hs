@@ -1,17 +1,17 @@
-{-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP
-           , NoImplicitPrelude
-           , MagicHash
-           , GeneralizedNewtypeDeriving
-  #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE Trustworthy #-}
 
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  System.Posix.Types
 -- Copyright   :  (c) The University of Glasgow 2002
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  provisional
 -- Portability :  non-portable (requires POSIX)
@@ -25,6 +25,12 @@
 module System.Posix.Types (
 
   -- * POSIX data types
+
+  -- ** Platform differences
+  -- | This module contains platform specific information about types.
+  --   __/As such the types presented on this page reflect the platform
+  --   on which the documentation was generated and may not coincide with
+  --   the types on your platform./__
 #if defined(HTYPE_DEV_T)
   CDev(..),
 #endif
@@ -67,6 +73,10 @@ module System.Posix.Types (
 #endif
 
   Fd(..),
+
+  -- See Note [Exporting constructors of marshallable foreign types]
+  -- in Foreign.Ptr for why the constructors for these newtypes are
+  -- exported.
 
 #if defined(HTYPE_NLINK_T)
   LinkCount,

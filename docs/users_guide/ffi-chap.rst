@@ -10,10 +10,10 @@ Foreign function interface (FFI)
 
 GHC (mostly) conforms to the Haskell Foreign Function Interface, whose
 definition is part of the Haskell Report on
-``http://www.haskell.org/`` <http://www.haskell.org/>`__.
+`http://www.haskell.org/ <http://www.haskell.org/>`__.
 
 FFI support is enabled by default, but can be enabled or disabled
-explicitly with the ``-XForeignFunctionInterface`` flag.
+explicitly with the :ghc-flag:`-XForeignFunctionInterface` flag.
 
 GHC implements a number of GHC-specific extensions to the FFI Addendum.
 These extensions are described in :ref:`ffi-ghcexts`, but please note
@@ -248,7 +248,7 @@ the following module:
 
 Then ``Foo_stub.h`` will contain something like this:
 
-::
+.. code-block:: c
 
     #include "HsFFI.h"
     extern HsInt foo(HsInt a0);
@@ -273,7 +273,7 @@ the Haskell runtime system explicitly.
 Let's take the example from above, and invoke it from a standalone C
 program. Here's the C code:
 
-::
+.. code-block:: c
 
     #include <stdio.h>
     #include "HsFFI.h"
@@ -317,23 +317,23 @@ matched by one (and only one) call to ``hs_exit()`` [1]_.
 .. note::
     When linking the final program, it is normally easiest to do the
     link using GHC, although this isn't essential. If you do use GHC, then
-    don't forget the flag ``-no-hs-main``\ ``-no-hs-main``, otherwise GHC
+    don't forget the flag :ghc-flag:`-no-hs-main`, otherwise GHC
     will try to link to the ``Main`` Haskell module.
 
 .. [1]
    The outermost ``hs_exit()`` will actually de-initialise the system.
-   NOTE that currently GHC's runtime cannot reliably re-initialise after
+   Note that currently GHC's runtime cannot reliably re-initialise after
    this has happened, see :ref:`infelicities-ffi`.
 
 To use ``+RTS`` flags with ``hs_init()``, we have to modify the example
 slightly. By default, GHC's RTS will only accept "safe" ``+RTS`` flags
-(see :ref:`options-linker`), and the ``-rtsopts``\ ``-rtsopts``
-link-time flag overrides this. However, ``-rtsopts`` has no effect when
-``-no-hs-main`` is in use (and the same goes for ``-with-rtsopts``). To
+(see :ref:`options-linker`), and the :ghc-flag:`-rtsopts`
+link-time flag overrides this. However, :ghc-flag:`-rtsopts` has no effect when
+:ghc-flag:`-no-hs-main` is in use (and the same goes for :ghc-flag:`-with-rtsopts`). To
 set these options we have to call a GHC-specific API instead of
 ``hs_init()``:
 
-::
+.. code-block:: c
 
     #include <stdio.h>
     #include "HsFFI.h"
@@ -371,7 +371,7 @@ external RTS interface, and we called ``hs_init_ghc()`` instead of
 is a struct with various fields that affect the behaviour of the runtime
 system. Its definition is:
 
-::
+.. code-block:: c
 
     typedef struct {
         RtsOptsEnabledEnum rts_opts_enabled;
@@ -407,7 +407,7 @@ before any Haskell code can be called, so your library should provide
 initialisation and deinitialisation entry points, implemented in C or
 C++. For example:
 
-::
+.. code-block:: c
 
     #include <stdlib.h>
     #include "HsFFI.h"
@@ -450,7 +450,7 @@ FFI was being called at the right type.
 
 GHC no longer includes external header files when compiling via C, so
 this checking is not performed. The change was made for compatibility
-with the :ref:`native code generator <native-code-gen>` (``-fasm``) and to
+with the :ref:`native code generator <native-code-gen>` (:ghc-flag:`-fasm`) and to
 comply strictly with the FFI specification, which requires that FFI calls are
 not subject to macro expansion and other CPP conversions that may be applied
 when using C header files. This approach also simplifies the inlining of foreign
@@ -513,24 +513,24 @@ Multi-threading and the FFI
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 In order to use the FFI in a multi-threaded setting, you must use the
-``-threaded`` option (see :ref:`options-linker`).
+:ghc-flag:`-threaded` option (see :ref:`options-linker`).
 
 Foreign imports and multi-threading
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 When you call a ``foreign import``\ ed function that is annotated as
-``safe`` (the default), and the program was linked using ``-threaded``,
+``safe`` (the default), and the program was linked using :ghc-flag:`-threaded`,
 then the call will run concurrently with other running Haskell threads.
-If the program was linked without ``-threaded``, then the other Haskell
+If the program was linked without :ghc-flag:`-threaded`, then the other Haskell
 threads will be blocked until the call returns.
 
 This means that if you need to make a foreign call to a function that
 takes a long time or blocks indefinitely, then you should mark it
-``safe`` and use ``-threaded``. Some library functions make such calls
+``safe`` and use :ghc-flag:`-threaded`. Some library functions make such calls
 internally; their documentation should indicate when this is the case.
 
 If you are making foreign calls from multiple Haskell threads and using
-``-threaded``, make sure that the foreign code you are calling is
+:ghc-flag:`-threaded`, make sure that the foreign code you are calling is
 thread-safe. In particularly, some GUI libraries are not thread-safe and
 require that the caller only invokes GUI methods from a single thread.
 If this is the case, you may need to restrict your GUI operations to a
@@ -539,7 +539,7 @@ single Haskell thread, and possibly also use a bound thread (see
 
 Note that foreign calls made by different Haskell threads may execute in
 *parallel*, even when the ``+RTS -N`` flag is not being used
-(:ref:`parallel-options`). The ``+RTS -N`` flag controls parallel
+(:ref:`parallel-options`). The :rts-flag:`-N` flag controls parallel
 execution of Haskell threads, but there may be an arbitrary number of
 foreign calls in progress at any one time, regardless of the ``+RTS -N``
 value.
@@ -574,7 +574,7 @@ threads, see the documentation for the :base-ref:`Control.Concurrent` module.
 Foreign exports and multi-threading
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-When the program is linked with ``-threaded``, then you may invoke
+When the program is linked with :ghc-flag:`-threaded`, then you may invoke
 ``foreign export``\ ed functions from multiple OS threads concurrently.
 The runtime system must be initialised as usual by calling
 ``hs_init()``, and this call must complete before invoking any
@@ -612,9 +612,138 @@ The GHC runtime treats program exit as a special case, to avoid the need
 to wait for blocked threads when a standalone executable exits. Since
 the program and all its threads are about to terminate at the same time
 that the code is removed from memory, it isn't necessary to ensure that
-the threads have exited first. (Unofficially, if you want to use this
-fast and loose version of ``hs_exit()``, then call
-``shutdownHaskellAndExit()`` instead).
+the threads have exited first.  If you want this fast and loose
+version of ``hs_exit()``, you can call:
+
+.. code-block:: c
+
+   void hs_exit_nowait(void);
+
+instead.  This is particularly useful if you have foreign libraries
+that need to call ``hs_exit()`` at program exit (perhaps via a C++
+destructor): in this case you should use ``hs_exit_nowait()``, because
+the thread that called ``exit()`` and is running C++ destructors is in
+a foreign call from Haskell that will never return, so ``hs_exit()``
+would deadlock.
+
+.. _hs_try_putmvar:
+
+Waking up Haskell threads from C
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Sometimes we want to be able to wake up a Haskell thread from some C
+code.  For example, when using a callback-based C API, we register a C
+callback and then we need to wait for the callback to run.
+
+One way to do this is to create a ``foreign export`` that will do
+whatever needs to be done to wake up the Haskell thread - perhaps
+``putMVar`` - and then call this from our C callback.  There are a
+couple of problems with this:
+
+1. Calling a foreign export has a lot of overhead: it creates a
+   complete new Haskell thread, for example.
+2. The call may block for a long time if a GC is in progress.  We
+   can't use this method if the C API we're calling doesn't allow
+   blocking in the callback.
+
+For these reasons GHC provides an external API to ``tryPutMVar``,
+``hs_try_putmvar``, which you can use to cheaply and asynchronously
+wake up a Haskell thread from C/C++.
+
+.. code-block:: c
+
+  void hs_try_putmvar (int capability, HsStablePtr sp);
+
+The C call ``hs_try_putmvar(cap, mvar)`` is equivalent to the Haskell
+call ``tryPutMVar mvar ()``, except that it is
+
+* non-blocking: takes a bounded, short, amount of time
+
+* asynchronous: the actual putMVar may be performed after the call
+  returns (for example, if the RTS is currently garbage collecting).
+  That's why ``hs_try_putmvar()`` doesn't return a result to say
+  whether the put succeeded.  It is your responsibility to ensure that
+  the ``MVar`` is empty; if it is full, ``hs_try_putmvar()`` will have
+  no effect.
+
+**Example**. Suppose we have a C/C++ function to call that will return and then
+invoke a callback at some point in the future, passing us some data.
+We want to wait in Haskell for the callback to be called, and retrieve
+the data.  We can do it like this:
+
+.. code-block:: haskell
+
+     import GHC.Conc (newStablePtrPrimMVar, PrimMVar)
+
+     makeExternalCall = mask_ $ do
+       mvar <- newEmptyMVar
+       sp <- newStablePtrPrimMVar mvar
+       fp <- mallocForeignPtr
+       withForeignPtr fp $ \presult -> do
+         cap <- threadCapability =<< myThreadId
+         scheduleCallback sp cap presult
+         takeMVar mvar `onException`
+           forkIO (do takeMVar mvar; touchForeignPtr fp)
+         peek presult
+
+     foreign import ccall "scheduleCallback"
+         scheduleCallback :: StablePtr PrimMVar
+                          -> Int
+                          -> Ptr Result
+                          -> IO ()
+
+And inside ``scheduleCallback``, we create a callback that will in due
+course store the result data in the ``Ptr Result``, and then call
+``hs_try_putmvar()``.
+
+There are a few things to note here.
+
+* There's a special function to create the ``StablePtr``:
+  ``newStablePtrPrimMVar``, because the RTS needs a ``StablePtr`` to
+  the primitive ``MVar#`` object, and we can't create that directly.
+  Do *not* just use ``newStablePtr`` on the ``MVar``: your program
+  will crash.
+
+* The ``StablePtr`` is freed by ``hs_try_putmvar()``.  This is because
+  it would otherwise be difficult to arrange to free the ``StablePtr``
+  reliably: we can't free it in Haskell, because if the ``takeMVar``
+  is interrupted by an asynchronous exception, then the callback will
+  fire at a later time.  We can't free it in C, because we don't know
+  when to free it (not when ``hs_try_putmvar()`` returns, because that
+  is an async call that uses the ``StablePtr`` at some time in the
+  future).
+
+* The ``mask_`` is to avoid asynchronous exceptions before the
+  ``scheduleCallback`` call, which would leak the ``StablePtr``.
+
+* We find out the current capability number and pass it to C.  This is
+  passed back to ``hs_try_putmvar``, and helps the RTS to know which
+  capability it should try to perform the ``tryPutMVar`` on.  If you
+  don't care, you can pass ``-1`` for the capability to
+  ``hs_try_putmvar``, and it will pick an arbitrary one.
+
+  Picking the right capability will help avoid unnecessary context
+  switches.  Ideally you should pass the capability that the thread
+  that will be woken up last ran on, which you can find by calling
+  ``threadCapability`` in Haskell.
+
+* If you want to also pass some data back from the C callback to
+  Haskell, this is best done by first allocating some memory in
+  Haskell to receive the data, and passing the address to C, as we did
+  in the above example.
+
+* ``takeMVar`` can be interrupted by an asynchronous exception.  If
+  this happens, the callback in C will still run at some point in the
+  future, will still write the result, and will still call
+  ``hs_try_putmvar()``.  Therefore we have to arrange that the memory
+  for the result stays alive until the callback has run, so if an
+  exception is thrown during ``takeMVar`` we fork another thread to
+  wait for the callback and hold the memory alive using
+  ``touchForeignPtr``.
+
+For a fully working example, see
+``testsuite/tests/concurrent/should_run/hs_try_putmvar001.hs`` in the
+GHC source tree.
 
 .. _ffi-floating-point:
 

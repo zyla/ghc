@@ -17,7 +17,6 @@ StgTSO * unblockOne (Capability *cap, StgTSO *tso);
 StgTSO * unblockOne_ (Capability *cap, StgTSO *tso, rtsBool allow_migrate);
 
 void checkBlockingQueues (Capability *cap, StgTSO *tso);
-void wakeBlockingQueue   (Capability *cap, StgBlockingQueue *bq);
 void tryWakeupThread     (Capability *cap, StgTSO *tso);
 void migrateThread       (Capability *from, StgTSO *tso, Capability *to);
 
@@ -41,6 +40,8 @@ StgBool isThreadBound (StgTSO* tso);
 // Overfow/underflow
 void threadStackOverflow  (Capability *cap, StgTSO *tso);
 W_   threadStackUnderflow (Capability *cap, StgTSO *tso);
+
+rtsBool performTryPutMVar(Capability *cap, StgMVar *mvar, StgClosure *value);
 
 #ifdef DEBUG
 void printThreadBlockage (StgTSO *tso);

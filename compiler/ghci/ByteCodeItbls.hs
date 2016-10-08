@@ -11,15 +11,15 @@ module ByteCodeItbls ( mkITbls ) where
 
 import ByteCodeTypes
 import GHCi
-import GHCi.RemoteTypes
 import DynFlags
 import HscTypes
 import Name             ( Name, getName )
 import NameEnv
 import DataCon          ( DataCon, dataConRepArgTys, dataConIdentity )
-import TyCon            ( TyCon, tyConFamilySize, isDataTyCon, tyConDataCons )
-import Type             ( flattenRepType, repType, typePrimRep )
-import StgCmmLayout     ( mkVirtHeapOffsets )
+import TyCon            ( TyCon, tyConFamilySize, isDataTyCon, tyConDataCons, isVoidRep )
+import RepType
+import StgCmmLayout     ( mkVirtConstrSizes )
+import StgCmmClosure    ( tagForCon, NonVoid (..) )
 import Util
 import Panic
 
@@ -54,12 +54,14 @@ make_constr_itbls hsc_env cons =
 
   mk_itbl :: DataCon -> Int -> IO (Name,ItblPtr)
   mk_itbl dcon conNo = do
-     let rep_args = [ (typePrimRep rep_arg,rep_arg)
+     let rep_args = [ NonVoid prim_rep
                     | arg <- dataConRepArgTys dcon
-                    , rep_arg <- flattenRepType (repType arg) ]
+                    , slot_ty <- repTypeSlots (repType arg)
+                    , let prim_rep = slotPrimRep slot_ty
+                    , not (isVoidRep prim_rep) ]
 
-         (tot_wds, ptr_wds, _) =
-             mkVirtHeapOffsets dflags False{-not a THUNK-} rep_args
+         (tot_wds, ptr_wds) =
+             mkVirtConstrSizes dflags rep_args
 
          ptrs'  = ptr_wds
          nptrs' = tot_wds - ptr_wds
@@ -69,5 +71,6 @@ make_constr_itbls hsc_env cons =
 
          descr = dataConIdentity dcon
 
-     r <- iservCmd hsc_env (MkConInfoTable  ptrs' nptrs_really conNo descr)
-     return (getName dcon, ItblPtr (fromRemotePtr r))
+     r <- iservCmd hsc_env (MkConInfoTable ptrs' nptrs_really
+                              conNo (tagForCon dflags dcon) descr)
+     return (getName dcon, ItblPtr r)

@@ -127,10 +127,10 @@ pprSATInfo :: SATInfo -> SDoc
 pprSATInfo staticness = hcat $ map pprStaticness staticness
 
 pprStaticness :: Staticness App -> SDoc
-pprStaticness (Static (VarApp _))  = ptext (sLit "SV")
-pprStaticness (Static (TypeApp _)) = ptext (sLit "ST")
-pprStaticness (Static (CoApp _))   = ptext (sLit "SC")
-pprStaticness NotStatic            = ptext (sLit "NS")
+pprStaticness (Static (VarApp _))  = text "SV"
+pprStaticness (Static (TypeApp _)) = text "ST"
+pprStaticness (Static (CoApp _))   = text "SC"
+pprStaticness NotStatic            = text "NS"
 
 
 mergeSATInfo :: SATInfo -> SATInfo -> SATInfo
@@ -148,9 +148,9 @@ mergeSATInfo l r = zipWith mergeSA l r
       | c `eqCoercion` c' = Static (CoApp c)
       | otherwise             = NotStatic
     mergeSA _ _  = pprPanic "mergeSATInfo" $
-                          ptext (sLit "Left:")
-                       <> pprSATInfo l <> ptext (sLit ", ")
-                       <> ptext (sLit "Right:")
+                          text "Left:"
+                       <> pprSATInfo l <> text ", "
+                       <> text "Right:"
                        <> pprSATInfo r
 
 mergeIdSATInfo :: IdSATInfo -> IdSATInfo -> IdSATInfo
@@ -373,7 +373,7 @@ saTransformMaybe binder maybe_arg_staticness rhs_binders rhs_body
   where
     should_transform staticness = n_static_args > 1 -- THIS IS THE DECISION POINT
       where
-        n_static_args = length (filter isStaticValue staticness)
+        n_static_args = count isStaticValue staticness
 
 saTransform :: Id -> SATInfo -> [Id] -> CoreExpr -> SatM CoreBind
 saTransform binder arg_staticness rhs_binders rhs_body

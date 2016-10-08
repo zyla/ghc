@@ -31,7 +31,7 @@ module MkId (
         voidPrimId, voidArgId,
         nullAddrId, seqId, lazyId, lazyIdKey, runRWId,
         coercionTokenId, magicDictId, coerceId,
-        proxyHashId,
+        proxyHashId, noinlineIdName,
 
         -- Re-export error Ids
         module PrelRules
@@ -112,6 +112,9 @@ There are several reasons why an Id might appear in the wiredInIds:
 (4) lazyId is wired in because the wired-in version overrides the
     strictness of the version defined in GHC.Base
 
+(5) noinlineId is wired in because when we serialize to interfaces
+    we may insert noinline statements.
+
 In cases (2-4), the function has a definition in a library module, and
 can be called; but the wired-in version means that the details are
 never read from that module's interface file; instead, the full definition
@@ -120,7 +123,7 @@ is right here.
 
 wiredInIds :: [Id]
 wiredInIds
-  =  [lazyId, dollarId, oneShotId, runRWId]
+  =  [lazyId, dollarId, oneShotId, runRWId, noinlineId]
   ++ errorIds           -- Defined in MkCore
   ++ ghcPrimIds
 
@@ -262,9 +265,6 @@ Then the top-level type for op is
               forall b. Ord b =>
               a -> b -> b
 
-This is unlike ordinary record selectors, which have all the for-alls
-at the outside.  When dealing with classes it's very convenient to
-recover the original type signature from the class op selector.
 -}
 
 mkDictSelId :: Name          -- Name of one of the *value* selectors
@@ -277,12 +277,14 @@ mkDictSelId name clas
     sel_names      = map idName (classAllSelIds clas)
     new_tycon      = isNewTyCon tycon
     [data_con]     = tyConDataCons tycon
-    tyvars         = dataConUnivTyVars data_con
+    tyvars         = dataConUnivTyVarBinders data_con
+    n_ty_args      = length tyvars
     arg_tys        = dataConRepArgTys data_con  -- Includes the dictionary superclasses
     val_index      = assoc "MkId.mkDictSelId" (sel_names `zip` [0..]) name
 
-    sel_ty = mkInvForAllTys tyvars (mkFunTy (mkClassPred clas (mkTyVarTys tyvars))
-                                            (getNth arg_tys val_index))
+    sel_ty = mkForAllTys tyvars $
+             mkFunTy (mkClassPred clas (mkTyVarTys (binderVars tyvars))) $
+             getNth arg_tys val_index
 
     base_info = noCafIdInfo
                 `setArityInfo`         1
@@ -299,8 +301,6 @@ mkDictSelId name clas
                    -- Add a magic BuiltinRule, but no unfolding
                    -- so that the rule is always available to fire.
                    -- See Note [ClassOp/DFun selection] in TcInstDcls
-
-    n_ty_args = length tyvars
 
     -- This is the built-in rule that goes
     --      op (dfT d1 d2) --->  opT d1 d2
@@ -396,7 +396,7 @@ mkDataConWorkId wkr_name data_con
         -- the simplifier thinks that y is "sure to be evaluated" (because
         --  $wMkT is strict) and drops the case.  No, $wMkT is not strict.
         --
-        -- When the simplifer sees a pattern
+        -- When the simplifier sees a pattern
         --      case e of MkT x -> ...
         -- it uses the dataConRepStrictness of MkT to mark x as evaluated;
         -- but that's fine... dataConRepStrictness comes from the data con
@@ -461,6 +461,7 @@ type Unboxer = Var -> UniqSM ([Var], CoreExpr -> CoreExpr)
 data Boxer = UnitBox | Boxer (TCvSubst -> UniqSM ([Var], CoreExpr))
   -- Box:   build src arg using these rep vars
 
+-- | Data Constructor Boxer
 newtype DataConBoxer = DCB ([Type] -> [Var] -> UniqSM ([Var], [CoreBind]))
                        -- Bind these src-level vars, returning the
                        -- rep-level vars to bind in the pattern
@@ -500,7 +501,7 @@ mkDataConRep dflags fam_envs wrap_name mb_bangs data_con
                  -- The Cpr info can be important inside INLINE rhss, where the
                  -- wrapper constructor isn't inlined.
                  -- And the argument strictness can be important too; we
-                 -- may not inline a contructor when it is partially applied.
+                 -- may not inline a constructor when it is partially applied.
                  -- For example:
                  --      data W = C !Int !Int !Int
                  --      ...(let w = C x in ...(w p q)...)...
@@ -522,7 +523,7 @@ mkDataConRep dflags fam_envs wrap_name mb_bangs data_con
   where
     (univ_tvs, ex_tvs, eq_spec, theta, orig_arg_tys, _orig_res_ty)
       = dataConFullSig data_con
-    res_ty_args  = substTyVars (mkTopTCvSubst (map eqSpecPair eq_spec)) univ_tvs
+    res_ty_args  = substTyVars (mkTvSubstPrs (map eqSpecPair eq_spec)) univ_tvs
 
     tycon        = dataConTyCon data_con       -- The representation TyCon (not family)
     wrap_ty      = dataConUserType data_con
@@ -563,9 +564,9 @@ mkDataConRep dflags fam_envs wrap_name mb_bangs data_con
     mk_boxer :: [Boxer] -> DataConBoxer
     mk_boxer boxers = DCB (\ ty_args src_vars ->
                       do { let (ex_vars, term_vars) = splitAtList ex_tvs src_vars
-                               subst1 = mkTopTCvSubst (univ_tvs `zip` ty_args)
-                               subst2 = extendTCvSubstList subst1 ex_tvs
-                                                           (mkTyVarTys ex_vars)
+                               subst1 = zipTvSubst univ_tvs ty_args
+                               subst2 = extendTvSubstList subst1 ex_tvs
+                                                          (mkTyVarTys ex_vars)
                          ; (rep_ids, binds) <- go subst2 boxers term_vars
                          ; return (ex_vars ++ rep_ids, binds) } )
 
@@ -695,7 +696,7 @@ wrapCo co rep_ty (unbox_rep, box_rep)  -- co :: arg_ty ~ rep_ty
                          UnitBox -> do { rep_id <- newLocal (TcType.substTy subst rep_ty)
                                        ; return ([rep_id], Var rep_id) }
                          Boxer boxer -> boxer subst
-               ; let sco = substCo subst co
+               ; let sco = substCoUnchecked subst co
                ; return (rep_ids, rep_expr `Cast` mkSymCo sco) }
 
 ------------------------
@@ -730,9 +731,9 @@ dataConArgUnpack arg_ty
                          [(DataAlt con, rep_ids, body)]
           ; return (rep_ids, unbox_fn) }
      , Boxer $ \ subst ->
-       do { rep_ids <- mapM (newLocal . TcType.substTy subst) rep_tys
+       do { rep_ids <- mapM (newLocal . TcType.substTyUnchecked subst) rep_tys
           ; return (rep_ids, Var (dataConWorkId con)
-                             `mkTyApps` (substTys subst tc_args)
+                             `mkTyApps` (substTysUnchecked subst tc_args)
                              `mkVarApps` rep_ids ) } ) )
   | otherwise
   = pprPanic "dataConArgUnpack" (ppr arg_ty)
@@ -930,7 +931,7 @@ mkPrimOpId prim_op
   = id
   where
     (tyvars,arg_tys,res_ty, arity, strict_sig) = primOpSig prim_op
-    ty   = mkInvForAllTys tyvars (mkFunTys arg_tys res_ty)
+    ty   = mkSpecForAllTys tyvars (mkFunTys arg_tys res_ty)
     name = mkWiredInName gHC_PRIM (primOpOcc prim_op)
                          (mkPrimOpIdUnique (primOpTag prim_op))
                          (AnId id) UserSyntax
@@ -972,10 +973,9 @@ mkFCallId dflags uniq fcall ty
            `setArityInfo`         arity
            `setStrictnessInfo`    strict_sig
 
-    (bndrs, _)        = tcSplitPiTys ty
-    arity             = count isIdLikeBinder bndrs
-
-    strict_sig      = mkClosedStrictSig (replicate arity topDmd) topRes
+    (bndrs, _) = tcSplitPiTys ty
+    arity      = count isAnonTyBinder bndrs
+    strict_sig = mkClosedStrictSig (replicate arity topDmd) topRes
     -- the call does not claim to be strict in its arguments, since they
     -- may be lifted (foreign import prim) and the called code doesn't
     -- necessarily force them. See Trac #11076.
@@ -1014,7 +1014,7 @@ mkDictFunId dfun_name tvs theta clas tys
 
 mkDictFunTy :: [TyVar] -> ThetaType -> Class -> [Type] -> Type
 mkDictFunTy tvs theta clas tys
- = mkInvSigmaTy tvs theta (mkClassPred clas tys)
+ = mkSpecSigmaTy tvs theta (mkClassPred clas tys)
 
 {-
 ************************************************************************
@@ -1042,7 +1042,7 @@ another gun with which to shoot yourself in the foot.
 lazyIdName, unsafeCoerceName, nullAddrName, seqName,
    realWorldName, voidPrimIdName, coercionTokenName,
    magicDictName, coerceName, proxyName, dollarName, oneShotName,
-   runRWName :: Name
+   runRWName, noinlineIdName :: Name
 unsafeCoerceName  = mkWiredInIdName gHC_PRIM  (fsLit "unsafeCoerce#")  unsafeCoerceIdKey  unsafeCoerceId
 nullAddrName      = mkWiredInIdName gHC_PRIM  (fsLit "nullAddr#")      nullAddrIdKey      nullAddrId
 seqName           = mkWiredInIdName gHC_PRIM  (fsLit "seq")            seqIdKey           seqId
@@ -1056,34 +1056,32 @@ proxyName         = mkWiredInIdName gHC_PRIM  (fsLit "proxy#")         proxyHash
 dollarName        = mkWiredInIdName gHC_BASE  (fsLit "$")              dollarIdKey        dollarId
 oneShotName       = mkWiredInIdName gHC_MAGIC (fsLit "oneShot")        oneShotKey         oneShotId
 runRWName         = mkWiredInIdName gHC_MAGIC (fsLit "runRW#")         runRWKey           runRWId
+noinlineIdName    = mkWiredInIdName gHC_MAGIC (fsLit "noinline") noinlineIdKey noinlineId
 
 dollarId :: Id  -- Note [dollarId magic]
 dollarId = pcMiscPrelId dollarName ty
              (noCafIdInfo `setUnfoldingInfo` unf)
   where
     fun_ty = mkFunTy alphaTy openBetaTy
-    ty     = mkInvForAllTys [levity2TyVar, alphaTyVar, openBetaTyVar] $
+    ty     = mkSpecForAllTys [runtimeRep2TyVar, alphaTyVar, openBetaTyVar] $
              mkFunTy fun_ty fun_ty
     unf    = mkInlineUnfolding (Just 2) rhs
     [f,x]  = mkTemplateLocals [fun_ty, alphaTy]
-    rhs    = mkLams [levity2TyVar, alphaTyVar, openBetaTyVar, f, x] $
+    rhs    = mkLams [runtimeRep2TyVar, alphaTyVar, openBetaTyVar, f, x] $
              App (Var f) (Var x)
 
 ------------------------------------------------
--- proxy# :: forall a. Proxy# a
 proxyHashId :: Id
 proxyHashId
   = pcMiscPrelId proxyName ty
        (noCafIdInfo `setUnfoldingInfo` evaldUnfolding) -- Note [evaldUnfoldings]
   where
-    ty      = mkInvForAllTys [kv, tv] (mkProxyPrimTy k t)
-    kv      = kKiVar
-    k       = mkTyVarTy kv
-    [tv]    = mkTemplateTyVars [k]
-    t       = mkTyVarTy tv
+    -- proxy# :: forall k (a:k). Proxy# k a
+    bndrs   = mkTemplateKiTyVars [liftedTypeKind] (\ks -> ks)
+    [k,t]   = mkTyVarTys bndrs
+    ty      = mkSpecForAllTys bndrs (mkProxyPrimTy k t)
 
 ------------------------------------------------
--- unsafeCoerce# :: forall a b. a -> b
 unsafeCoerceId :: Id
 unsafeCoerceId
   = pcMiscPrelId unsafeCoerceName ty info
@@ -1091,15 +1089,19 @@ unsafeCoerceId
     info = noCafIdInfo `setInlinePragInfo` alwaysInlinePragma
                        `setUnfoldingInfo`  mkCompulsoryUnfolding rhs
 
-    ty  = mkInvForAllTys [ levity1TyVar, levity2TyVar
-                         , openAlphaTyVar, openBetaTyVar ]
-                         (mkFunTy openAlphaTy openBetaTy)
+    -- unsafeCoerce# :: forall (r1 :: RuntimeRep) (r2 :: RuntimeRep)
+    --                         (a :: TYPE r1) (b :: TYPE r2).
+    --                         a -> b
+    bndrs = mkTemplateKiTyVars [runtimeRepTy, runtimeRepTy]
+                               (\ks -> map tYPE ks)
 
-    [x] = mkTemplateLocals [openAlphaTy]
-    rhs = mkLams [ levity1TyVar, levity2TyVar
-                 , openAlphaTyVar, openBetaTyVar
-                 , x] $
-          Cast (Var x) (mkUnsafeCo Representational openAlphaTy openBetaTy)
+    [_, _, a, b] = mkTyVarTys bndrs
+
+    ty  = mkSpecForAllTys bndrs (mkFunTy a b)
+
+    [x] = mkTemplateLocals [a]
+    rhs = mkLams (bndrs ++ [x]) $
+          Cast (Var x) (mkUnsafeCo Representational a b)
 
 ------------------------------------------------
 nullAddrId :: Id
@@ -1119,14 +1121,15 @@ seqId = pcMiscPrelId seqName ty info
                        `setUnfoldingInfo`  mkCompulsoryUnfolding rhs
                        `setRuleInfo`       mkRuleInfo [seq_cast_rule]
 
-    inline_prag = alwaysInlinePragma `setInlinePragmaActivation` ActiveAfter 0
+    inline_prag
+         = alwaysInlinePragma `setInlinePragmaActivation` ActiveAfter "0" 0
                   -- Make 'seq' not inline-always, so that simpleOptExpr
                   -- (see CoreSubst.simple_app) won't inline 'seq' on the
                   -- LHS of rules.  That way we can have rules for 'seq';
                   -- see Note [seqId magic]
 
-    ty  = mkInvForAllTys [alphaTyVar,betaTyVar]
-                         (mkFunTy alphaTy (mkFunTy betaTy betaTy))
+    ty  = mkSpecForAllTys [alphaTyVar,betaTyVar]
+                          (mkFunTy alphaTy (mkFunTy betaTy betaTy))
 
     [x,y] = mkTemplateLocals [alphaTy, betaTy]
     rhs = mkLams [alphaTyVar,betaTyVar,x,y] (Case (Var x) x betaTy [(DEFAULT, [], Var y)])
@@ -1158,20 +1161,26 @@ lazyId :: Id    -- See Note [lazyId magic]
 lazyId = pcMiscPrelId lazyIdName ty info
   where
     info = noCafIdInfo
-    ty  = mkInvForAllTys [alphaTyVar] (mkFunTy alphaTy alphaTy)
+    ty  = mkSpecForAllTys [alphaTyVar] (mkFunTy alphaTy alphaTy)
+
+noinlineId :: Id -- See Note [noinlineId magic]
+noinlineId = pcMiscPrelId noinlineIdName ty info
+  where
+    info = noCafIdInfo
+    ty  = mkSpecForAllTys [alphaTyVar] (mkFunTy alphaTy alphaTy)
 
 oneShotId :: Id -- See Note [The oneShot function]
 oneShotId = pcMiscPrelId oneShotName ty info
   where
     info = noCafIdInfo `setInlinePragInfo` alwaysInlinePragma
                        `setUnfoldingInfo`  mkCompulsoryUnfolding rhs
-    ty  = mkInvForAllTys [ levity1TyVar, levity2TyVar
-                         , openAlphaTyVar, openBetaTyVar ]
-                         (mkFunTy fun_ty fun_ty)
-    fun_ty = mkFunTy alphaTy betaTy
+    ty  = mkSpecForAllTys [ runtimeRep1TyVar, runtimeRep2TyVar
+                          , openAlphaTyVar, openBetaTyVar ]
+                          (mkFunTy fun_ty fun_ty)
+    fun_ty = mkFunTy openAlphaTy openBetaTy
     [body, x] = mkTemplateLocals [fun_ty, openAlphaTy]
     x' = setOneShotLambda x
-    rhs = mkLams [ levity1TyVar, levity2TyVar
+    rhs = mkLams [ runtimeRep1TyVar, runtimeRep2TyVar
                  , openAlphaTyVar, openBetaTyVar
                  , body, x'] $
           Var body `App` Var x
@@ -1179,7 +1188,14 @@ oneShotId = pcMiscPrelId oneShotName ty info
 runRWId :: Id -- See Note [runRW magic] in this module
 runRWId = pcMiscPrelId runRWName ty info
   where
-    info    = noCafIdInfo `setInlinePragInfo` neverInlinePragma
+    info = noCafIdInfo `setInlinePragInfo` neverInlinePragma
+                       `setStrictnessInfo` strict_sig
+                       `setArityInfo`      1
+    strict_sig = mkClosedStrictSig [strictApply1Dmd] topRes
+      -- Important to express its strictness,
+      -- since it is not inlined until CorePrep
+      -- Also see Note [runRW arg] in CorePrep
+
     -- State# RealWorld
     stateRW = mkTyConApp statePrimTyCon [realWorldTy]
     -- (# State# RealWorld, o #)
@@ -1188,7 +1204,7 @@ runRWId = pcMiscPrelId runRWName ty info
     arg_ty  = stateRW `mkFunTy` ret_ty
     -- (State# RealWorld -> (# State# RealWorld, o #))
     --   -> (# State# RealWorld, o #)
-    ty      = mkInvForAllTys [levity1TyVar, openAlphaTyVar] $
+    ty      = mkSpecForAllTys [runtimeRep1TyVar, openAlphaTyVar] $
               arg_ty `mkFunTy` ret_ty
 
 --------------------------------------------------------------------------------
@@ -1196,7 +1212,7 @@ magicDictId :: Id  -- See Note [magicDictId magic]
 magicDictId = pcMiscPrelId magicDictName ty info
   where
   info = noCafIdInfo `setInlinePragInfo` neverInlinePragma
-  ty   = mkInvForAllTys [alphaTyVar] alphaTy
+  ty   = mkSpecForAllTys [alphaTyVar] alphaTy
 
 --------------------------------------------------------------------------------
 
@@ -1210,7 +1226,7 @@ coerceId = pcMiscPrelId coerceName ty info
     eqRPrimTy = mkTyConApp eqReprPrimTyCon [ liftedTypeKind
                                            , liftedTypeKind
                                            , alphaTy, betaTy ]
-    ty        = mkInvForAllTys [alphaTyVar, betaTyVar] $
+    ty        = mkSpecForAllTys [alphaTyVar, betaTyVar] $
                 mkFunTys [eqRTy, alphaTy] betaTy
 
     [eqR,x,eq] = mkTemplateLocals [eqRTy, alphaTy, eqRPrimTy]
@@ -1315,23 +1331,62 @@ may fire.
 
 Note [lazyId magic]
 ~~~~~~~~~~~~~~~~~~~
-    lazy :: forall a?. a? -> a?   (i.e. works for unboxed types too)
+lazy :: forall a?. a? -> a?   (i.e. works for unboxed types too)
 
-Used to lazify pseq:   pseq a b = a `seq` lazy b
+'lazy' is used to make sure that a sub-expression, and its free variables,
+are truly used call-by-need, with no code motion.  Key examples:
 
-Also, no strictness: by being a built-in Id, all the info about lazyId comes from here,
-not from GHC.Base.hi.   This is important, because the strictness
-analyser will spot it as strict!
+* pseq:    pseq a b = a `seq` lazy b
+  We want to make sure that the free vars of 'b' are not evaluated
+  before 'a', even though the expression is plainly strict in 'b'.
 
-Also no unfolding in lazyId: it gets "inlined" by a HACK in CorePrep.
-It's very important to do this inlining *after* unfoldings are exposed
-in the interface file.  Otherwise, the unfolding for (say) pseq in the
-interface file will not mention 'lazy', so if we inline 'pseq' we'll totally
-miss the very thing that 'lazy' was there for in the first place.
-See Trac #3259 for a real world example.
+* catch:   catch a b = catch# (lazy a) b
+  Again, it's clear that 'a' will be evaluated strictly (and indeed
+  applied to a state token) but we want to make sure that any exceptions
+  arising from the evaluation of 'a' are caught by the catch (see
+  Trac #11555).
 
-lazyId is defined in GHC.Base, so we don't *have* to inline it.  If it
-appears un-applied, we'll end up just calling it.
+Implementing 'lazy' is a bit tricky:
+
+* It must not have a strictness signature: by being a built-in Id,
+  all the info about lazyId comes from here, not from GHC.Base.hi.
+  This is important, because the strictness analyser will spot it as
+  strict!
+
+* It must not have an unfolding: it gets "inlined" by a HACK in
+  CorePrep. It's very important to do this inlining *after* unfoldings
+  are exposed in the interface file.  Otherwise, the unfolding for
+  (say) pseq in the interface file will not mention 'lazy', so if we
+  inline 'pseq' we'll totally miss the very thing that 'lazy' was
+  there for in the first place. See Trac #3259 for a real world
+  example.
+
+* Suppose CorePrep sees (catch# (lazy e) b).  At all costs we must
+  avoid using call by value here:
+     case e of r -> catch# r b
+  Avoiding that is the whole point of 'lazy'.  So in CorePrep (which
+  generate the 'case' expression for a call-by-value call) we must
+  spot the 'lazy' on the arg (in CorePrep.cpeApp), and build a 'let'
+  instead.
+
+* lazyId is defined in GHC.Base, so we don't *have* to inline it.  If it
+  appears un-applied, we'll end up just calling it.
+
+Note [noinlineId magic]
+~~~~~~~~~~~~~~~~~~~~~~~
+noinline :: forall a. a -> a
+
+'noinline' is used to make sure that a function f is never inlined,
+e.g., as in 'noinline f x'.  Ordinarily, the identity function with NOINLINE
+could be used to achieve this effect; however, this has the unfortunate
+result of leaving a (useless) call to noinline at runtime.  So we have
+a little bit of magic to optimize away 'noinline' after we are done
+running the simplifier.
+
+'noinline' needs to be wired-in because it gets inserted automatically
+when we serialize an expression to the interface format, and we DON'T
+want use its fingerprints.
+
 
 Note [runRW magic]
 ~~~~~~~~~~~~~~~~~~
@@ -1367,7 +1422,8 @@ no further floating will occur. This allows us to safely inline things like
 While the definition of @GHC.Magic.runRW#@, we override its type in @MkId@
 to be open-kinded,
 
-    runRW# :: (o :: OpenKind) => (State# RealWorld -> (# State# RealWorld, o #))
+    runRW# :: forall (r1 :: RuntimeRep). (o :: TYPE r)
+           => (State# RealWorld -> (# State# RealWorld, o #))
                               -> (# State# RealWorld, o #)
 
 

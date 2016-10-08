@@ -13,6 +13,8 @@ module GHC (
         defaultErrorHandler,
         defaultCleanupHandler,
         prettyPrintGhcErrors,
+        installSignalHandlers,
+        withCleanupSession,
 
         -- * GHC Monad
         Ghc, GhcT, GhcMonad(..), HscEnv,
@@ -116,7 +118,7 @@ module GHC (
         isModuleInterpreted,
 
         -- ** Inspecting types and kinds
-        exprType,
+        exprType, TcRnExprMode(..),
         typeKind,
 
         -- ** Looking up a Name
@@ -132,7 +134,7 @@ module GHC (
 
         -- ** Other
         runTcInteractive,   -- Desired by some clients (Trac #8878)
-        isStmt, isImport, isDecl,
+        isStmt, hasImport, isImport, isDecl,
 
         -- ** The debugger
         SingleStep(..),
@@ -145,7 +147,6 @@ module GHC (
         modInfoModBreaks,
         ModBreaks(..), BreakIndex,
         BreakInfo(breakInfo_number, breakInfo_module),
-        BreakArray, setBreakOn, setBreakOff, getBreak,
         InteractiveEval.back,
         InteractiveEval.forward,
 
@@ -272,6 +273,7 @@ module GHC (
         ApiAnns,AnnKeywordId(..),AnnotationComment(..),
         getAnnotation, getAndRemoveAnnotation,
         getAnnotationComments, getAndRemoveAnnotationComments,
+        unicodeAnn,
 
         -- * Miscellaneous
         --sessionHscEnv,
@@ -289,8 +291,8 @@ module GHC (
 
 #ifdef GHCI
 import ByteCodeTypes
-import BreakArray
 import InteractiveEval
+import InteractiveEvalTypes
 import TcRnDriver       ( runTcInteractive )
 import GHCi
 import GHCi.RemoteTypes
@@ -329,7 +331,6 @@ import StaticFlags
 import SysTools
 import Annotations
 import Module
-import UniqFM
 import Panic
 import Platform
 import Bag              ( unitBag )
@@ -438,6 +439,7 @@ runGhc mb_top_dir ghc = do
   ref <- newIORef (panic "empty session")
   let session = Session ref
   flip unGhc session $ do
+    liftIO installSignalHandlers  -- catch ^C
     initGhcMonad mb_top_dir
     withCleanupSession ghc
 
@@ -449,12 +451,7 @@ runGhc mb_top_dir ghc = do
 -- to this function will create a new session which should not be shared among
 -- several threads.
 
-#if __GLASGOW_HASKELL__ < 710
--- Pre-AMP change
-runGhcT :: (ExceptionMonad m, Functor m) =>
-#else
-runGhcT :: (ExceptionMonad m) =>
-#endif
+runGhcT :: ExceptionMonad m =>
            Maybe FilePath  -- ^ See argument to 'initGhcMonad'.
         -> GhcT m a        -- ^ The action to perform.
         -> m a
@@ -462,6 +459,7 @@ runGhcT mb_top_dir ghct = do
   ref <- liftIO $ newIORef (panic "empty session")
   let session = Session ref
   flip unGhcT session $ do
+    liftIO installSignalHandlers  -- catch ^C
     initGhcMonad mb_top_dir
     withCleanupSession ghct
 
@@ -496,8 +494,7 @@ withCleanupSession ghc = ghc `gfinally` cleanup
 initGhcMonad :: GhcMonad m => Maybe FilePath -> m ()
 initGhcMonad mb_top_dir
   = do { env <- liftIO $
-                do { installSignalHandlers  -- catch ^C
-                   ; initStaticOpts
+                do { initStaticOpts
                    ; mySettings <- initSysTools mb_top_dir
                    ; dflags <- initDynFlags (defaultDynFlags mySettings)
                    ; checkBrokenTablesNextToCode dflags
@@ -579,7 +576,7 @@ checkBrokenTablesNextToCode' dflags
 -- flags.  If you are not doing linking or doing static linking, you
 -- can ignore the list of packages returned.
 --
-setSessionDynFlags :: GhcMonad m => DynFlags -> m [UnitId]
+setSessionDynFlags :: GhcMonad m => DynFlags -> m [InstalledUnitId]
 setSessionDynFlags dflags = do
   dflags' <- checkNewDynFlags dflags
   (dflags'', preload) <- liftIO $ initPackages dflags'
@@ -589,7 +586,7 @@ setSessionDynFlags dflags = do
   return preload
 
 -- | Sets the program 'DynFlags'.
-setProgramDynFlags :: GhcMonad m => DynFlags -> m [UnitId]
+setProgramDynFlags :: GhcMonad m => DynFlags -> m [InstalledUnitId]
 setProgramDynFlags dflags = do
   dflags' <- checkNewDynFlags dflags
   (dflags'', preload) <- liftIO $ initPackages dflags'
@@ -948,7 +945,7 @@ loadModule tcm = do
                                     hsc_env ms 1 1 Nothing mb_linkable
                                     source_modified
 
-   modifySession $ \e -> e{ hsc_HPT = addToUFM (hsc_HPT e) mod mod_info }
+   modifySession $ \e -> e{ hsc_HPT = addToHpt (hsc_HPT e) mod mod_info }
    return tcm
 
 
@@ -1063,7 +1060,7 @@ needsTemplateHaskell ms =
 -- | Return @True@ <==> module is loaded.
 isLoaded :: GhcMonad m => ModuleName -> m Bool
 isLoaded m = withSession $ \hsc_env ->
-  return $! isJust (lookupUFM (hsc_HPT hsc_env) m)
+  return $! isJust (lookupHpt (hsc_HPT hsc_env) m)
 
 -- | Return the bindings for the current interactive session.
 getBindings :: GhcMonad m => m [TyThing]
@@ -1139,7 +1136,7 @@ getPackageModuleInfo _hsc_env _mdl = do
 
 getHomeModuleInfo :: HscEnv -> Module -> IO (Maybe ModuleInfo)
 getHomeModuleInfo hsc_env mdl =
-  case lookupUFM (hsc_HPT hsc_env) (moduleName mdl) of
+  case lookupHpt (hsc_HPT hsc_env) (moduleName mdl) of
     Nothing  -> return Nothing
     Just hmi -> do
       let details = hm_details hmi
@@ -1424,7 +1421,7 @@ lookupModule mod_name Nothing = withSession $ \hsc_env -> do
 
 lookupLoadedHomeModule :: GhcMonad m => ModuleName -> m (Maybe Module)
 lookupLoadedHomeModule mod_name = withSession $ \hsc_env ->
-  case lookupUFM (hsc_HPT hsc_env) mod_name of
+  case lookupHpt (hsc_HPT hsc_env) mod_name of
     Just mod_info      -> return (Just (mi_module (hm_iface mod_info)))
     _not_a_home_module -> return Nothing
 
@@ -1438,7 +1435,7 @@ isModuleTrusted m = withSession $ \hsc_env ->
     liftIO $ hscCheckSafe hsc_env m noSrcSpan
 
 -- | Return if a module is trusted and the pkgs it depends on to be trusted.
-moduleTrustReqs :: GhcMonad m => Module -> m (Bool, [UnitId])
+moduleTrustReqs :: GhcMonad m => Module -> m (Bool, [InstalledUnitId])
 moduleTrustReqs m = withSession $ \hsc_env ->
     liftIO $ hscGetSafe hsc_env m noSrcSpan
 
@@ -1500,5 +1497,5 @@ parser str dflags filename =
          Left (unitBag (mkPlainErrMsg dflags span err))
 
      POk pst rdr_module ->
-         let (warns,_) = getMessages pst in
+         let (warns,_) = getMessages pst dflags in
          Right (warns, rdr_module)

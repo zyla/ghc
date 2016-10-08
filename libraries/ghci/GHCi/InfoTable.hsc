@@ -24,15 +24,16 @@ mkConInfoTable
    :: Int     -- ptr words
    -> Int     -- non-ptr words
    -> Int     -- constr tag
+   -> Int     -- pointer tag
    -> [Word8]  -- con desc
-   -> IO (Ptr ())
+   -> IO (Ptr StgInfoTable)
       -- resulting info table is allocated with allocateExec(), and
       -- should be freed with freeExec().
 
-mkConInfoTable ptr_words nonptr_words tag con_desc =
+mkConInfoTable ptr_words nonptr_words tag ptrtag con_desc =
   castFunPtrToPtr <$> newExecConItbl itbl con_desc
   where
-     entry_addr = stg_interp_constr_entry
+     entry_addr = interpConstrEntry !! ptrtag
      code' = mkJumpToAddr entry_addr
      itbl  = StgInfoTable {
                  entry = if ghciTablesNextToCode
@@ -56,14 +57,22 @@ type ItblCodes = Either [Word8] [Word32]
 funPtrToInt :: FunPtr a -> Int
 funPtrToInt (FunPtr a) = I## (addr2Int## a)
 
-data Arch = ArchSPARC | ArchPPC | ArchX86 | ArchX86_64 | ArchAlpha | ArchARM
+data Arch = ArchSPARC
+          | ArchPPC
+          | ArchX86
+          | ArchX86_64
+          | ArchAlpha
+          | ArchARM
           | ArchARM64
+          | ArchPPC64
+          | ArchPPC64LE
+          | ArchUnknown
  deriving Show
 
 platform :: Arch
 platform =
 #if defined(sparc_HOST_ARCH)
-       ArchSparc
+       ArchSPARC
 #elif defined(powerpc_HOST_ARCH)
        ArchPPC
 #elif defined(i386_HOST_ARCH)
@@ -76,8 +85,16 @@ platform =
        ArchARM
 #elif defined(aarch64_HOST_ARCH)
        ArchARM64
+#elif defined(powerpc64_HOST_ARCH)
+       ArchPPC64
+#elif defined(powerpc64le_HOST_ARCH)
+       ArchPPC64LE
 #else
-#error Unknown architecture
+#    if defined(TABLES_NEXT_TO_CODE)
+#        error Unimplemented architecture
+#    else
+       ArchUnknown
+#    endif
 #endif
 
 mkJumpToAddr :: EntryFunPtr -> ItblCodes
@@ -197,6 +214,54 @@ mkJumpToAddr a = case platform of
                 , 0xd61f0020
                 , fromIntegral w64
                 , fromIntegral (w64 `shiftR` 32) ]
+    ArchPPC64 ->
+        -- We use the compiler's register r12 to read the function
+        -- descriptor and the linker's register r11 as a temporary
+        -- register to hold the function entry point.
+        -- In the medium code model the function descriptor
+        -- is located in the first two gigabytes, i.e. the address
+        -- of the function pointer is a non-negative 32 bit number.
+        -- 0x0EADBEEF stands for the address of the function pointer:
+        --    0:   3d 80 0e ad     lis     r12,0x0EAD
+        --    4:   61 8c be ef     ori     r12,r12,0xBEEF
+        --    8:   e9 6c 00 00     ld      r11,0(r12)
+        --    c:   e8 4c 00 08     ld      r2,8(r12)
+        --   10:   7d 69 03 a6     mtctr   r11
+        --   14:   e9 6c 00 10     ld      r11,16(r12)
+        --   18:   4e 80 04 20     bctr
+       let  w32 = fromIntegral (funPtrToInt a)
+            hi16 x = (x `shiftR` 16) .&. 0xFFFF
+            lo16 x = x .&. 0xFFFF
+       in Right [ 0x3D800000 .|. hi16 w32,
+                  0x618C0000 .|. lo16 w32,
+                  0xE96C0000,
+                  0xE84C0008,
+                  0x7D6903A6,
+                  0xE96C0010,
+                  0x4E800420]
+
+    ArchPPC64LE ->
+        -- The ABI requires r12 to point to the function's entry point.
+        -- We use the medium code model where code resides in the first
+        -- two gigabytes, so loading a non-negative32 bit address
+        -- with lis followed by ori is fine.
+        -- 0x0EADBEEF stands for the address:
+        -- 3D800EAD lis r12,0x0EAD
+        -- 618CBEEF ori r12,r12,0xBEEF
+        -- 7D8903A6 mtctr r12
+        -- 4E800420 bctr
+
+        let w32 = fromIntegral (funPtrToInt a)
+            hi16 x = (x `shiftR` 16) .&. 0xFFFF
+            lo16 x = x .&. 0xFFFF
+        in Right [ 0x3D800000 .|. hi16 w32,
+                   0x618C0000 .|. lo16 w32,
+                   0x7D8903A6, 0x4E800420 ]
+
+    -- This code must not be called. You either need to
+    -- add your architecture as a distinct case or
+    -- use non-TABLES_NEXT_TO_CODE mode
+    ArchUnknown -> error "mkJumpToAddr: ArchUnknown is unsupported"
 
 byte0 :: (Integral w) => w -> Word8
 byte0 w = fromIntegral w
@@ -219,8 +284,23 @@ byte7 w = fromIntegral (w `shiftR` 56)
 #include "Rts.h"
 
 -- entry point for direct returns for created constr itbls
-foreign import ccall "&stg_interp_constr_entry"
-    stg_interp_constr_entry :: EntryFunPtr
+foreign import ccall "&stg_interp_constr1_entry" stg_interp_constr1_entry :: EntryFunPtr
+foreign import ccall "&stg_interp_constr2_entry" stg_interp_constr2_entry :: EntryFunPtr
+foreign import ccall "&stg_interp_constr3_entry" stg_interp_constr3_entry :: EntryFunPtr
+foreign import ccall "&stg_interp_constr4_entry" stg_interp_constr4_entry :: EntryFunPtr
+foreign import ccall "&stg_interp_constr5_entry" stg_interp_constr5_entry :: EntryFunPtr
+foreign import ccall "&stg_interp_constr6_entry" stg_interp_constr6_entry :: EntryFunPtr
+foreign import ccall "&stg_interp_constr7_entry" stg_interp_constr7_entry :: EntryFunPtr
+
+interpConstrEntry :: [EntryFunPtr]
+interpConstrEntry = [ error "pointer tag 0"
+                    , stg_interp_constr1_entry
+                    , stg_interp_constr2_entry
+                    , stg_interp_constr3_entry
+                    , stg_interp_constr4_entry
+                    , stg_interp_constr5_entry
+                    , stg_interp_constr6_entry
+                    , stg_interp_constr7_entry ]
 
 -- Ultra-minimalist version specially for constructors
 #if SIZEOF_VOID_P == 8

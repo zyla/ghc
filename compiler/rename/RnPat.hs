@@ -57,13 +57,12 @@ import Util
 import ListSetOps          ( removeDups )
 import Outputable
 import SrcLoc
-import FastString
 import Literal             ( inCharRange )
 import TysWiredIn          ( nilDataCon )
 import DataCon
 import qualified GHC.LanguageExtensions as LangExt
 
-import Control.Monad       ( when, liftM, ap )
+import Control.Monad       ( when, liftM, ap, unless )
 import Data.Ratio
 
 {-
@@ -107,7 +106,6 @@ instance Applicative CpsRn where
     (<*>) = ap
 
 instance Monad CpsRn where
-  return = pure
   (CpsRn m) >>= mk = CpsRn (\k -> m (\v -> unCpsRn (mk v) k))
 
 runCps :: CpsRn a -> RnM (a, FreeVars)
@@ -250,6 +248,25 @@ We want to "see" this use, and in let-bindings we collect all uses and
 report unused variables at the binding level. So we must use bindLocalNames
 here, *not* bindLocalNameFV.  Trac #3943.
 
+
+Note: [Don't report shadowing for pattern synonyms]
+There is one special context where a pattern doesn't introduce any new binders -
+pattern synonym declarations. Therefore we don't check to see if pattern
+variables shadow existing identifiers as they are never bound to anything
+and have no scope.
+
+Without this check, there would be quite a cryptic warning that the `x`
+in the RHS of the pattern synonym declaration shadowed the top level `x`.
+
+```
+x :: ()
+x = ()
+
+pattern P x = Just x
+```
+
+See #12615 for some more examples.
+
 *********************************************************
 *                                                      *
         External entry points
@@ -295,12 +312,15 @@ rnPats ctxt pats thing_inside
           --    check incrementally for duplicates;
           -- Nor can we check incrementally for shadowing, else we'll
           --    complain *twice* about duplicates e.g. f (x,x) = ...
-        ; addErrCtxt doc_pat $
-          checkDupAndShadowedNames envs_before $
-          collectPatsBinders pats'
+          --
+          -- See note [Don't report shadowing for pattern synonyms]
+        ; unless (isPatSynCtxt ctxt)
+              (addErrCtxt doc_pat $
+                checkDupAndShadowedNames envs_before $
+                collectPatsBinders pats')
         ; thing_inside pats' } }
   where
-    doc_pat = ptext (sLit "In") <+> pprMatchContext ctxt
+    doc_pat = text "In" <+> pprMatchContext ctxt
 
 rnPat :: HsMatchContext Name -- for error messages
       -> LPat RdrName
@@ -387,22 +407,22 @@ rnPatAndThen mk (LitPat lit)
   where
     normal_lit = do { liftCps (rnLit lit); return (LitPat lit) }
 
-rnPatAndThen _ (NPat (L l lit) mb_neg _eq)
+rnPatAndThen _ (NPat (L l lit) mb_neg _eq _)
   = do { lit'    <- liftCpsFV $ rnOverLit lit
        ; mb_neg' <- liftCpsFV $ case mb_neg of
                       Nothing -> return (Nothing, emptyFVs)
                       Just _  -> do { (neg, fvs) <- lookupSyntaxName negateName
                                     ; return (Just neg, fvs) }
        ; eq' <- liftCpsFV $ lookupSyntaxName eqName
-       ; return (NPat (L l lit') mb_neg' eq') }
+       ; return (NPat (L l lit') mb_neg' eq' placeHolderType) }
 
-rnPatAndThen mk (NPlusKPat rdr (L l lit) _ _)
+rnPatAndThen mk (NPlusKPat rdr (L l lit) _ _ _ _)
   = do { new_name <- newPatName mk rdr
        ; lit'  <- liftCpsFV $ rnOverLit lit
        ; minus <- liftCpsFV $ lookupSyntaxName minusName
        ; ge    <- liftCpsFV $ lookupSyntaxName geName
        ; return (NPlusKPat (L (nameSrcSpan new_name) new_name)
-                           (L l lit') ge minus) }
+                           (L l lit') lit' ge minus placeHolderType) }
                 -- The Report says that n+k patterns must be in Integral
 
 rnPatAndThen mk (AsPat rdr pat)
@@ -447,6 +467,15 @@ rnPatAndThen mk (TuplePat pats boxed _)
   = do { liftCps $ checkTupSize (length pats)
        ; pats' <- rnLPatsAndThen mk pats
        ; return (TuplePat pats' boxed []) }
+
+rnPatAndThen mk (SumPat pat alt arity _)
+  = do { pat <- rnLPatAndThen mk pat
+       ; return (SumPat pat alt arity PlaceHolder)
+       }
+
+-- If a splice has been run already, just rename the result.
+rnPatAndThen mk (SplicePat (HsSpliced mfs (HsSplicedPat pat)))
+  = SplicePat . HsSpliced mfs . HsSplicedPat <$> rnPatAndThen mk pat
 
 rnPatAndThen mk (SplicePat splice)
   = do { eith <- liftCpsFV $ rnSplicePat splice
@@ -551,8 +580,8 @@ rnHsRecFields ctxt mk_arg (HsRecFields { rec_flds = flds, rec_dotdot = dotdot })
            -- We don't want that to screw up the dot-dot fill-in stuff.
 
     doc = case mb_con of
-            Nothing  -> ptext (sLit "constructor field name")
-            Just con -> ptext (sLit "field of constructor") <+> quotes (ppr con)
+            Nothing  -> text "constructor field name"
+            Just con -> text "field of constructor" <+> quotes (ppr con)
 
     rn_fld :: Bool -> Maybe Name -> LHsRecField RdrName (Located arg)
            -> RnM (LHsRecField Name (Located arg))
@@ -563,7 +592,9 @@ rnHsRecFields ctxt mk_arg (HsRecFields { rec_flds = flds, rec_dotdot = dotdot })
       = do { sel <- setSrcSpan loc $ lookupRecFieldOcc parent doc lbl
            ; arg' <- if pun
                      then do { checkErr pun_ok (badPun (L loc lbl))
-                             ; return (L loc (mk_arg loc lbl)) }
+                               -- Discard any module qualifier (#11662)
+                             ; let arg_rdr = mkRdrUnqual (rdrNameOcc lbl)
+                             ; return (L loc (mk_arg loc arg_rdr)) }
                      else return arg
            ; return (L l (HsRecField { hsRecFieldLbl
                                          = L loc (FieldOcc (L ll lbl) sel)
@@ -588,23 +619,13 @@ rnHsRecFields ctxt mk_arg (HsRecFields { rec_flds = flds, rec_dotdot = dotdot })
            ; con_fields <- lookupConstructorFields con
            ; when (null con_fields) (addErr (badDotDotCon con))
            ; let present_flds = map (occNameFS . rdrNameOcc) $ getFieldLbls flds
-                 parent_tc = find_tycon rdr_env con
 
                    -- For constructor uses (but not patterns)
-                   -- the arg should be in scope (unqualified)
-                   -- ignoring the record field itself
+                   -- the arg should be in scope locally;
+                   -- i.e. not top level or imported
                    -- Eg.  data R = R { x,y :: Int }
                    --      f x = R { .. }   -- Should expand to R {x=x}, not R{x=x,y=y}
-                 arg_in_scope lbl
-                   = rdr `elemLocalRdrEnv` lcl_env
-                   || notNull [ gre | gre <- lookupGRE_RdrName rdr rdr_env
-                                    , case gre_par gre of
-                                        ParentIs p               -> p /= parent_tc
-                                        FldParent { par_is = p } -> p /= parent_tc
-                                        PatternSynonym           -> True
-                                        NoParent                 -> True ]
-                   where
-                     rdr = mkVarUnqual lbl
+                 arg_in_scope lbl = mkVarUnqual lbl `elemLocalRdrEnv` lcl_env
 
                  dot_dot_gres = [ (lbl, sel, head gres)
                                 | fl <- con_fields
@@ -629,22 +650,29 @@ rnHsRecFields ctxt mk_arg (HsRecFields { rec_flds = flds, rec_dotdot = dotdot })
     -- When disambiguation is on, return name of parent tycon.
     check_disambiguation disambig_ok mb_con
       | disambig_ok, Just con <- mb_con
-      = do { env <- getGlobalRdrEnv; return (Just (find_tycon env con)) }
+      = do { env <- getGlobalRdrEnv; return (find_tycon env con) }
       | otherwise = return Nothing
 
-    find_tycon :: GlobalRdrEnv -> Name {- DataCon -} -> Name {- TyCon -}
+    find_tycon :: GlobalRdrEnv -> Name {- DataCon -} -> Maybe Name {- TyCon -}
     -- Return the parent *type constructor* of the data constructor
-    -- That is, the parent of the data constructor.
+    -- (that is, the parent of the data constructor),
+    -- or 'Nothing' if it is a pattern synonym or not in scope.
     -- That's the parent to use for looking up record fields.
-    find_tycon env con
-      | Just (AConLike (RealDataCon dc)) <- wiredInNameTyThing_maybe con
-      = tyConName (dataConTyCon dc)   -- Special case for [], which is built-in syntax
-                                      -- and not in the GlobalRdrEnv (Trac #8448)
-      | [GRE { gre_par = ParentIs p }] <- lookupGRE_Name env con
-      = p
+    find_tycon env con_name
+      | Just (AConLike (RealDataCon dc)) <- wiredInNameTyThing_maybe con_name
+      = Just (tyConName (dataConTyCon dc))
+        -- Special case for [], which is built-in syntax
+        -- and not in the GlobalRdrEnv (Trac #8448)
 
-      | otherwise
-      = pprPanic "find_tycon" (ppr con $$ ppr (lookupGRE_Name env con))
+      | Just gre <- lookupGRE_Name env con_name
+      = case gre_par gre of
+          ParentIs p -> Just p
+          _          -> Nothing   -- Can happen if the con_name
+                                  -- is for a pattern synonym
+
+      | otherwise = Nothing
+        -- Data constructor not lexically in scope at all
+        -- See Note [Disambiguation and Template Haskell]
 
     dup_flds :: [[RdrName]]
         -- Each list represents a RdrName that occurred more than once
@@ -652,6 +680,22 @@ rnHsRecFields ctxt mk_arg (HsRecFields { rec_flds = flds, rec_dotdot = dotdot })
         -- Each list in dup_fields is non-empty
     (_, dup_flds) = removeDups compare (getFieldLbls flds)
 
+
+{- Note [Disambiguation and Template Haskell]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider (Trac #12130)
+   module Foo where
+     import M
+     b = $(funny)
+
+   module M(funny) where
+     data T = MkT { x :: Int }
+     funny :: Q Exp
+     funny = [| MkT { x = 3 } |]
+
+When we splice, neither T nor MkT are lexically in scope, so find_tycon will
+fail.  But there is no need for diambiguation anyway, so we just return Nothing
+-}
 
 rnHsRecUpdFields
     :: [LHsRecUpdField RdrName]
@@ -668,7 +712,7 @@ rnHsRecUpdFields flds
 
        ; return (flds1, plusFVs fvss) }
   where
-    doc = ptext (sLit "constructor field name")
+    doc = text "constructor field name"
 
     rn_fld :: Bool -> Bool -> LHsRecUpdField RdrName -> RnM (LHsRecUpdField Name, FreeVars)
     rn_fld pun_ok overload_ok (L l (HsRecField { hsRecFieldLbl = L loc f
@@ -687,7 +731,9 @@ rnHsRecUpdFields flds
                           else fmap Left $ lookupGlobalOccRn lbl
            ; arg' <- if pun
                      then do { checkErr pun_ok (badPun (L loc lbl))
-                             ; return (L loc (HsVar (L loc lbl))) }
+                               -- Discard any module qualifier (#11662)
+                             ; let arg_rdr = mkRdrUnqual (rdrNameOcc lbl)
+                             ; return (L loc (HsVar (L loc arg_rdr))) }
                      else return arg
            ; (arg'', fvs) <- rnLExpr arg'
 
@@ -725,31 +771,31 @@ getFieldUpdLbls :: [LHsRecUpdField id] -> [RdrName]
 getFieldUpdLbls flds = map (rdrNameAmbiguousFieldOcc . unLoc . hsRecFieldLbl . unLoc) flds
 
 needFlagDotDot :: HsRecFieldContext -> SDoc
-needFlagDotDot ctxt = vcat [ptext (sLit "Illegal `..' in record") <+> pprRFC ctxt,
-                            ptext (sLit "Use RecordWildCards to permit this")]
+needFlagDotDot ctxt = vcat [text "Illegal `..' in record" <+> pprRFC ctxt,
+                            text "Use RecordWildCards to permit this"]
 
 badDotDotCon :: Name -> SDoc
 badDotDotCon con
-  = vcat [ ptext (sLit "Illegal `..' notation for constructor") <+> quotes (ppr con)
-         , nest 2 (ptext (sLit "The constructor has no labelled fields")) ]
+  = vcat [ text "Illegal `..' notation for constructor" <+> quotes (ppr con)
+         , nest 2 (text "The constructor has no labelled fields") ]
 
 emptyUpdateErr :: SDoc
-emptyUpdateErr = ptext (sLit "Empty record update")
+emptyUpdateErr = text "Empty record update"
 
 badPun :: Located RdrName -> SDoc
-badPun fld = vcat [ptext (sLit "Illegal use of punning for field") <+> quotes (ppr fld),
-                   ptext (sLit "Use NamedFieldPuns to permit this")]
+badPun fld = vcat [text "Illegal use of punning for field" <+> quotes (ppr fld),
+                   text "Use NamedFieldPuns to permit this"]
 
 dupFieldErr :: HsRecFieldContext -> [RdrName] -> SDoc
 dupFieldErr ctxt dups
-  = hsep [ptext (sLit "duplicate field name"),
+  = hsep [text "duplicate field name",
           quotes (ppr (head dups)),
-          ptext (sLit "in record"), pprRFC ctxt]
+          text "in record", pprRFC ctxt]
 
 pprRFC :: HsRecFieldContext -> SDoc
-pprRFC (HsRecFieldCon {}) = ptext (sLit "construction")
-pprRFC (HsRecFieldPat {}) = ptext (sLit "pattern")
-pprRFC (HsRecFieldUpd {}) = ptext (sLit "update")
+pprRFC (HsRecFieldCon {}) = text "construction"
+pprRFC (HsRecFieldPat {}) = text "pattern"
+pprRFC (HsRecFieldUpd {}) = text "update"
 
 {-
 ************************************************************************
@@ -782,7 +828,8 @@ rnOverLit origLit
             | otherwise       = origLit
           }
         ; let std_name = hsOverLitName val
-        ; (from_thing_name, fvs) <- lookupSyntaxName std_name
+        ; (SyntaxExpr { syn_expr = from_thing_name }, fvs)
+            <- lookupSyntaxName std_name
         ; let rebindable = case from_thing_name of
                                 HsVar (L _ v) -> v /= std_name
                                 _             -> panic "rnOverLit"
@@ -800,13 +847,13 @@ rnOverLit origLit
 
 patSigErr :: Outputable a => a -> SDoc
 patSigErr ty
-  =  (ptext (sLit "Illegal signature in pattern:") <+> ppr ty)
-        $$ nest 4 (ptext (sLit "Use ScopedTypeVariables to permit it"))
+  =  (text "Illegal signature in pattern:" <+> ppr ty)
+        $$ nest 4 (text "Use ScopedTypeVariables to permit it")
 
 bogusCharError :: Char -> SDoc
 bogusCharError c
-  = ptext (sLit "character literal out of range: '\\") <> char c  <> char '\''
+  = text "character literal out of range: '\\" <> char c  <> char '\''
 
 badViewPat :: Pat RdrName -> SDoc
-badViewPat pat = vcat [ptext (sLit "Illegal view pattern: ") <+> ppr pat,
-                       ptext (sLit "Use ViewPatterns to enable view patterns")]
+badViewPat pat = vcat [text "Illegal view pattern: " <+> ppr pat,
+                       text "Use ViewPatterns to enable view patterns"]

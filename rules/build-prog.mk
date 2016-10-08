@@ -197,8 +197,10 @@ ifneq "$$(BINDIST)" "YES"
 # The quadrupled $'s here are because the _<way>_LIB variables aren't
 # necessarily set when this part of the makefile is read
 $1/$2/build/tmp/$$($1_$2_PROG) $1/$2/build/tmp/$$($1_$2_PROG).dll : \
-    $$(foreach dep,$$($1_$2_DEP_COMPONENT_IDS),\
+    $$(foreach dep,$$($1_$2_TRANSITIVE_DEP_COMPONENT_IDS),\
         $$$$($$(dep)_dist-$(if $(filter 0,$3),boot,install)_PROGRAM_DEP_LIB))
+# Workaround: We use TRANSITIVE_DEP_COMPONENT_IDS here as a workaround for
+# Trac #12078.
 
 $1_$2_PROG_NEEDS_C_WRAPPER = NO
 $1_$2_PROG_INPLACE = $$($1_$2_PROG)
@@ -278,10 +280,10 @@ endif # $1_$2_PROG_NEEDS_C_WRAPPER
 ifneq "$$(CLEANING)" "YES"
 ifneq "$3" "0"
 ifneq "$$($1_$2_HS_SRCS)" ""
-ifeq "$$(strip $$(ALL_STAGE1_LIBS))" ""
-$$(error ordering failure in $1 ($2): ALL_STAGE1_LIBS is empty)
+ifeq "$$(strip $$(ALL_STAGE1_$$($1_$2_PROGRAM_WAY)_LIBS))" ""
+$$(error ordering failure in $1 ($2): ALL_STAGE1_$$($1_$2_PROGRAM_WAY)_LIBS is empty)
 endif
-$1/$2/build/tmp/$$($1_$2_PROG) : $$(ALL_STAGE1_LIBS) $$(ALL_RTS_LIBS) $$(OTHER_LIBS)
+$1/$2/build/tmp/$$($1_$2_PROG) : $$(ALL_STAGE1_$$($1_$2_PROGRAM_WAY)_LIBS) $$(ALL_RTS_LIBS)
 endif
 endif
 endif

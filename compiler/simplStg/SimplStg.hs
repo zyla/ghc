@@ -37,7 +37,7 @@ stg2stg dflags module_name binds
         ; us <- mkSplitUniqSupply 'g'
 
         ; when (dopt Opt_D_verbose_stg2stg dflags)
-               (log_action dflags dflags SevDump noSrcSpan defaultDumpStyle (text "VERBOSE STG-TO-STG:"))
+               (log_action dflags dflags NoReason SevDump noSrcSpan defaultDumpStyle (text "VERBOSE STG-TO-STG:"))
 
         ; (binds', us', ccs) <- end_pass us "Stg2Stg" ([],[],[]) binds
 
@@ -45,6 +45,9 @@ stg2stg dflags module_name binds
         ; let (us0, us1) = splitUniqSupply us'
         ; (processed_binds, _, cost_centres)
                 <- foldM do_stg_pass (binds', us0, ccs) (getStgToDo dflags)
+
+        ; dumpIfSet_dyn dflags Opt_D_dump_stg "Pre unarise:"
+                        (pprStgBindings processed_binds)
 
         ; let un_binds = unarise us1 processed_binds
 

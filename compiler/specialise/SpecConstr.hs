@@ -29,12 +29,12 @@ import CoreFVs          ( exprsFreeVarsList )
 import CoreMonad
 import Literal          ( litIsLifted )
 import HscTypes         ( ModGuts(..) )
-import WwLib            ( mkWorkerArgs )
+import WwLib            ( isWorkerSmallEnough, mkWorkerArgs )
 import DataCon
 import Coercion         hiding( substCo )
 import Rules
 import Type             hiding ( substTy )
-import TyCon            ( isRecursiveTyCon, tyConName )
+import TyCon            ( tyConName )
 import Id
 import PprCore          ( pprParendExpr )
 import MkCore           ( mkImpossibleExpr )
@@ -421,7 +421,7 @@ This seeding is done in the binding for seed_calls in specRec.
 
 Actually in case (2), instead of using the calls from the RHS, it
 would be better to specialise in the importing module.  We'd need to
-add an INLINEABLE pragma to the function, and then it can be
+add an INLINABLE pragma to the function, and then it can be
 specialised in the importing scope, just as is done for type classes
 in Specialise.specImports. This remains to be done (#10346).
 
@@ -812,7 +812,7 @@ data Value    = ConVal AltCon [CoreArg] -- _Saturated_ constructors
 
 instance Outputable Value where
    ppr (ConVal con args) = ppr con <+> interpp'SP args
-   ppr LambdaVal         = ptext (sLit "<Lambda>")
+   ppr LambdaVal         = text "<Lambda>"
 
 ---------------------
 initScEnv :: DynFlags -> Module -> UniqFM SpecConstrAnnotation -> ScEnv
@@ -1058,8 +1058,8 @@ data Call = Call Id [CoreArg] ValueEnv
 
 instance Outputable ScUsage where
   ppr (SCU { scu_calls = calls, scu_occs = occs })
-    = ptext (sLit "SCU") <+> braces (sep [ ptext (sLit "calls =") <+> ppr calls
-                                         , ptext (sLit "occs =") <+> ppr occs ])
+    = text "SCU" <+> braces (sep [ ptext (sLit "calls =") <+> ppr calls
+                                         , text "occs =" <+> ppr occs ])
 
 instance Outputable Call where
   ppr (Call fn args _) = ppr fn <+> fsep (map pprParendExpr args)
@@ -1071,8 +1071,8 @@ combineCalls :: CallEnv -> CallEnv -> CallEnv
 combineCalls = plusVarEnv_C (++)
   where
 --    plus cs ds | length res > 1
---               = pprTrace "combineCalls" (vcat [ ptext (sLit "cs:") <+> ppr cs
---                                               , ptext (sLit "ds:") <+> ppr ds])
+--               = pprTrace "combineCalls" (vcat [ text "cs:" <+> ppr cs
+--                                               , text "ds:" <+> ppr ds])
 --                 res
 --               | otherwise = res
 --       where
@@ -1118,9 +1118,9 @@ A pattern binds b, x::a, y::b, z::b->a, but not 'a'!
 -}
 
 instance Outputable ArgOcc where
-  ppr (ScrutOcc xs) = ptext (sLit "scrut-occ") <> ppr xs
-  ppr UnkOcc        = ptext (sLit "unk-occ")
-  ppr NoOcc         = ptext (sLit "no-occ")
+  ppr (ScrutOcc xs) = text "scrut-occ" <> ppr xs
+  ppr UnkOcc        = text "unk-occ"
+  ppr NoOcc         = text "no-occ"
 
 evalScrutOcc :: ArgOcc
 evalScrutOcc = ScrutOcc emptyUFM
@@ -1533,10 +1533,14 @@ specialise env bind_calls (RI { ri_fn = fn, ri_lam_bndrs = arg_bndrs
 
   | Just all_calls <- lookupVarEnv bind_calls fn
   = -- pprTrace "specialise entry {" (ppr fn <+> ppr (length all_calls)) $
-    do  { (boring_call, pats) <- callsToPats env specs arg_occs all_calls
-
+    do  { (boring_call, all_pats) <- callsToPats env specs arg_occs all_calls
                 -- Bale out if too many specialisations
-        ; let n_pats      = length pats
+        ; let pats = filter (is_small_enough . fst) all_pats
+              is_small_enough vars = isWorkerSmallEnough (sc_dflags env) vars
+                  -- We are about to construct w/w pair in 'spec_one'.
+                  -- Omit specialisation leading to high arity workers.
+                  -- See Note [Limit w/w arity] in WwLib
+              n_pats      = length pats
               spec_count' = n_pats + spec_count
         ; case sc_count env of
             Just max | not (sc_force env) && spec_count' > max
@@ -1545,14 +1549,14 @@ specialise env bind_calls (RI { ri_fn = fn, ri_lam_bndrs = arg_bndrs
                         return (nullUsage, spec_info)
                    else return (nullUsage, spec_info)
                 where
-                   msg = vcat [ sep [ ptext (sLit "Function") <+> quotes (ppr fn)
-                                    , nest 2 (ptext (sLit "has") <+>
-                                              speakNOf spec_count' (ptext (sLit "call pattern")) <> comma <+>
-                                              ptext (sLit "but the limit is") <+> int max) ]
-                              , ptext (sLit "Use -fspec-constr-count=n to set the bound")
+                   msg = vcat [ sep [ text "Function" <+> quotes (ppr fn)
+                                    , nest 2 (text "has" <+>
+                                              speakNOf spec_count' (text "call pattern") <> comma <+>
+                                              text "but the limit is" <+> int max) ]
+                              , text "Use -fspec-constr-count=n to set the bound"
                               , extra ]
-                   extra | not opt_PprStyle_Debug = ptext (sLit "Use -dppr-debug to see specialisations")
-                         | otherwise = ptext (sLit "Specialisations:") <+> ppr (pats ++ [p | OS p _ _ _ <- specs])
+                   extra | not opt_PprStyle_Debug = text "Use -dppr-debug to see specialisations"
+                         | otherwise = text "Specialisations:" <+> ppr (pats ++ [p | OS p _ _ _ <- specs])
 
             _normal_case -> do {
 
@@ -1643,17 +1647,23 @@ spec_one env fn arg_bndrs body (call_pat@(qvars, pats), rule_number)
 --        return ()
 
                 -- And build the results
-        ; let spec_id    = mkLocalIdOrCoVar spec_name (mkPiTypes spec_lam_args body_ty)
+        ; let spec_id    = mkLocalIdOrCoVar spec_name (mkLamTypes spec_lam_args body_ty)
                              -- See Note [Transfer strictness]
                              `setIdStrictness` spec_str
                              `setIdArity` count isId spec_lam_args
               spec_str   = calcSpecStrictness fn spec_lam_args pats
+
+
                 -- Conditionally use result of new worker-wrapper transform
-              (spec_lam_args, spec_call_args) = mkWorkerArgs (sc_dflags env) qvars NoOneShotInfo body_ty
+              (spec_lam_args, spec_call_args) = mkWorkerArgs (sc_dflags env) qvars body_ty
                 -- Usual w/w hack to avoid generating
                 -- a spec_rhs of unlifted type and no args
 
-              spec_rhs   = mkLams spec_lam_args spec_body
+              spec_lam_args_str = handOutStrictnessInformation (fst (splitStrictSig spec_str)) spec_lam_args
+                -- Annotate the variables with the strictness information from
+                -- the function (see Note [Strictness information in worker binders])
+
+              spec_rhs   = mkLams spec_lam_args_str spec_body
               body_ty    = exprType spec_body
               rule_rhs   = mkVarApps (Var spec_id) spec_call_args
               inline_act = idInlineActivation fn
@@ -1662,6 +1672,16 @@ spec_one env fn arg_bndrs body (call_pat@(qvars, pats), rule_number)
                                   rule_name inline_act fn_name qvars pats rule_rhs
                            -- See Note [Transfer activation]
         ; return (spec_usg, OS call_pat rule spec_id spec_rhs) }
+
+
+-- See Note [Strictness information in worker binders]
+handOutStrictnessInformation :: [Demand] -> [Var] -> [Var]
+handOutStrictnessInformation = go
+  where
+    go _ [] = []
+    go [] vs = vs
+    go (d:dmds) (v:vs) | isId v = setIdDemandInfo v d : go dmds vs
+    go dmds (v:vs) = v : go dmds vs
 
 calcSpecStrictness :: Id                     -- The original function
                    -> [Var] -> [CoreExpr]    -- Call pattern
@@ -1742,6 +1762,14 @@ See Trac #3437 for a good example.
 
 The function calcSpecStrictness performs the calculation.
 
+Note [Strictness information in worker binders]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+After having calculated the strictness annotation for the worker (see Note
+[Transfer strictness] above), we also want to have this information attached to
+the worker’s arguments, for the benefit of later passes. The function
+handOutStrictnessInformation decomposes the strictness annotation calculated by
+calcSpecStrictness and attaches them to the variables.
 
 ************************************************************************
 *                                                                      *
@@ -1810,15 +1838,15 @@ is_too_recursive :: ScEnv -> (CallPat, ValueEnv) -> Bool
     -- This is only necessary if ForceSpecConstr is in effect:
     -- otherwise specConstrCount will cause specialisation to terminate.
     -- See Note [Limit recursive specialisation]
+-- TODO: make me more accurate
 is_too_recursive env ((_,exprs), val_env)
  = sc_force env && maximum (map go exprs) > sc_recursive env
  where
   go e
-   | Just (ConVal (DataAlt dc) args) <- isValue val_env e
-   , isRecursiveTyCon (dataConTyCon dc)
+   | Just (ConVal (DataAlt _) args) <- isValue val_env e
    = 1 + sum (map go args)
 
-   |App f a                          <- e
+   | App f a                         <- e
    = go f + go a
 
    | otherwise

@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP #-}
 
 module TcSimplify(
-       simplifyInfer, solveTopConstraints,
+       simplifyInfer, InferMode(..),
        growThetaTyVars,
        simplifyAmbiguityCheck,
        simplifyDefault,
@@ -18,42 +18,37 @@ module TcSimplify(
 import Bag
 import Class         ( Class, classKey, classTyCon )
 import DynFlags      ( WarningFlag ( Opt_WarnMonomorphism )
+                     , WarnReason ( Reason )
                      , DynFlags( solverIterations ) )
 import Inst
 import ListSetOps
 import Maybes
 import Name
 import Outputable
-import Pair
 import PrelInfo
 import PrelNames
 import TcErrors
 import TcEvidence
 import TcInteract
-import TcCanonical   ( makeSuperClasses, mkGivensWithSuperClasses )
+import TcCanonical   ( makeSuperClasses )
 import TcMType   as TcM
 import TcRnMonad as TcM
 import TcSMonad  as TcS
 import TcType
 import TrieMap       () -- DV: for now
 import Type
-import TysWiredIn    ( liftedDataConTy )
-import Unify         ( tcMatchTy )
+import TysWiredIn    ( ptrRepLiftedTy )
+import Unify         ( tcMatchTyKi )
 import Util
 import Var
 import VarSet
+import UniqFM
 import BasicTypes    ( IntWithInf, intGtLimit )
 import ErrUtils      ( emptyMessages )
-import FastString
 import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad ( when, unless )
 import Data.List     ( partition )
-import Data.Foldable    ( fold )
-
-#if __GLASGOW_HASKELL__ < 709
-import Data.Traversable ( traverse )
-#endif
 
 {-
 *********************************************************************************
@@ -70,7 +65,10 @@ simplifyTop :: WantedConstraints -> TcM (Bag EvBind)
 -- in a degenerate implication, so we do that here instead
 simplifyTop wanteds
   = do { traceTc "simplifyTop {" $ text "wanted = " <+> ppr wanteds
-       ; ((final_wc, unsafe_ol), binds1) <- runTcS $ simpl_top wanteds
+       ; ((final_wc, unsafe_ol), binds1) <- runTcS $
+            do { final_wc <- simpl_top wanteds
+               ; unsafe_ol <- getSafeOverlapFailures
+               ; return (final_wc, unsafe_ol) }
        ; traceTc "End simplifyTop }" empty
 
        ; traceTc "reportUnsolved {" empty
@@ -99,13 +97,13 @@ simplifyTop wanteds
        ; return (evBindMapBinds binds1 `unionBags` binds2) }
 
 -- | Type-check a thing that emits only equality constraints, then
--- solve those constraints. Emits errors -- but does not fail --
--- if there is trouble.
+-- solve those constraints. Fails outright if there is trouble.
 solveEqualities :: TcM a -> TcM a
 solveEqualities thing_inside
-  = do { (result, wanted) <- captureConstraints thing_inside
+  = checkNoErrs $  -- See Note [Fail fast on kind errors]
+    do { (result, wanted) <- captureConstraints thing_inside
        ; traceTc "solveEqualities {" $ text "wanted = " <+> ppr wanted
-       ; (final_wc, _) <- runTcSEqualities $ simpl_top wanted
+       ; final_wc <- runTcSEqualities $ simpl_top wanted
        ; traceTc "End solveEqualities }" empty
 
        ; traceTc "reportAllUnsolved {" empty
@@ -113,30 +111,24 @@ solveEqualities thing_inside
        ; traceTc "reportAllUnsolved }" empty
        ; return result }
 
-type SafeOverlapFailures = Cts
--- ^ See Note [Safe Haskell Overlapping Instances Implementation]
-
-type FinalConstraints = (WantedConstraints, SafeOverlapFailures)
-
-simpl_top :: WantedConstraints -> TcS FinalConstraints
+simpl_top :: WantedConstraints -> TcS WantedConstraints
     -- See Note [Top-level Defaulting Plan]
 simpl_top wanteds
   = do { wc_first_go <- nestTcS (solveWantedsAndDrop wanteds)
                             -- This is where the main work happens
-       ; wc_final <- try_tyvar_defaulting wc_first_go
-       ; unsafe_ol <- getSafeOverlapFailures
-       ; return (wc_final, unsafe_ol) }
+       ; try_tyvar_defaulting wc_first_go }
   where
     try_tyvar_defaulting :: WantedConstraints -> TcS WantedConstraints
     try_tyvar_defaulting wc
       | isEmptyWC wc
       = return wc
       | otherwise
-      = do { free_tvs <- TcS.zonkTyCoVarsAndFV (tyCoVarsOfWC wc)
-           ; let meta_tvs = varSetElems (filterVarSet isMetaTyVar free_tvs)
+      = do { free_tvs <- TcS.zonkTyCoVarsAndFVList (tyCoVarsOfWCList wc)
+           ; let meta_tvs = filter (isTyVar <&&> isMetaTyVar) free_tvs
                    -- zonkTyCoVarsAndFV: the wc_first_go is not yet zonked
                    -- filter isMetaTyVar: we might have runtime-skolems in GHCi,
                    -- and we definitely don't want to try to assign to those!
+                   -- the isTyVar needs to weed out coercion variables
 
            ; defaulted <- mapM defaultTyVarTcS meta_tvs   -- Has unification side effects
            ; if or defaulted
@@ -155,7 +147,7 @@ simpl_top wanteds
            ; if something_happened
              then do { wc_residual <- nestTcS (solveWantedsAndDrop wc)
                      ; try_class_defaulting wc_residual }
-                  -- See Note [Overview of implicit CallStacks]
+                  -- See Note [Overview of implicit CallStacks] in TcEvidence
              else try_callstack_defaulting wc }
 
     try_callstack_defaulting :: WantedConstraints -> TcS WantedConstraints
@@ -167,7 +159,7 @@ simpl_top wanteds
 
 -- | Default any remaining @CallStack@ constraints to empty @CallStack@s.
 defaultCallStacks :: WantedConstraints -> TcS WantedConstraints
--- See Note [Overview of implicit CallStacks]
+-- See Note [Overview of implicit CallStacks] in TcEvidence
 defaultCallStacks wanteds
   = do simples <- handle_simples (wc_simple wanteds)
        implics <- mapBagM handle_implic (wc_impl wanteds)
@@ -178,28 +170,43 @@ defaultCallStacks wanteds
   handle_simples simples
     = catBagMaybes <$> mapBagM defaultCallStack simples
 
-  handle_implic implic = do
-    wanteds <- defaultCallStacks (ic_wanted implic)
-    return (implic { ic_wanted = wanteds })
+  handle_implic implic
+    = do { wanteds <- setEvBindsTcS (ic_binds implic) $
+                      -- defaultCallStack sets a binding, so
+                      -- we must set the correct binding group
+                      defaultCallStacks (ic_wanted implic)
+         ; return (implic { ic_wanted = wanteds }) }
 
-  defaultCallStack ct@(CDictCan { cc_ev = ev_w })
-    | Just _ <- isCallStackCt ct
-    = do { solveCallStack ev_w EvCsEmpty
+  defaultCallStack ct
+    | Just _ <- isCallStackPred (ctPred ct)
+    = do { solveCallStack (cc_ev ct) EvCsEmpty
          ; return Nothing }
 
   defaultCallStack ct
     = return (Just ct)
 
 
--- | Type-check a thing, returning the result and any EvBinds produced
--- during solving. Emits errors -- but does not fail -- if there is trouble.
-solveTopConstraints :: TcM a -> TcM (a, Bag EvBind)
-solveTopConstraints thing_inside
-  = do { (result, wanted) <- captureConstraints thing_inside
-       ; ev_binds <- simplifyTop wanted
-       ; return (result, ev_binds) }
+{- Note [Fail fast on kind errors]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+solveEqualities is used to solve kind equalities when kind-checking
+user-written types. If solving fails we should fail outright, rather
+than just accumulate an error message, for two reasons:
 
-{-
+  * A kind-bogus type signature may cause a cascade of knock-on
+    errors if we let it pass
+
+  * More seriously, we don't have a convenient term-level place to add
+    deferred bindings for unsolved kind-equality constraints, so we
+    don't build evidence bindings (by usine reportAllUnsolved). That
+    means that we'll be left with with a type that has coercion holes
+    in it, something like
+           <type> |> co-hole
+    where co-hole is not filled in.  Eeek!  That un-filled-in
+    hole actually causes GHC to crash with "fvProv falls into a hole"
+    See Trac #11563, #11520, #11516, #11399
+
+So it's important to use 'checkNoErrs' here!
+
 Note [When to do type-class defaulting]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In GHC 7.6 and 7.8.2, we did type-class defaulting only if insolubleWC
@@ -322,69 +329,83 @@ Note [Safe Haskell Overlapping Instances Implementation]
 How is this implemented? It's complicated! So we'll step through it all:
 
  1) `InstEnv.lookupInstEnv` -- Performs instance resolution, so this is where
- we check if a particular type-class method call is safe or unsafe. We do this
- through the return type, `ClsInstLookupResult`, where the last parameter is a
- list of instances that are unsafe to overlap. When the method call is safe,
- the list is null.
+    we check if a particular type-class method call is safe or unsafe. We do this
+    through the return type, `ClsInstLookupResult`, where the last parameter is a
+    list of instances that are unsafe to overlap. When the method call is safe,
+    the list is null.
 
  2) `TcInteract.matchClassInst` -- This module drives the instance resolution
- / dictionary generation. The return type is `LookupInstResult`, which either
- says no instance matched, or one found, and if it was a safe or unsafe
- overlap.
+    / dictionary generation. The return type is `LookupInstResult`, which either
+    says no instance matched, or one found, and if it was a safe or unsafe
+    overlap.
 
  3) `TcInteract.doTopReactDict` -- Takes a dictionary / class constraint and
- tries to resolve it by calling (in part) `matchClassInst`. The resolving
- mechanism has a work list (of constraints) that it process one at a time. If
- the constraint can't be resolved, it's added to an inert set. When compiling
- an `-XSafe` or `-XTrustworthy` module, we follow this approach as we know
- compilation should fail. These are handled as normal constraint resolution
- failures from here-on (see step 6).
+     tries to resolve it by calling (in part) `matchClassInst`. The resolving
+     mechanism has a work list (of constraints) that it process one at a time. If
+     the constraint can't be resolved, it's added to an inert set. When compiling
+     an `-XSafe` or `-XTrustworthy` module, we follow this approach as we know
+     compilation should fail. These are handled as normal constraint resolution
+     failures from here-on (see step 6).
 
- Otherwise, we may be inferring safety (or using `-Wunsafe`), and
- compilation should succeed, but print warnings and/or mark the compiled module
- as `-XUnsafe`. In this case, we call `insertSafeOverlapFailureTcS` which adds
- the unsafe (but resolved!) constraint to the `inert_safehask` field of
- `InertCans`.
+     Otherwise, we may be inferring safety (or using `-Wunsafe`), and
+     compilation should succeed, but print warnings and/or mark the compiled module
+     as `-XUnsafe`. In this case, we call `insertSafeOverlapFailureTcS` which adds
+     the unsafe (but resolved!) constraint to the `inert_safehask` field of
+     `InertCans`.
 
- 4) `TcSimplify.simpl_top` -- Top-level function for driving the simplifier for
- constraint resolution. Once finished, we call `getSafeOverlapFailures` to
- retrieve the list of overlapping instances that were successfully resolved,
- but unsafe. Remember, this is only applicable for generating warnings
- (`-Wunsafe`) or inferring a module unsafe. `-XSafe` and `-XTrustworthy`
- cause compilation failure by not resolving the unsafe constraint at all.
- `simpl_top` returns a list of unresolved constraints (all types), and resolved
- (but unsafe) resolved dictionary constraints.
+ 4) `TcSimplify.simplifyTop`:
+       * Call simpl_top, the top-level function for driving the simplifier for
+         constraint resolution.
 
- 5) `TcSimplify.simplifyTop` -- Is the caller of `simpl_top`. For unresolved
- constraints, it calls `TcErrors.reportUnsolved`, while for unsafe overlapping
- instance constraints, it calls `TcErrors.warnAllUnsolved`. Both functions
- convert constraints into a warning message for the user.
+       * Once finished, call `getSafeOverlapFailures` to retrieve the
+         list of overlapping instances that were successfully resolved,
+         but unsafe. Remember, this is only applicable for generating warnings
+         (`-Wunsafe`) or inferring a module unsafe. `-XSafe` and `-XTrustworthy`
+         cause compilation failure by not resolving the unsafe constraint at all.
 
- 6) `TcErrors.*Unsolved` -- Generates error messages for constraints by
- actually calling `InstEnv.lookupInstEnv` again! Yes, confusing, but all we
- know is the constraint that is unresolved or unsafe. For dictionary, all we
- know is that we need a dictionary of type C, but not what instances are
- available and how they overlap. So we once again call `lookupInstEnv` to
- figure that out so we can generate a helpful error message.
+       * For unresolved constraints (all types), call `TcErrors.reportUnsolved`,
+         while for resolved but unsafe overlapping dictionary constraints, call
+         `TcErrors.warnAllUnsolved`. Both functions convert constraints into a
+         warning message for the user.
 
- 7) `TcSimplify.simplifyTop` -- In the case of `warnAllUnsolved` for resolved,
- but unsafe dictionary constraints, we collect the generated warning message
- (pop it) and call `TcRnMonad.recordUnsafeInfer` to mark the module we are
- compiling as unsafe, passing the warning message along as the reason.
+       * In the case of `warnAllUnsolved` for resolved, but unsafe
+         dictionary constraints, we collect the generated warning
+         message (pop it) and call `TcRnMonad.recordUnsafeInfer` to
+         mark the module we are compiling as unsafe, passing the
+         warning message along as the reason.
 
- 8) `TcRnMonad.recordUnsafeInfer` -- Save the unsafe result and reason in an
- IORef called `tcg_safeInfer`.
+ 5) `TcErrors.*Unsolved` -- Generates error messages for constraints by
+    actually calling `InstEnv.lookupInstEnv` again! Yes, confusing, but all we
+    know is the constraint that is unresolved or unsafe. For dictionary, all we
+    know is that we need a dictionary of type C, but not what instances are
+    available and how they overlap. So we once again call `lookupInstEnv` to
+    figure that out so we can generate a helpful error message.
 
- 9) `HscMain.tcRnModule'` -- Reads `tcg_safeInfer` after type-checking, calling
- `HscMain.markUnsafeInfer` (passing the reason along) when safe-inferrence
- failed.
+ 6) `TcRnMonad.recordUnsafeInfer` -- Save the unsafe result and reason in an
+      IORef called `tcg_safeInfer`.
+
+ 7) `HscMain.tcRnModule'` -- Reads `tcg_safeInfer` after type-checking, calling
+    `HscMain.markUnsafeInfer` (passing the reason along) when safe-inferrence
+    failed.
+
+Note [No defaulting in the ambiguity check]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When simplifying constraints for the ambiguity check, we use
+solveWantedsAndDrop, not simpl_top, so that we do no defaulting.
+Trac #11947 was an example:
+   f :: Num a => Int -> Int
+This is ambiguous of course, but we don't want to default the
+(Num alpha) constraint to (Num Int)!  Doing so gives a defaulting
+warning, but no error.
 -}
 
 ------------------
 simplifyAmbiguityCheck :: Type -> WantedConstraints -> TcM ()
 simplifyAmbiguityCheck ty wanteds
   = do { traceTc "simplifyAmbiguityCheck {" (text "type = " <+> ppr ty $$ text "wanted = " <+> ppr wanteds)
-       ; ((final_wc, _), _) <- runTcS $ simpl_top wanteds
+       ; (final_wc, _) <- runTcS $ solveWantedsAndDrop wanteds
+             -- NB: no defaulting!  See Note [No defaulting in the ambiguity check]
+
        ; traceTc "End simplifyAmbiguityCheck }" empty
 
        -- Normally report all errors; but with -XAllowAmbiguousTypes
@@ -409,15 +430,15 @@ simplifyInteractive wanteds
 simplifyDefault :: ThetaType    -- Wanted; has no type variables in it
                 -> TcM ()       -- Succeeds if the constraint is soluble
 simplifyDefault theta
-  = do { traceTc "simplifyInteractive" empty
-       ; wanted <- newWanteds DefaultOrigin theta
-       ; unsolved <- simplifyWantedsTcM wanted
-
+  = do { traceTc "simplifyDefault" empty
+       ; loc <- getCtLocM DefaultOrigin Nothing
+       ; let wanted = [ CtDerived { ctev_pred = pred
+                                  , ctev_loc  = loc }
+                      | pred <- theta ]
+       ; unsolved <- runTcSDeriveds (solveWanteds (mkSimpleWC wanted))
        ; traceTc "reportUnsolved {" empty
-       -- See Note [Deferring coercion errors to runtime]
        ; reportAllUnsolved unsolved
        ; traceTc "reportUnsolved }" empty
-
        ; return () }
 
 ------------------
@@ -428,8 +449,8 @@ tcCheckSatisfiability given_ids
        ; let given_loc = mkGivenLoc topTcLevel UnkSkol lcl_env
        ; (res, _ev_binds) <- runTcS $
              do { traceTcS "checkSatisfiability {" (ppr given_ids)
-                ; given_cts <- mkGivensWithSuperClasses given_loc (bagToList given_ids)
-                     -- See Note [Superclases and satisfiability]
+                ; let given_cts = mkGivens given_loc (bagToList given_ids)
+                     -- See Note [Superclasses and satisfiability]
                 ; insols <- solveSimpleGivens given_cts
                 ; insols <- try_harder insols
                 ; traceTcS "checkSatisfiability }" (ppr insols)
@@ -448,7 +469,7 @@ tcCheckSatisfiability given_ids
            ; new_given <- makeSuperClasses pending_given
            ; solveSimpleGivens new_given }
 
-{- Note [Superclases and satisfiability]
+{- Note [Superclasses and satisfiability]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Expand superclasses before starting, because (Int ~ Bool), has
 (Int ~~ Bool) as a superclass, which in turn has (Int ~N# Bool)
@@ -462,7 +483,7 @@ signature
 where F is a type function.  This happened in Trac #3972.
 
 We could do more than once but we'd have to have /some/ limit: in the
-the recurisve case, we would go on forever in the common case where
+the recursive case, we would go on forever in the common case where
 the constraints /are/ satisfiable (Trac #10592 comment:12!).
 
 For stratightforard situations without type functions the try_harder
@@ -496,31 +517,48 @@ the let binding.
 
 -}
 
+-- | How should we choose which constraints to quantify over?
+data InferMode = ApplyMR          -- ^ Apply the monomorphism restriction,
+                                  -- never quantifying over any constraints
+               | EagerDefaulting  -- ^ See Note [TcRnExprMode] in TcRnDriver,
+                                  -- the :type +d case; this mode refuses
+                                  -- to quantify over any defaultable constraint
+               | NoRestrictions   -- ^ Quantify over any constraint that
+                                  -- satisfies TcType.pickQuantifiablePreds
+
+instance Outputable InferMode where
+  ppr ApplyMR         = text "ApplyMR"
+  ppr EagerDefaulting = text "EagerDefaulting"
+  ppr NoRestrictions  = text "NoRestrictions"
+
 simplifyInfer :: TcLevel               -- Used when generating the constraints
-              -> Bool                  -- Apply monomorphism restriction
-              -> [TcIdSigInfo]         -- Any signatures (possibly partial)
+              -> InferMode
+              -> [TcIdSigInst]         -- Any signatures (possibly partial)
               -> [(Name, TcTauType)]   -- Variables to be generalised,
                                        -- and their tau-types
               -> WantedConstraints
               -> TcM ([TcTyVar],    -- Quantify over these type variables
                       [EvVar],      -- ... and these constraints (fully zonked)
                       TcEvBinds)    -- ... binding these evidence variables
-simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
+simplifyInfer rhs_tclvl infer_mode sigs name_taus wanteds
   | isEmptyWC wanteds
   = do { gbl_tvs <- tcGetGlobalTyCoVars
-       ; qtkvs <- quantify_tvs sigs gbl_tvs $
-                  splitDepVarsOfTypes (map snd name_taus)
+       ; dep_vars <- zonkTcTypesAndSplitDepVars (map snd name_taus)
+       ; qtkvs <- quantifyZonkedTyVars gbl_tvs dep_vars
        ; traceTc "simplifyInfer: empty WC" (ppr name_taus $$ ppr qtkvs)
        ; return (qtkvs, [], emptyTcEvBinds) }
 
   | otherwise
   = do { traceTc "simplifyInfer {"  $ vcat
-             [ ptext (sLit "sigs =") <+> ppr sigs
-             , ptext (sLit "binds =") <+> ppr name_taus
-             , ptext (sLit "rhs_tclvl =") <+> ppr rhs_tclvl
-             , ptext (sLit "apply_mr =") <+> ppr apply_mr
-             , ptext (sLit "(unzonked) wanted =") <+> ppr wanteds
+             [ text "sigs =" <+> ppr sigs
+             , text "binds =" <+> ppr name_taus
+             , text "rhs_tclvl =" <+> ppr rhs_tclvl
+             , text "infer_mode =" <+> ppr infer_mode
+             , text "(unzonked) wanted =" <+> ppr wanteds
              ]
+
+       ; let partial_sigs = filter isPartialSig sigs
+             psig_theta   = concatMap sig_inst_theta partial_sigs
 
        -- First do full-blown solving
        -- NB: we must gather up all the bindings from doing
@@ -530,20 +568,26 @@ simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
        -- bindings, so we can't just revert to the input
        -- constraint.
 
-       ; ev_binds_var <- TcM.newTcEvBinds
-       ; wanted_transformed_incl_derivs <- setTcLevel rhs_tclvl $
-           do { sig_derived <- concatMapM mkSigDerivedWanteds sigs
-                  -- the False says we don't really need to solve all Deriveds
-              ; runTcSWithEvBinds False (Just ev_binds_var) $
-                solveWanteds (wanteds `addSimples` listToBag sig_derived) }
+       ; tc_lcl_env      <- TcM.getLclEnv
+       ; ev_binds_var    <- TcM.newTcEvBinds
+       ; psig_theta_vars <- mapM TcM.newEvVar psig_theta
+       ; wanted_transformed_incl_derivs
+            <- setTcLevel rhs_tclvl $
+               runTcSWithEvBinds False (Just ev_binds_var) $
+               do { let loc = mkGivenLoc rhs_tclvl UnkSkol tc_lcl_env
+                        psig_givens = mkGivens loc psig_theta_vars
+                  ; _ <- solveSimpleGivens psig_givens
+                         -- See Note [Add signature contexts as givens]
+                  ; solveWanteds wanteds }
        ; wanted_transformed_incl_derivs <- TcM.zonkWC wanted_transformed_incl_derivs
 
        -- Find quant_pred_candidates, the predicates that
        -- we'll consider quantifying over
-       -- NB: We do not do any defaulting when inferring a type, this can lead
-       -- to less polymorphic types, see Note [Default while Inferring]
+       -- NB1: wanted_transformed does not include anything provable from
+       --      the psig_theta; it's just the extra bit
+       -- NB2: We do not do any defaulting when inferring a type, this can lead
+       --      to less polymorphic types, see Note [Default while Inferring]
 
-       ; tc_lcl_env <- TcM.getLclEnv
        ; let wanted_transformed = dropDerivedWC wanted_transformed_incl_derivs
        ; quant_pred_candidates   -- Fully zonked
            <- if insolubleWC rhs_tclvl wanted_transformed_incl_derivs
@@ -552,7 +596,8 @@ simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
                                --     hence "incl_derivs"
 
               else do { let quant_cand = approximateWC wanted_transformed
-                            meta_tvs   = filter isMetaTyVar (varSetElems (tyCoVarsOfCts quant_cand))
+                            meta_tvs   = filter isMetaTyVar $
+                                         tyCoVarsOfCtsList quant_cand
 
                       ; gbl_tvs <- tcGetGlobalTyCoVars
                             -- Miminise quant_cand.  We are not interested in any evidence
@@ -560,8 +605,8 @@ simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
                             -- again later. All we want here are the predicates over which to
                             -- quantify.
                             --
-                            -- If any meta-tyvar unifications take place (unlikely), we'll
-                            -- pick that up later.
+                            -- If any meta-tyvar unifications take place (unlikely),
+                            -- we'll pick that up later.
 
                       -- See Note [Promote _and_ default when inferring]
                       ; let def_tyvar tv
@@ -573,9 +618,10 @@ simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
                       ; WC { wc_simple = simples }
                            <- setTcLevel rhs_tclvl $
                               runTcSDeriveds       $
-                              solveSimpleWanteds $ mapBag toDerivedCt quant_cand
-                                -- NB: we don't want evidence, so used
-                                -- Derived constraints
+                              solveSimpleWanteds   $
+                              mapBag toDerivedCt quant_cand
+                                -- NB: we don't want evidence,
+                                -- so use Derived constraints
 
                       ; simples <- TcM.zonkSimples simples
 
@@ -585,11 +631,10 @@ simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
        -- NB: quant_pred_candidates is already fully zonked
 
        -- Decide what type variables and constraints to quantify
-       ; zonked_taus <- mapM (TcM.zonkTcType . snd) name_taus
-       ; let zonked_tau_tkvs = splitDepVarsOfTypes zonked_taus
-       ; (qtvs, bound_theta)
-           <- decideQuantification apply_mr sigs name_taus
-                                   quant_pred_candidates zonked_tau_tkvs
+       -- NB: bound_theta are constraints we want to quantify over,
+       --     /apart from/ the psig_theta, which we always quantify over
+       ; (qtvs, bound_theta) <- decideQuantification infer_mode name_taus psig_theta
+                                                     quant_pred_candidates
 
          -- Promote any type variables that are free in the inferred type
          -- of the function:
@@ -603,39 +648,48 @@ simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
          -- we don't quantify over beta (since it is fixed by envt)
          -- so we must promote it!  The inferred type is just
          --   f :: beta -> beta
-       ; outer_tclvl    <- TcM.getTcLevel
-       ; zonked_tau_tvs <- fold <$>
-                           traverse TcM.zonkTyCoVarsAndFV zonked_tau_tkvs
+       ; zonked_taus <- mapM (TcM.zonkTcType . snd) name_taus
               -- decideQuantification turned some meta tyvars into
               -- quantified skolems, so we have to zonk again
 
-       ; let phi_tvs     = tyCoVarsOfTypes bound_theta
-                           `unionVarSet` zonked_tau_tvs
+       ; let phi_tkvs = tyCoVarsOfTypes bound_theta  -- Already zonked
+                        `unionVarSet` tyCoVarsOfTypes zonked_taus
+             promote_tkvs = closeOverKinds phi_tkvs `delVarSetList` qtvs
 
-             promote_tvs = closeOverKinds phi_tvs `delVarSetList` qtvs
-       ; MASSERT2( closeOverKinds promote_tvs `subVarSet` promote_tvs
-                 , ppr phi_tvs $$
-                   ppr (closeOverKinds phi_tvs) $$
-                   ppr promote_tvs $$
-                   ppr (closeOverKinds promote_tvs) )
+       ; MASSERT2( closeOverKinds promote_tkvs `subVarSet` promote_tkvs
+                 , ppr phi_tkvs $$
+                   ppr (closeOverKinds phi_tkvs) $$
+                   ppr promote_tkvs $$
+                   ppr (closeOverKinds promote_tkvs) )
            -- we really don't want a type to be promoted when its kind isn't!
 
            -- promoteTyVar ignores coercion variables
-       ; mapM_ (promoteTyVar outer_tclvl) (varSetElems promote_tvs)
+       ; outer_tclvl <- TcM.getTcLevel
+       ; mapM_ (promoteTyVar outer_tclvl) (nonDetEltsUFM promote_tkvs)
+           -- It's OK to use nonDetEltsUFM here because promoteTyVar is
+           -- commutative
 
            -- Emit an implication constraint for the
            -- remaining constraints from the RHS
+           -- extra_qtvs: see Note [Quantification and partial signatures]
        ; bound_theta_vars <- mapM TcM.newEvVar bound_theta
-       ; let skol_info   = InferSkol [ (name, mkSigmaTy [] bound_theta ty)
+       ; psig_theta_vars  <- mapM zonkId psig_theta_vars
+       ; all_qtvs         <- add_psig_tvs qtvs
+                             [ tv | sig <- partial_sigs
+                                  , (_,tv) <- sig_inst_skols sig ]
+
+       ; let full_theta      = psig_theta      ++ bound_theta
+             full_theta_vars = psig_theta_vars ++ bound_theta_vars
+             skol_info   = InferSkol [ (name, mkSigmaTy [] full_theta ty)
                                      | (name, ty) <- name_taus ]
                         -- Don't add the quantified variables here, because
                         -- they are also bound in ic_skols and we want them
                         -- to be tidied uniformly
 
              implic = Implic { ic_tclvl    = rhs_tclvl
-                             , ic_skols    = qtvs
+                             , ic_skols    = all_qtvs
                              , ic_no_eqs   = False
-                             , ic_given    = bound_theta_vars
+                             , ic_given    = full_theta_vars
                              , ic_wanted   = wanted_transformed
                              , ic_status   = IC_Unsolved
                              , ic_binds    = Just ev_binds_var
@@ -645,41 +699,51 @@ simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
 
          -- All done!
        ; traceTc "} simplifyInfer/produced residual implication for quantification" $
-         vcat [ ptext (sLit "quant_pred_candidates =") <+> ppr quant_pred_candidates
-              , ptext (sLit "zonked_taus") <+> ppr zonked_taus
-              , ptext (sLit "zonked_tau_tvs=") <+> ppr zonked_tau_tvs
-              , ptext (sLit "promote_tvs=") <+> ppr promote_tvs
-              , ptext (sLit "bound_theta =") <+> ppr bound_theta
-              , ptext (sLit "qtvs =") <+> ppr qtvs
-              , ptext (sLit "implic =") <+> ppr implic ]
+         vcat [ text "quant_pred_candidates =" <+> ppr quant_pred_candidates
+              , text "promote_tvs=" <+> ppr promote_tkvs
+              , text "psig_theta =" <+> ppr psig_theta
+              , text "bound_theta =" <+> ppr bound_theta
+              , text "full_theta =" <+> ppr full_theta
+              , text "qtvs =" <+> ppr qtvs
+              , text "implic =" <+> ppr implic ]
 
-       ; return ( qtvs, bound_theta_vars, TcEvBinds ev_binds_var ) }
+       ; return ( qtvs, full_theta_vars, TcEvBinds ev_binds_var ) }
+  where
+    add_psig_tvs qtvs [] = return qtvs
+    add_psig_tvs qtvs (tv:tvs)
+      = do { tv <- zonkTcTyVarToTyVar tv
+           ; if tv `elem` qtvs
+             then add_psig_tvs qtvs tvs
+             else do { mb_tv <- zonkQuantifiedTyVar False tv
+                     ; case mb_tv of
+                         Nothing -> add_psig_tvs qtvs      tvs
+                         Just tv -> add_psig_tvs (tv:qtvs) tvs } }
 
-mkSigDerivedWanteds :: TcIdSigInfo -> TcM [Ct]
--- See Note [Add deriveds for signature contexts]
-mkSigDerivedWanteds (TISI { sig_bndr = PartialSig { sig_name = name }
-                          , sig_theta = theta, sig_tau = tau })
- = do { let skol_info = InferSkol [(name, mkSigmaTy [] theta tau)]
-      ; loc <- getCtLocM (GivenOrigin skol_info) (Just TypeLevel)
-      ; return [ mkNonCanonical (CtDerived { ctev_pred = pred
-                                           , ctev_loc = loc })
-               | pred <- theta ] }
-mkSigDerivedWanteds _ = return []
-
-{- Note [Add deriveds for signature contexts]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{- Note [Add signature contexts as givens]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Consider this (Trac #11016):
   f2 :: (?x :: Int) => _
   f2 = ?x
-We'll use plan InferGen because there are holes in the type.  But we want
-to have the (?x :: Int) constraint floating around so that the functional
-dependencies kick in.  Otherwise the occurrence of ?x on the RHS produces
-constraint (?x :: alpha), and we wont unify alpha:=Int.
+or this
+  f3 :: a ~ Bool => (a, _)
+  f3 = (True, False)
+or theis
+  f4 :: (Ord a, _) => a -> Bool
+  f4 x = x==x
+
+We'll use plan InferGen because there are holes in the type.  But:
+ * For f2 we want to have the (?x :: Int) constraint floating around
+   so that the functional dependencies kick in.  Otherwise the
+   occurrence of ?x on the RHS produces constraint (?x :: alpha), and
+   we won't unify alpha:=Int.
+ * For f3 we want the (a ~ Bool) available to solve the wanted (a ~ Bool)
+   in the RHS
+ * For f4 we want to use the (Ord a) in the signature to solve the Eq a
+   constraint.
 
 Solution: in simplifyInfer, just before simplifying the constraints
-gathered from the RHS, add Derived constraints for the context of any
-type signatures.  This is rare; if there is a type signature we'll usually
-be doing CheckGen.  But it happens for signatures with holes.
+gathered from the RHS, add Given constraints for the context of any
+type signatures.
 
 ************************************************************************
 *                                                                      *
@@ -690,6 +754,7 @@ be doing CheckGen.  But it happens for signatures with holes.
 Note [Deciding quantification]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If the monomorphism restriction does not apply, then we quantify as follows:
+
   * Take the global tyvars, and "grow" them using the equality constraints
     E.g.  if x:alpha is in the environment, and alpha ~ [beta] (which can
           happen because alpha is untouchable here) then do not quantify over
@@ -715,87 +780,79 @@ including all covars -- and the quantified constraints are empty/insoluble.
 -}
 
 decideQuantification
-  :: Bool                  -- try the MR restriction?
-  -> [TcIdSigInfo]
-  -> [(Name, TcTauType)]   -- variables to be generalised (for errors only)
-  -> [PredType]            -- candidate theta
-  -> Pair TcTyCoVarSet     -- dependent (kind) variables & type variables
+  :: InferMode
+  -> [(Name, TcTauType)]   -- Variables to be generalised
+  -> [PredType]            -- All annotated constraints from signatures
+  -> [PredType]            -- Candidate theta
   -> TcM ( [TcTyVar]       -- Quantify over these (skolems)
          , [PredType] )    -- and this context (fully zonked)
 -- See Note [Deciding quantification]
-decideQuantification apply_mr sigs name_taus constraints
-                     zonked_pair@(Pair zonked_tau_kvs zonked_tau_tvs)
-  | apply_mr     -- Apply the Monomorphism restriction
+decideQuantification infer_mode name_taus psig_theta candidates
   = do { gbl_tvs <- tcGetGlobalTyCoVars
-       ; let constrained_tvs = tyCoVarsOfTypes constraints `unionVarSet`
-                               filterVarSet isCoVar zonked_tkvs
-             mono_tvs = gbl_tvs `unionVarSet` constrained_tvs
-       ; qtvs <- quantify_tvs sigs mono_tvs zonked_pair
+       ; zonked_taus <- mapM TcM.zonkTcType (psig_theta ++ taus)
+                        -- psig_theta: see Note [Quantification and partial signatures]
+       ; ovl_strings <- xoptM LangExt.OverloadedStrings
+       ; let DV {dv_kvs = zkvs, dv_tvs = ztvs} = splitDepVarsOfTypes zonked_taus
+             (gbl_cand, quant_cand)  -- gbl_cand   = do not quantify me
+                = case infer_mode of   -- quant_cand = try to quantify me
+                    ApplyMR         -> (candidates, [])
+                    NoRestrictions  -> ([], candidates)
+                    EagerDefaulting -> partition is_interactive_ct candidates
+                      where
+                        is_interactive_ct ct
+                          | Just (cls, _) <- getClassPredTys_maybe ct
+                          = isInteractiveClass ovl_strings cls
+                          | otherwise
+                          = False
 
-           -- Warn about the monomorphism restriction
-       ; warn_mono <- woptM Opt_WarnMonomorphism
-       ; let mr_bites = constrained_tvs `intersectsVarSet` zonked_tkvs
-       ; warnTc (warn_mono && mr_bites) $
-         hang (text "The Monomorphism Restriction applies to the binding"
-               <> plural bndrs <+> ptext (sLit "for") <+> pp_bndrs)
-             2 (text "Consider giving a type signature for"
-                <+> if isSingleton bndrs then pp_bndrs
-                                         else ptext (sLit "these binders"))
+             eq_constraints  = filter isEqPred quant_cand
+             constrained_tvs = tyCoVarsOfTypes gbl_cand
+             mono_tvs        = growThetaTyVars eq_constraints $
+                               gbl_tvs `unionVarSet` constrained_tvs
+             tau_tvs_plus    = growThetaTyVarsDSet quant_cand ztvs
+             dvs_plus        = DV { dv_kvs = zkvs, dv_tvs = tau_tvs_plus }
 
-       -- All done
-       ; traceTc "decideQuantification 1" (vcat [ppr constraints, ppr gbl_tvs, ppr mono_tvs
-                                                , ppr qtvs, ppr mr_bites])
-       ; return (qtvs, []) }
-
-  | otherwise
-  = do { gbl_tvs <- tcGetGlobalTyCoVars
-       ; let mono_tvs     = growThetaTyVars equality_constraints gbl_tvs
-             tau_tvs_plus = growThetaTyVars constraints zonked_tau_tvs
-       ; qtvs <- quantify_tvs sigs mono_tvs (Pair zonked_tau_kvs tau_tvs_plus)
+       ; qtvs <- quantifyZonkedTyVars mono_tvs dvs_plus
           -- We don't grow the kvs, as there's no real need to. Recall
           -- that quantifyTyVars uses the separation between kvs and tvs
           -- only for defaulting, and we don't want (ever) to default a tv
           -- to *. So, don't grow the kvs.
 
-       ; constraints <- TcM.zonkTcTypes constraints
-                 -- quantiyTyVars turned some meta tyvars into
+       ; quant_cand <- TcM.zonkTcTypes quant_cand
+                 -- quantifyTyVars turned some meta tyvars into
                  -- quantified skolems, so we have to zonk again
 
-       ; let theta     = pickQuantifiablePreds (mkVarSet qtvs) constraints
+       ; let qtv_set   = mkVarSet qtvs
+             theta     = pickQuantifiablePreds qtv_set quant_cand
              min_theta = mkMinimalBySCs theta
                -- See Note [Minimize by Superclasses]
 
-       ; traceTc "decideQuantification 2"
-           (vcat [ text "constraints:"  <+> ppr constraints
+           -- Warn about the monomorphism restriction
+       ; warn_mono <- woptM Opt_WarnMonomorphism
+       ; let mr_bites | ApplyMR <- infer_mode
+                      = constrained_tvs `intersectsVarSet` tcDepVarSet dvs_plus
+                      | otherwise
+                      = False
+       ; warnTc (Reason Opt_WarnMonomorphism) (warn_mono && mr_bites) $
+         hang (text "The Monomorphism Restriction applies to the binding"
+               <> plural bndrs <+> text "for" <+> pp_bndrs)
+             2 (text "Consider giving a type signature for"
+                <+> if isSingleton bndrs then pp_bndrs
+                                         else text "these binders")
+
+       ; traceTc "decideQuantification"
+           (vcat [ text "infer_mode:"   <+> ppr infer_mode
+                 , text "gbl_cand:"     <+> ppr gbl_cand
+                 , text "quant_cand:"   <+> ppr quant_cand
                  , text "gbl_tvs:"      <+> ppr gbl_tvs
                  , text "mono_tvs:"     <+> ppr mono_tvs
-                 , text "zonked_kvs:"   <+> ppr zonked_tau_kvs
                  , text "tau_tvs_plus:" <+> ppr tau_tvs_plus
                  , text "qtvs:"         <+> ppr qtvs
                  , text "min_theta:"    <+> ppr min_theta ])
        ; return (qtvs, min_theta) }
   where
-    zonked_tkvs = zonked_tau_kvs `unionVarSet` zonked_tau_tvs
-    bndrs    = map fst name_taus
     pp_bndrs = pprWithCommas (quotes . ppr) bndrs
-    equality_constraints = filter isEqPred constraints
-
-quantify_tvs :: [TcIdSigInfo]
-             -> TcTyVarSet   -- the monomorphic tvs
-             -> Pair TcTyVarSet   -- kvs, tvs to quantify
-             -> TcM [TcTyVar]
--- See Note [Which type variables to quantify]
-quantify_tvs sigs mono_tvs (Pair tau_kvs tau_tvs)
-  = quantifyTyVars (mono_tvs `delVarSetList` sig_qtvs)
-                   (Pair tau_kvs
-                         (tau_tvs `extendVarSetList` sig_qtvs
-                                  `extendVarSetList` sig_wcs))
-                   -- NB: quantifyTyVars zonks its arguments
-  where
-    sig_qtvs = [ skol | sig <- sigs, (_, skol) <- sig_skols sig ]
-    sig_wcs  = [ wc   | TISI { sig_bndr = PartialSig { sig_wcs = wcs } } <- sigs
-                      , (_, wc) <- wcs ]
-
+    (bndrs, taus) = unzip name_taus
 
 ------------------
 growThetaTyVars :: ThetaType -> TyCoVarSet -> TyVarSet
@@ -819,44 +876,79 @@ growThetaTyVars theta tvs
        where
          pred_tvs = tyCoVarsOfType pred
 
-{- Note [Which type variables to quantify]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+------------------
+growThetaTyVarsDSet :: ThetaType -> DTyCoVarSet -> DTyVarSet
+-- See Note [Growing the tau-tvs using constraints]
+-- NB: only returns tyvars, never covars
+-- It takes a deterministic set of TyCoVars and returns a deterministic set
+-- of TyVars.
+-- The implementation mirrors growThetaTyVars, the only difference is that
+-- it avoids unionDVarSet and uses more efficient extendDVarSetList.
+growThetaTyVarsDSet theta tvs
+  | null theta = tvs_only
+  | otherwise  = filterDVarSet isTyVar $
+                 transCloDVarSet mk_next seed_tvs
+  where
+    tvs_only = filterDVarSet isTyVar tvs
+    seed_tvs = tvs `extendDVarSetList` tyCoVarsOfTypesList ips
+    (ips, non_ips) = partition isIPPred theta
+                         -- See Note [Inheriting implicit parameters] in TcType
+
+    mk_next :: DVarSet -> DVarSet -- Maps current set to newly-grown ones
+    mk_next so_far = foldr (grow_one so_far) emptyDVarSet non_ips
+    grow_one so_far pred tvs
+       | any (`elemDVarSet` so_far) pred_tvs = tvs `extendDVarSetList` pred_tvs
+       | otherwise                           = tvs
+       where
+         pred_tvs = tyCoVarsOfTypeList pred
+
+{- Note [Quantification and partial signatures]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 When choosing type variables to quantify, the basic plan is to
 quantify over all type variables that are
  * free in the tau_tvs, and
  * not forced to be monomorphic (mono_tvs),
    for example by being free in the environment.
 
-However, for a pattern binding, or with wildcards, we might
-be doing inference *in the presence of a type signature*.
-Mostly, if there is a signature we use CheckGen, not InferGen,
-but with pattern bindings or wildcards we might do InferGen
-and still have a type signature.  For example:
+However, in the case of a partial type signature, be doing inference
+*in the presence of a type signature*. For example:
    f :: _ -> a
    f x = ...
 or
    g :: (Eq _a) => _b -> _b
-or
-   p :: a -> a
-   (p,q) = e
-In all these cases we use plan InferGen, and hence call simplifyInfer.
+In both cases we use plan InferGen, and hence call simplifyInfer.
 But those 'a' variables are skolems, and we should be sure to quantify
-over them, regardless of the monomorphism restriction etc.  If we
-don't, when reporting a type error we panic when we find that a
-skolem isn't bound by any enclosing implication.
+over them, for two reasons
 
-Moreover we must quantify over all wildcards that are not free in
-the environment.  In the case of 'g' for example, silly though it is,
-we want to get the inferred type
-   g :: forall t. Eq t => Int -> Int
-and then report ambiguity, rather than *not* quantifying over 't'
-and getting some much more mysterious error later.  A similar case
-is
-  h :: F _a -> Int
+* In the case of a type error
+     f :: _ -> Maybe a
+     f x = True && x
+  The inferred type of 'f' is f :: Bool -> Bool, but there's a
+  left-over error of form (HoleCan (Maybe a ~ Bool)).  The error-reporting
+  machine expects to find a binding site for the skolem 'a', so we
+  add it to the ic_skols of the residual implication.
 
-That's why we pass sigs to simplifyInfer, and make sure (in
-quantify_tvs) that we do quantify over them.  Trac #10615 is
-a case in point.
+  Note that we /only/ do this to the residual implication. We don't
+  complicate the quantified type varialbes of 'f' for downstream code;
+  it's just a device to make the error message generator know what to
+  report.
+
+* Consider the partial type signature
+     f :: (Eq _) => Int -> Int
+     f x = x
+  In normal cases that makes sense; e.g.
+     g :: Eq _a => _a -> _a
+     g x = x
+  where the signature makes the type less general than it could
+  be. But for 'f' we must therefore quantify over the user-annotated
+  constraints, to get
+     f :: forall a. Eq a => Int -> Int
+  (thereby correctly triggering an ambiguity error later).  If we don't
+  we'll end up with a strange open type
+     f :: Eq alpha => Int -> Int
+  which isn't ambiguous but is still very wrong.  That's why include
+  psig_theta in the variables to quantify over, passed to
+  decideQuantification.
 
 Note [Quantifying over equality constraints]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -976,7 +1068,7 @@ This only half-works, but then let-generalisation only half-works.
 -}
 
 simplifyWantedsTcM :: [CtEvidence] -> TcM WantedConstraints
--- Zonk the input constraints, and simplify them
+-- Solve the specified Wanted constraints
 -- Discard the evidence binds
 -- Discards all Derived stuff in result
 -- Postcondition: fully zonked and unflattened constraints
@@ -1033,18 +1125,28 @@ simpl_loop n limit floated_eqs no_new_scs
   = return wc  -- Done!
 
   | n `intGtLimit` limit
-  = failTcS (hang (ptext (sLit "solveWanteds: too many iterations")
-                   <+> parens (ptext (sLit "limit =") <+> ppr limit))
-                2 (vcat [ ptext (sLit "Unsolved:") <+> ppr wc
+  = do { -- Add an error (not a warning) if we blow the limit,
+         -- Typically if we blow the limit we are going to report some other error
+         -- (an unsolved constraint), and we don't want that error to suppress
+         -- the iteration limit warning!
+         addErrTcS (hang (text "solveWanteds: too many iterations"
+                   <+> parens (text "limit =" <+> ppr limit))
+                2 (vcat [ text "Unsolved:" <+> ppr wc
                         , ppUnless (isEmptyBag floated_eqs) $
-                          ptext (sLit "Floated equalities:") <+> ppr floated_eqs
+                          text "Floated equalities:" <+> ppr floated_eqs
                         , ppUnless no_new_scs $
-                          ptext (sLit "New superclasses found")
-                        , ptext (sLit "Set limit with -fconstraint-solver-iterations=n; n=0 for no limit")
+                          text "New superclasses found"
+                        , text "Set limit with -fconstraint-solver-iterations=n; n=0 for no limit"
                   ]))
+       ; return wc }
 
   | otherwise
-  = do { traceTcS "simpl_loop, iteration" (int n)
+  = do { let n_floated = lengthBag floated_eqs
+       ; csTraceTcS $
+         text "simpl_loop iteration=" <> int n
+         <+> (parens $ hsep [ text "no new scs =" <+> ppr no_new_scs <> comma
+                            , int n_floated <+> text "floated eqs" <> comma
+                            , int (lengthBag simples) <+> text "simples to solve" ])
 
        -- solveSimples may make progress if either float_eqs hold
        ; (unifs1, wc1) <- reportUnifications $
@@ -1073,20 +1175,26 @@ expandSuperClasses :: WantedConstraints -> TcS (Bool, WantedConstraints)
 -- unsolved wanteds or givens
 -- See Note [The superclass story] in TcCanonical
 expandSuperClasses wc@(WC { wc_simple = unsolved, wc_insol = insols })
-  | isEmptyBag unsolved  -- No unsolved simple wanteds, so do not add suerpclasses
+  | not (anyBag superClassesMightHelp unsolved)
   = return (True, wc)
   | otherwise
-  = do { let (pending_wanted, unsolved') = mapAccumBagL get [] unsolved
+  = do { traceTcS "expandSuperClasses {" empty
+       ; let (pending_wanted, unsolved') = mapAccumBagL get [] unsolved
              get acc ct = case isPendingScDict ct of
                             Just ct' -> (ct':acc, ct')
                             Nothing  -> (acc,     ct)
        ; pending_given <- getPendingScDicts
        ; if null pending_given && null pending_wanted
-         then return (True, wc)
+         then do { traceTcS "End expandSuperClasses no-op }" empty
+                 ; return (True, wc) }
          else
     do { new_given  <- makeSuperClasses pending_given
        ; new_insols <- solveSimpleGivens new_given
        ; new_wanted <- makeSuperClasses pending_wanted
+       ; traceTcS "End expandSuperClasses }"
+                  (vcat [ text "Given:" <+> ppr pending_given
+                        , text "Insols from given:" <+> ppr new_insols
+                        , text "Wanted:" <+> ppr new_wanted ])
        ; return (False, wc { wc_simple = unsolved' `unionBags` listToBag new_wanted
                            , wc_insol = insols `unionBags` new_insols }) } }
 
@@ -1137,16 +1245,16 @@ solveImplication imp@(Implic { ic_tclvl  = tclvl
          -- Solve the nested constraints
        ; ((no_given_eqs, given_insols, residual_wanted), used_tcvs)
              <- nestImplicTcS m_ev_binds (mkVarSet (skols ++ given_ids)) tclvl $
-               do { let loc = mkGivenLoc tclvl info env
-                  ; givens_w_scs <- mkGivensWithSuperClasses loc given_ids
-                  ; given_insols <- solveSimpleGivens givens_w_scs
+               do { let loc    = mkGivenLoc tclvl info env
+                        givens = mkGivens loc given_ids
+                  ; given_insols <- solveSimpleGivens givens
 
                   ; residual_wanted <- solveWanteds wanteds
                         -- solveWanteds, *not* solveWantedsAndDrop, because
                         -- we want to retain derived equalities so we can float
                         -- them out in floatEqualities
 
-                  ; no_eqs <- getNoGivenEqs tclvl skols
+                  ; no_eqs <- getNoGivenEqs tclvl skols given_insols
                         -- Call getNoGivenEqs /after/ solveWanteds, because
                         -- solveWanteds can augment the givens, via expandSuperClasses,
                         -- to reveal given superclass equalities
@@ -1269,9 +1377,9 @@ warnRedundantGivens (SigSkol ctxt _)
        FunSigCtxt _ warn_redundant -> warn_redundant
        ExprSigCtxt                 -> True
        _                           -> False
-  -- To think about: do we want to report redundant givens for
-  -- pattern synonyms, PatSynCtxt? c.f Trac #9953, comment:21.
 
+  -- To think about: do we want to report redundant givens for
+  -- pattern synonyms, PatSynSigSkol? c.f Trac #9953, comment:21.
 warnRedundantGivens (InstSkol {}) = True
 warnRedundantGivens _             = False
 
@@ -1293,7 +1401,9 @@ neededEvVars ev_binds initial_seeds
 
    also_needs :: VarSet -> VarSet
    also_needs needs
-     = foldVarSet add emptyVarSet needs
+     = nonDetFoldUFM add emptyVarSet needs
+     -- It's OK to use nonDetFoldUFM here because we immediately forget
+     -- about the ordering by creating a set
      where
        add v needs
         | Just ev_bind <- lookupEvBind ev_binds v
@@ -1465,24 +1575,24 @@ promoteTyVarTcS tclvl tv
   | otherwise
   = return ()
 
--- | If the tyvar is a levity var, set it to Lifted. Returns whether or
+-- | If the tyvar is a RuntimeRep var, set it to PtrRepLifted. Returns whether or
 -- not this happened.
 defaultTyVar :: TcTyVar -> TcM ()
 -- Precondition: MetaTyVars only
 -- See Note [DefaultTyVar]
 defaultTyVar the_tv
-  | isLevityVar the_tv
-  = do { traceTc "defaultTyVar levity" (ppr the_tv)
-       ; writeMetaTyVar the_tv liftedDataConTy }
+  | isRuntimeRepVar the_tv
+  = do { traceTc "defaultTyVar RuntimeRep" (ppr the_tv)
+       ; writeMetaTyVar the_tv ptrRepLiftedTy }
 
   | otherwise = return ()    -- The common case
 
 -- | Like 'defaultTyVar', but in the TcS monad.
 defaultTyVarTcS :: TcTyVar -> TcS Bool
 defaultTyVarTcS the_tv
-  | isLevityVar the_tv
-  = do { traceTcS "defaultTyVarTcS levity" (ppr the_tv)
-       ; unifyTyVar the_tv liftedDataConTy
+  | isRuntimeRepVar the_tv
+  = do { traceTcS "defaultTyVarTcS RuntimeRep" (ppr the_tv)
+       ; unifyTyVar the_tv ptrRepLiftedTy
        ; return True }
   | otherwise
   = return False  -- the common case
@@ -1568,13 +1678,13 @@ There are two caveats:
 Note [DefaultTyVar]
 ~~~~~~~~~~~~~~~~~~~
 defaultTyVar is used on any un-instantiated meta type variables to
-default any levity variables to Lifted.  This is important
+default any RuntimeRep variables to PtrRepLifted.  This is important
 to ensure that instance declarations match.  For example consider
 
      instance Show (a->b)
      foo x = show (\_ -> True)
 
-Then we'll get a constraint (Show (p ->q)) where p has kind ArgKind,
+Then we'll get a constraint (Show (p ->q)) where p has kind (TYPE r),
 and that won't match the typeKind (*) in the instance decl.  See tests
 tc217 and tc175.
 
@@ -1584,7 +1694,7 @@ hand.  However we aren't ready to default them fully to () or
 whatever, because the type-class defaulting rules have yet to run.
 
 An alternate implementation would be to emit a derived constraint setting
-the levity variable to Lifted, but this seems unnecessarily indirect.
+the RuntimeRep variable to PtrRepLifted, but this seems unnecessarily indirect.
 
 Note [Promote _and_ default when inferring]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1595,7 +1705,7 @@ approximateWC to produce a list of candidate constraints.  Then we MUST
      approximateWC, to restore invariant (MetaTvInv) described in
      Note [TcLevel and untouchable type variables] in TcType.
 
-  b) Default the kind of any meta-tyyvars that are not mentioned in
+  b) Default the kind of any meta-tyvars that are not mentioned in
      in the environment.
 
 To see (b), suppose the constraint is (C ((a :: OpenKind) -> Int)), and we
@@ -1747,7 +1857,7 @@ floatEqualities skols no_given_eqs
   | otherwise
   = do { outer_tclvl <- TcS.getTcLevel
        ; mapM_ (promoteTyVarTcS outer_tclvl)
-               (varSetElems (tyCoVarsOfCts float_eqs))
+               (tyCoVarsOfCtsList float_eqs)
            -- See Note [Promoting unification variables]
 
        ; traceTcS "floatEqualities" (vcat [ text "Skols =" <+> ppr skols
@@ -1757,12 +1867,12 @@ floatEqualities skols no_given_eqs
                 , wanteds { wc_simple = remaining_simples } ) }
   where
     skol_set = mkVarSet skols
-    (float_eqs, remaining_simples) = partitionBag (usefulToFloat is_useful) simples
-    is_useful pred = tyCoVarsOfType pred `disjointVarSet` skol_set
+    (float_eqs, remaining_simples) = partitionBag (usefulToFloat skol_set) simples
 
-usefulToFloat :: (TcPredType -> Bool) -> Ct -> Bool
-usefulToFloat is_useful_pred ct   -- The constraint is un-flattened and de-canonicalised
-  = is_meta_var_eq pred && is_useful_pred pred
+usefulToFloat :: VarSet -> Ct -> Bool
+usefulToFloat skol_set ct   -- The constraint is un-flattened and de-canonicalised
+  = is_meta_var_eq pred &&
+    (tyCoVarsOfType pred `disjointVarSet` skol_set)
   where
     pred = ctPred ct
 
@@ -1811,7 +1921,7 @@ Which equalities should we float?  We want to float ones where there
 is a decent chance that floating outwards will allow unification to
 happen.  In particular:
 
-   Float out equalities of form (alpaha ~ ty) or (ty ~ alpha), where
+   Float out equalities of form (alpha ~ ty) or (ty ~ alpha), where
 
    * alpha is a meta-tyvar.
 
@@ -1913,22 +2023,13 @@ findDefaultableGroups (default_tys, (ovl_strings, extended_defaults)) wanteds
           in b1 && b2
 
     defaultable_classes clss
-        | extended_defaults = any isInteractiveClass clss
-        | otherwise         = all is_std_class clss && (any is_num_class clss)
+        | extended_defaults = any (isInteractiveClass ovl_strings) clss
+        | otherwise         = all is_std_class clss && (any (isNumClass ovl_strings) clss)
 
-    -- In interactive mode, or with -XExtendedDefaultRules,
-    -- we default Show a to Show () to avoid graututious errors on "show []"
-    isInteractiveClass cls
-        = is_num_class cls || (classKey cls `elem` [showClassKey, eqClassKey
-                                                   , ordClassKey, foldableClassKey
-                                                   , traversableClassKey])
-
-    is_num_class cls = isNumericClass cls || (ovl_strings && (cls `hasKey` isStringClassKey))
-    -- is_num_class adds IsString to the standard numeric classes,
+    -- is_std_class adds IsString to the standard numeric classes,
     -- when -foverloaded-strings is enabled
-
-    is_std_class cls = isStandardClass cls || (ovl_strings && (cls `hasKey` isStringClassKey))
-    -- Similarly is_std_class
+    is_std_class cls = isStandardClass cls ||
+                       (ovl_strings && (cls `hasKey` isStringClassKey))
 
 ------------------------------
 disambigGroup :: [Type]            -- The default types
@@ -1974,12 +2075,25 @@ disambigGroup (default_ty:default_tys) group@(the_tv, wanteds)
       = return False
 
     the_ty   = mkTyVarTy the_tv
-    tmpl_tvs = tyCoVarsOfType the_ty
-    mb_subst = tcMatchTy tmpl_tvs the_ty default_ty
-      -- Make sure the kinds match too; hence this call to tcMatchTy
+    mb_subst = tcMatchTyKi the_ty default_ty
+      -- Make sure the kinds match too; hence this call to tcMatchTyKi
       -- E.g. suppose the only constraint was (Typeable k (a::k))
       -- With the addition of polykinded defaulting we also want to reject
       -- ill-kinded defaulting attempts like (Eq []) or (Foldable Int) here.
+
+-- In interactive mode, or with -XExtendedDefaultRules,
+-- we default Show a to Show () to avoid graututious errors on "show []"
+isInteractiveClass :: Bool   -- -XOverloadedStrings?
+                   -> Class -> Bool
+isInteractiveClass ovl_strings cls
+    = isNumClass ovl_strings cls || (classKey cls `elem` interactiveClassKeys)
+
+    -- isNumClass adds IsString to the standard numeric classes,
+    -- when -foverloaded-strings is enabled
+isNumClass :: Bool   -- -XOverloadedStrings?
+           -> Class -> Bool
+isNumClass ovl_strings cls
+  = isNumericClass cls || (ovl_strings && (cls `hasKey` isStringClassKey))
 
 
 {-

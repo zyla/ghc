@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, FlexibleInstances #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 -- | Monadic front-end to Text.PrettyPrint
 
@@ -41,9 +41,6 @@ import qualified Text.PrettyPrint as HPJ
 import Control.Monad (liftM, liftM2, ap)
 import Language.Haskell.TH.Lib.Map ( Map )
 import qualified Language.Haskell.TH.Lib.Map as Map ( lookup, insert, empty )
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative( Applicative(..) )
-#endif
 
 infixl 6 <> 
 infixl 6 <+>
@@ -140,7 +137,7 @@ instance Show Name where
   show (Name occ (NameU u))    = occString occ ++ "_" ++ show (I# u)
   show (Name occ NameS)        = occString occ
   show (Name occ (NameG ns m)) = modString m ++ "." ++ occString occ
-      
+
 data Name = Name OccName NameFlavour
 
 data NameFlavour
@@ -158,7 +155,6 @@ instance Applicative PprM where
       (<*>) = ap
 
 instance Monad PprM where
-    return = pure
     m >>= k  = PprM $ \s -> let (x, s') = runPprM m s
                             in runPprM (k x) s'
 

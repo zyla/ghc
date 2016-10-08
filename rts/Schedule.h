@@ -51,11 +51,10 @@ StgWord findRetryFrameHelper (Capability *cap, StgTSO *tso);
 void scheduleWorker (Capability *cap, Task *task);
 
 /* The state of the scheduler.  This is used to control the sequence
- * of events during shutdown, and when the runtime is interrupted
- * using ^C.
+ * of events during shutdown.  See Note [shutdown] in Schedule.c.
  */
 #define SCHED_RUNNING       0  /* running as normal */
-#define SCHED_INTERRUPTING  1  /* ^C detected, before threads are deleted */
+#define SCHED_INTERRUPTING  1  /* before threads are deleted */
 #define SCHED_SHUTTING_DOWN 2  /* final shutdown */
 
 extern volatile StgWord sched_state;
@@ -97,7 +96,6 @@ extern volatile StgWord recent_activity;
 /* Thread queues.
  * Locks required  : sched_mutex
  */
-extern  StgTSO *blackhole_queue;
 #if !defined(THREADED_RTS)
 extern  StgTSO *blocked_queue_hd, *blocked_queue_tl;
 extern  StgTSO *sleeping_queue;
@@ -141,6 +139,7 @@ appendToRunQueue (Capability *cap, StgTSO *tso)
         setTSOPrev(cap, tso, cap->run_queue_tl);
     }
     cap->run_queue_tl = tso;
+    cap->n_run_queue++;
 }
 
 /* Push a thread on the beginning of the run queue.
@@ -161,6 +160,7 @@ pushOnRunQueue (Capability *cap, StgTSO *tso)
     if (cap->run_queue_tl == END_TSO_QUEUE) {
         cap->run_queue_tl = tso;
     }
+    cap->n_run_queue++;
 }
 
 /* Pop the first thread off the runnable queue.
@@ -178,6 +178,7 @@ popRunQueue (Capability *cap)
     if (cap->run_queue_hd == END_TSO_QUEUE) {
         cap->run_queue_tl = END_TSO_QUEUE;
     }
+    cap->n_run_queue--;
     return t;
 }
 
@@ -187,8 +188,7 @@ peekRunQueue (Capability *cap)
     return cap->run_queue_hd;
 }
 
-void removeFromRunQueue (Capability *cap, StgTSO *tso);
-extern void promoteInRunQueue (Capability *cap, StgTSO *tso);
+void promoteInRunQueue (Capability *cap, StgTSO *tso);
 
 /* Add a thread to the end of the blocked queue.
  */
@@ -217,16 +217,7 @@ emptyQueue (StgTSO *q)
 INLINE_HEADER rtsBool
 emptyRunQueue(Capability *cap)
 {
-    return emptyQueue(cap->run_queue_hd);
-}
-
-/* assumes that the queue is not empty; so combine this with
- * an emptyRunQueue check! */
-INLINE_HEADER rtsBool
-singletonRunQueue(Capability *cap)
-{
-    ASSERT(!emptyRunQueue(cap));
-    return cap->run_queue_hd->_link == END_TSO_QUEUE;
+    return cap->n_run_queue == 0;
 }
 
 INLINE_HEADER void
@@ -234,6 +225,7 @@ truncateRunQueue(Capability *cap)
 {
     cap->run_queue_hd = END_TSO_QUEUE;
     cap->run_queue_tl = END_TSO_QUEUE;
+    cap->n_run_queue = 0;
 }
 
 #if !defined(THREADED_RTS)

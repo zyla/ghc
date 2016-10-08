@@ -24,6 +24,7 @@ module Language.Haskell.TH(
         Info(..), ModuleInfo(..),
         InstanceDec,
         ParentName,
+        SumAlt, SumArity,
         Arity,
         Unlifted,
         -- *** Language extension lookup
@@ -73,27 +74,29 @@ module Language.Haskell.TH(
         Inline(..), RuleMatch(..), Phases(..), RuleBndr(..), AnnTarget(..),
         FunDep(..), FamFlavour(..), TySynEqn(..), TypeFamilyHead(..),
         Fixity(..), FixityDirection(..), defaultFixity, maxPrecedence,
+        PatSynDir(..), PatSynArgs(..),
     -- ** Expressions
         Exp(..), Match(..), Body(..), Guard(..), Stmt(..), Range(..), Lit(..),
     -- ** Patterns
         Pat(..), FieldExp, FieldPat,
     -- ** Types
         Type(..), TyVarBndr(..), TyLit(..), Kind, Cxt, Pred, Syntax.Role(..),
-        FamilyResultSig(..), Syntax.InjectivityAnn(..),
+        FamilyResultSig(..), Syntax.InjectivityAnn(..), PatSynType,
 
     -- * Library functions
     -- ** Abbreviations
-        InfoQ, ExpQ, DecQ, DecsQ, ConQ, TypeQ, TyLitQ, CxtQ, PredQ, MatchQ,
-        ClauseQ, BodyQ, GuardQ, StmtQ, RangeQ, SourceStrictnessQ,
-        SourceUnpackednessQ, BangTypeQ, VarBangTypeQ, StrictTypeQ,
-        VarStrictTypeQ, PatQ, FieldPatQ, RuleBndrQ, TySynEqnQ,
+        InfoQ, ExpQ, DecQ, DecsQ, ConQ, TypeQ, TyLitQ, CxtQ, PredQ,
+        DerivClauseQ, MatchQ, ClauseQ, BodyQ, GuardQ, StmtQ, RangeQ,
+        SourceStrictnessQ, SourceUnpackednessQ, BangTypeQ, VarBangTypeQ,
+        StrictTypeQ, VarStrictTypeQ, PatQ, FieldPatQ, RuleBndrQ, TySynEqnQ,
+        PatSynDirQ, PatSynArgsQ,
 
     -- ** Constructors lifted to 'Q'
     -- *** Literals
         intPrimL, wordPrimL, floatPrimL, doublePrimL, integerL, rationalL,
         charL, stringL, stringPrimL, charPrimL,
     -- *** Patterns
-        litP, varP, tupP, conP, uInfixP, parensP, infixP,
+        litP, varP, tupP, unboxedSumP, conP, uInfixP, parensP, infixP,
         tildeP, bangP, asP, wildP, recP,
         listP, sigP, viewP,
         fieldPat,
@@ -102,10 +105,10 @@ module Language.Haskell.TH(
         normalB, guardedB, normalG, normalGE, patG, patGE, match, clause,
 
     -- *** Expressions
-        dyn, varE, conE, litE, appE, uInfixE, parensE, staticE,
+        dyn, varE, conE, litE, appE, appTypeE, uInfixE, parensE, staticE,
         infixE, infixApp, sectionL, sectionR,
-        lamE, lam1E, lamCaseE, tupE, condE, multiIfE, letE, caseE, appsE,
-        listE, sigE, recConE, recUpdE, stringE, fieldExp,
+        lamE, lam1E, lamCaseE, tupE, unboxedSumE, condE, multiIfE, letE, caseE,
+        appsE, listE, sigE, recConE, recUpdE, stringE, fieldExp,
     -- **** Ranges
     fromE, fromThenE, fromToE, fromThenToE,
 
@@ -118,13 +121,14 @@ module Language.Haskell.TH(
 
     -- *** Types
         forallT, varT, conT, appT, arrowT, infixT, uInfixT, parensT, equalityT,
-        listT, tupleT, sigT, litT, promotedT, promotedTupleT, promotedNilT,
-        promotedConsT,
+        listT, tupleT, unboxedSumT, sigT, litT, promotedT, promotedTupleT,
+        promotedNilT, promotedConsT,
     -- **** Type literals
     numTyLit, strTyLit,
     -- **** Strictness
     noSourceUnpackedness, sourceNoUnpack, sourceUnpack,
     noSourceStrictness, sourceLazy, sourceStrict,
+    isStrict, notStrict, unpacked,
     bang, bangType, varBangType, strictType, varStrictType,
     -- **** Class Contexts
     cxt, classP, equalP,
@@ -140,8 +144,11 @@ module Language.Haskell.TH(
     -- *** Top Level Declarations
     -- **** Data
     valD, funD, tySynD, dataD, newtypeD,
+    derivClause, DerivClause(..), DerivStrategy(..),
     -- **** Class
-    classD, instanceD, sigD, standaloneDerivD, defaultSigD,
+    classD, instanceD, instanceWithOverlapD, Overlap(..),
+    sigD, standaloneDerivD, standaloneDerivWithStrategyD, defaultSigD,
+
     -- **** Role annotations
     roleAnnotD,
     -- **** Type Family / Data Family
@@ -157,7 +164,11 @@ module Language.Haskell.TH(
     pragInlD, pragSpecD, pragSpecInlD, pragSpecInstD, pragRuleD, pragAnnD,
     pragLineD,
 
-        -- * Pretty-printer
+    -- **** Pattern Synonyms
+    patSynD, patSynSigD, unidir, implBidir, explBidir, prefixPatSyn,
+    infixPatSyn, recordPatSyn,
+
+    -- * Pretty-printer
     Ppr(..), pprint, pprExp, pprLit, pprPat, pprParendType
 
    ) where

@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns, CPP, MagicHash #-}
+{-# LANGUAGE BangPatterns, CPP, MagicHash, RecordWildCards #-}
 {-# OPTIONS_GHC -optc-DNON_POSIX_SOURCE #-}
 --
 --  (c) The University of Glasgow 2002-2006
@@ -6,7 +6,7 @@
 
 -- | ByteCodeLink: Bytecode assembler and linker
 module ByteCodeAsm (
-        assembleBCOs, assembleBCO,
+        assembleBCOs, assembleOneBCO,
 
         bcoFreeNames,
         SizedSeq, sizeSS, ssElts,
@@ -19,6 +19,7 @@ import ByteCodeInstr
 import ByteCodeItbls
 import ByteCodeTypes
 import GHCi.RemoteTypes
+import GHCi
 
 import HscTypes
 import Name
@@ -32,13 +33,12 @@ import DynFlags
 import Outputable
 import Platform
 import Util
+import Unique
+import UniqDSet
 
 -- From iserv
 import SizedSeq
 
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative(..))
-#endif
 import Control.Monad
 import Control.Monad.ST ( runST )
 import Control.Monad.Trans.Class
@@ -51,7 +51,6 @@ import Data.Array.Base  ( UArray(..) )
 
 import Data.Array.Unsafe( castSTUArray )
 
-import qualified Data.ByteString as B
 import Foreign
 import Data.Char        ( ord )
 import Data.List
@@ -67,14 +66,14 @@ import qualified Data.Map as Map
 
 -- | Finds external references.  Remember to remove the names
 -- defined by this group of BCOs themselves
-bcoFreeNames :: UnlinkedBCO -> NameSet
+bcoFreeNames :: UnlinkedBCO -> UniqDSet Name
 bcoFreeNames bco
-  = bco_refs bco `minusNameSet` mkNameSet [unlinkedBCOName bco]
+  = bco_refs bco `uniqDSetMinusUniqSet` mkNameSet [unlinkedBCOName bco]
   where
     bco_refs (UnlinkedBCO _ _ _ _ nonptrs ptrs)
-        = unionNameSets (
-             mkNameSet [ n | BCOPtrName n <- ssElts ptrs ] :
-             mkNameSet [ n | BCONPtrItbl n <- ssElts nonptrs ] :
+        = unionManyUniqDSets (
+             mkUniqDSet [ n | BCOPtrName n <- ssElts ptrs ] :
+             mkUniqDSet [ n | BCONPtrItbl n <- ssElts nonptrs ] :
              map bco_refs [ bco | BCOPtrBCO bco <- ssElts ptrs ]
           )
 
@@ -89,11 +88,66 @@ bcoFreeNames bco
 -- bytecode address in this BCO.
 
 -- Top level assembler fn.
-assembleBCOs :: HscEnv -> [ProtoBCO Name] -> [TyCon] -> IO CompiledByteCode
-assembleBCOs hsc_env proto_bcos tycons = do
+assembleBCOs
+  :: HscEnv -> [ProtoBCO Name] -> [TyCon] -> Maybe ModBreaks
+  -> IO CompiledByteCode
+assembleBCOs hsc_env proto_bcos tycons modbreaks = do
   itblenv <- mkITbls hsc_env tycons
   bcos    <- mapM (assembleBCO (hsc_dflags hsc_env)) proto_bcos
-  return (ByteCode bcos itblenv (concat (map protoBCOFFIs proto_bcos)))
+  (bcos',ptrs) <- mallocStrings hsc_env bcos
+  return CompiledByteCode
+    { bc_bcos = bcos'
+    , bc_itbls =  itblenv
+    , bc_ffis = concat (map protoBCOFFIs proto_bcos)
+    , bc_strs = ptrs
+    , bc_breaks = modbreaks
+    }
+
+-- Find all the literal strings and malloc them together.  We want to
+-- do this because:
+--
+--  a) It should be done when we compile the module, not each time we relink it
+--  b) For -fexternal-interpreter It's more efficient to malloc the strings
+--     as a single batch message, especially when compiling in parallel.
+--
+mallocStrings :: HscEnv -> [UnlinkedBCO] -> IO ([UnlinkedBCO], [RemotePtr ()])
+mallocStrings hsc_env ulbcos = do
+  let bytestrings = reverse (execState (mapM_ collect ulbcos) [])
+  ptrs <- iservCmd hsc_env (MallocStrings bytestrings)
+  return (evalState (mapM splice ulbcos) ptrs, ptrs)
+ where
+  splice bco@UnlinkedBCO{..} = do
+    lits <- mapM spliceLit unlinkedBCOLits
+    ptrs <- mapM splicePtr unlinkedBCOPtrs
+    return bco { unlinkedBCOLits = lits, unlinkedBCOPtrs = ptrs }
+
+  spliceLit (BCONPtrStr _) = do
+    (RemotePtr p : rest) <- get
+    put rest
+    return (BCONPtrWord (fromIntegral p))
+  spliceLit other = return other
+
+  splicePtr (BCOPtrBCO bco) = BCOPtrBCO <$> splice bco
+  splicePtr other = return other
+
+  collect UnlinkedBCO{..} = do
+    mapM_ collectLit unlinkedBCOLits
+    mapM_ collectPtr unlinkedBCOPtrs
+
+  collectLit (BCONPtrStr bs) = do
+    strs <- get
+    put (bs:strs)
+  collectLit _ = return ()
+
+  collectPtr (BCOPtrBCO bco) = collect bco
+  collectPtr _ = return ()
+
+
+assembleOneBCO :: HscEnv -> ProtoBCO Name -> IO UnlinkedBCO
+assembleOneBCO hsc_env pbco = do
+  ubco <- assembleBCO (hsc_dflags hsc_env) pbco
+  ([ubco'], _ptrs) <- mallocStrings hsc_env [ubco]
+  return ubco'
 
 assembleBCO :: DynFlags -> ProtoBCO Name -> IO UnlinkedBCO
 assembleBCO dflags (ProtoBCO nm instrs bitmap bsize arity _origin _malloced) = do
@@ -173,7 +227,6 @@ instance Applicative Assembler where
     (<*>) = ap
 
 instance Monad Assembler where
-  return = pure
   NullAsm x >>= f = f x
   AllocPtr p k >>= f = AllocPtr p (k >=> f)
   AllocLit l k >>= f = AllocLit l (k >=> f)
@@ -360,11 +413,11 @@ assembleI dflags i = case i of
   RETURN_UBX rep           -> emit (return_ubx rep) []
   CCALL off m_addr i       -> do np <- addr m_addr
                                  emit bci_CCALL [SmallOp off, Op np, SmallOp i]
-  BRK_FUN array index info cc -> do p1 <- ptr (BCOPtrArray array)
-                                    p2 <- ptr (BCOPtrBreakInfo info)
-                                    np <- addr cc
-                                    emit bci_BRK_FUN [Op p1, SmallOp index,
-                                                      Op p2, Op np]
+  BRK_FUN index uniq cc    -> do p1 <- ptr BCOPtrBreakArray
+                                 q <- int (getKey uniq)
+                                 np <- addr cc
+                                 emit bci_BRK_FUN [Op p1, SmallOp index,
+                                                   Op q, Op np]
 
   where
     literal (MachLabel fs (Just sz) _)
@@ -381,7 +434,7 @@ assembleI dflags i = case i of
     literal (MachChar c)       = int (ord c)
     literal (MachInt64 ii)     = int64 (fromIntegral ii)
     literal (MachWord64 ii)    = int64 (fromIntegral ii)
-    literal (MachStr bs)       = lit [BCONPtrStr (bs `B.snoc` 0)]
+    literal (MachStr bs)       = lit [BCONPtrStr bs]
        -- MachStr requires a zero-terminator when emitted
     literal LitInteger{}       = panic "ByteCodeAsm.literal: LitInteger"
 
@@ -478,14 +531,7 @@ mkLitI64 dflags ii
    | otherwise
    = panic "mkLitI64: Bad wORD_SIZE"
 
-mkLitI i
-   = runST (do
-        arr <- newArray_ ((0::Int),0)
-        writeArray arr 0 i
-        i_arr <- castSTUArray arr
-        w0 <- readArray i_arr 0
-        return [w0 :: Word]
-     )
+mkLitI i = [fromIntegral i :: Word]
 
 iNTERP_STACK_CHECK_THRESH :: Int
 iNTERP_STACK_CHECK_THRESH = INTERP_STACK_CHECK_THRESH

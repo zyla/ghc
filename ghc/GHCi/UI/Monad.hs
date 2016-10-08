@@ -15,6 +15,7 @@ module GHCi.UI.Monad (
         GHCiState(..), setGHCiState, getGHCiState, modifyGHCiState,
         GHCiOption(..), isOptionSet, setOption, unsetOption,
         Command(..),
+        PromptFunction,
         BreakLocation(..),
         TickArray,
         getDynFlags,
@@ -48,7 +49,7 @@ import Exception
 import Numeric
 import Data.Array
 import Data.IORef
-import System.CPUTime
+import Data.Time
 import System.Environment
 import System.IO
 import Control.Monad
@@ -66,59 +67,61 @@ data GHCiState = GHCiState
      {
         progname       :: String,
         args           :: [String],
-        evalWrapper    :: ForeignHValue, -- IO a -> IO a
-        prompt         :: String,
-        prompt2        :: String,
+        evalWrapper    :: ForeignHValue, -- ^ of type @IO a -> IO a@
+        prompt         :: PromptFunction,
+        prompt_cont    :: PromptFunction,
         editor         :: String,
         stop           :: String,
         options        :: [GHCiOption],
-        line_number    :: !Int,         -- input line
+        line_number    :: !Int,         -- ^ input line
         break_ctr      :: !Int,
         breaks         :: ![(Int, BreakLocation)],
         tickarrays     :: ModuleEnv TickArray,
-                -- tickarrays caches the TickArray for loaded modules,
-                -- so that we don't rebuild it each time the user sets
-                -- a breakpoint.
-        -- available ghci commands
+            -- ^ 'tickarrays' caches the 'TickArray' for loaded modules,
+            -- so that we don't rebuild it each time the user sets
+            -- a breakpoint.
         ghci_commands  :: [Command],
-        -- ":" at the GHCi prompt repeats the last command, so we
-        -- remember it here:
+            -- ^ available ghci commands
+        ghci_macros    :: [Command],
+            -- ^ user-defined macros
         last_command   :: Maybe Command,
+            -- ^ @:@ at the GHCi prompt repeats the last command, so we
+            -- remember it here
         cmdqueue       :: [String],
 
         remembered_ctx :: [InteractiveImport],
-             -- the imports that the user has asked for, via import
-             -- declarations and :module commands.  This list is
-             -- persistent over :reloads (but any imports for modules
-             -- that are not loaded are temporarily ignored).  After a
-             -- :load, all the home-package imports are stripped from
-             -- this list.
-
-             -- See bugs #2049, #1873, #1360
+            -- ^ The imports that the user has asked for, via import
+            -- declarations and :module commands.  This list is
+            -- persistent over :reloads (but any imports for modules
+            -- that are not loaded are temporarily ignored).  After a
+            -- :load, all the home-package imports are stripped from
+            -- this list.
+            --
+            -- See bugs #2049, #1873, #1360
 
         transient_ctx  :: [InteractiveImport],
-             -- An import added automatically after a :load, usually of
-             -- the most recently compiled module.  May be empty if
-             -- there are no modules loaded.  This list is replaced by
-             -- :load, :reload, and :add.  In between it may be modified
-             -- by :module.
+            -- ^ An import added automatically after a :load, usually of
+            -- the most recently compiled module.  May be empty if
+            -- there are no modules loaded.  This list is replaced by
+            -- :load, :reload, and :add.  In between it may be modified
+            -- by :module.
 
-        ghc_e :: Bool, -- True if this is 'ghc -e' (or runghc)
+        ghc_e :: Bool, -- ^ True if this is 'ghc -e' (or runghc)
 
-        -- help text to display to a user
         short_help :: String,
+            -- ^ help text to display to a user
         long_help  :: String,
         lastErrorLocations :: IORef [(FastString, Int)],
 
         mod_infos  :: !(Map ModuleName ModInfo),
 
-        -- hFlush stdout; hFlush stderr in the interpreter
         flushStdHandles :: ForeignHValue,
-        -- hSetBuffering NoBuffering for stdin/stdout/stderr
+            -- ^ @hFlush stdout; hFlush stderr@ in the interpreter
         noBuffering :: ForeignHValue
+            -- ^ @hSetBuffering NoBuffering@ for stdin/stdout/stderr
      }
 
-type TickArray = Array Int [(BreakIndex,RealSrcSpan)]
+type TickArray = Array Int [(GHC.BreakIndex,RealSrcSpan)]
 
 -- | A GHCi command
 data Command
@@ -134,6 +137,10 @@ data Command
    , cmdCompletionFunc :: CompletionFunc GHCi
      -- ^ 'CompletionFunc' for arguments
    }
+
+type PromptFunction = [String]
+                   -> Int
+                   -> GHCi SDoc
 
 data GHCiOption
         = ShowTiming            -- show time/allocs after evaluation
@@ -346,18 +353,18 @@ timeIt getAllocs action
   = do b <- lift $ isOptionSet ShowTiming
        if not b
           then action
-          else do time1   <- liftIO $ getCPUTime
+          else do time1   <- liftIO $ getCurrentTime
                   a <- action
                   let allocs = getAllocs a
-                  time2   <- liftIO $ getCPUTime
+                  time2   <- liftIO $ getCurrentTime
                   dflags  <- getDynFlags
-                  liftIO $ printTimes dflags allocs (time2 - time1)
+                  let period = time2 `diffUTCTime` time1
+                  liftIO $ printTimes dflags allocs (realToFrac period)
                   return a
 
-printTimes :: DynFlags -> Maybe Integer -> Integer -> IO ()
-printTimes dflags mallocs psecs
-   = do let secs = (fromIntegral psecs / (10^(12::Integer))) :: Float
-            secs_str = showFFloat (Just 2) secs
+printTimes :: DynFlags -> Maybe Integer -> Double -> IO ()
+printTimes dflags mallocs secs
+   = do let secs_str = showFFloat (Just 2) secs
         putStrLn (showSDoc dflags (
                  parens (text (secs_str "") <+> text "secs" <> comma <+>
                          case mallocs of

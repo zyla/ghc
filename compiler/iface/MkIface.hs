@@ -19,6 +19,7 @@ module MkIface (
         checkOldIface,  -- See if recompilation is required, by
                         -- comparing version information
         RecompileRequired(..), recompileRequired,
+        mkIfaceExports,
 
         tyThingToIfaceDecl -- Converting things to their Iface equivalents
  ) where
@@ -76,7 +77,6 @@ import DataCon
 import PatSyn
 import Type
 import TcType
-import TysPrim ( alphaTyVars )
 import InstEnv
 import FamInstEnv
 import TcRnMonad
@@ -107,6 +107,9 @@ import Maybes
 import Binary
 import Fingerprint
 import Exception
+import UniqFM
+import UniqDFM
+import MkId
 
 import Control.Monad
 import Data.Function
@@ -163,10 +166,12 @@ mkIfaceTc :: HscEnv
           -> IO (ModIface, Bool)
 mkIfaceTc hsc_env maybe_old_fingerprint safe_mode mod_details
   tc_result@TcGblEnv{ tcg_mod = this_mod,
+                      tcg_semantic_mod = semantic_mod,
                       tcg_src = hsc_src,
                       tcg_imports = imports,
                       tcg_rdr_env = rdr_env,
                       tcg_fix_env = fix_env,
+                      tcg_merged = merged,
                       tcg_warns = warns,
                       tcg_hpc = other_hpc_info,
                       tcg_th_splice_used = tc_splice_used,
@@ -178,7 +183,7 @@ mkIfaceTc hsc_env maybe_old_fingerprint safe_mode mod_details
           let hpc_info = emptyHpcInfo other_hpc_info
           used_th <- readIORef tc_splice_used
           dep_files <- (readIORef dependent_files)
-          usages <- mkUsageInfo hsc_env this_mod (imp_mods imports) used_names dep_files
+          usages <- mkUsageInfo hsc_env semantic_mod (imp_mods imports) used_names dep_files merged
           mkIface_ hsc_env maybe_old_fingerprint
                    this_mod hsc_src
                    used_th deps rdr_env
@@ -210,7 +215,8 @@ mkIface_ hsc_env maybe_old_fingerprint
 --      to expose in the interface
 
   = do
-    let entities = typeEnvElts type_env
+    let semantic_mod = canonicalizeHomeModule (hsc_dflags hsc_env) (moduleName this_mod)
+        entities = typeEnvElts type_env
         decls  = [ tyThingToIfaceDecl entity
                  | entity <- entities,
                    let name = getName entity,
@@ -218,8 +224,12 @@ mkIface_ hsc_env maybe_old_fingerprint
                       -- No implicit Ids and class tycons in the interface file
                    not (isWiredInName name),
                       -- Nor wired-in things; the compiler knows about them anyhow
-                   nameIsLocalOrFrom this_mod name  ]
+                   nameIsLocalOrFrom semantic_mod name  ]
                       -- Sigh: see Note [Root-main Id] in TcRnDriver
+                      -- NB: ABSOLUTELY need to check against semantic_mod,
+                      -- because all of the names in an hsig p[H=<H>]:H
+                      -- are going to be for <H>, not the former id!
+                      -- See Note [Identity versus semantic module]
 
         fixities    = sortBy (comparing fst)
           [(occ,fix) | FixItem occ fix <- nameEnvElts fix_env]
@@ -233,11 +243,14 @@ mkIface_ hsc_env maybe_old_fingerprint
         iface_vect_info = flattenVectInfo vect_info
         trust_info  = setSafeMode safe_mode
         annotations = map mkIfaceAnnotation anns
-        sig_of = getSigOf dflags (moduleName this_mod)
 
         intermediate_iface = ModIface {
               mi_module      = this_mod,
-              mi_sig_of      = sig_of,
+              -- Need to record this because it depends on the -instantiated-with flag
+              -- which could change
+              mi_sig_of      = if semantic_mod == this_mod
+                                then Nothing
+                                else Just semantic_mod,
               mi_hsc_src     = hsc_src,
               mi_deps        = deps,
               mi_usages      = usages,
@@ -323,11 +336,11 @@ mkIface_ hsc_env maybe_old_fingerprint
                                , vectInfoParallelTyCons = vParallelTyCons
                                }) =
        IfaceVectInfo
-       { ifaceVectInfoVar            = [Var.varName v | (v, _  ) <- varEnvElts  vVar]
+       { ifaceVectInfoVar            = [Var.varName v | (v, _  ) <- dVarEnvElts vVar]
        , ifaceVectInfoTyCon          = [tyConName t   | (t, t_v) <- nameEnvElts vTyCon, t /= t_v]
        , ifaceVectInfoTyConReuse     = [tyConName t   | (t, t_v) <- nameEnvElts vTyCon, t == t_v]
-       , ifaceVectInfoParallelVars   = [Var.varName v | v <- varSetElems vParallelVars]
-       , ifaceVectInfoParallelTyCons = nameSetElems vParallelTyCons
+       , ifaceVectInfoParallelVars   = [Var.varName v | v <- dVarSetElems vParallelVars]
+       , ifaceVectInfoParallelTyCons = nameSetElemsStable vParallelTyCons
        }
 
 -----------------------------
@@ -347,20 +360,32 @@ writeIfaceFile dflags hi_file_path new_iface
 mkHashFun
         :: HscEnv                       -- needed to look up versions
         -> ExternalPackageState         -- ditto
-        -> (Name -> Fingerprint)
-mkHashFun hsc_env eps
-  = \name ->
-      let
-        mod = ASSERT2( isExternalName name, ppr name ) nameModule name
-        occ = nameOccName name
-        iface = lookupIfaceByModule (hsc_dflags hsc_env) hpt pit mod `orElse`
-                   pprPanic "lookupVers2" (ppr mod <+> ppr occ)
-      in
-        snd (mi_hash_fn iface occ `orElse`
-                  pprPanic "lookupVers1" (ppr mod <+> ppr occ))
+        -> (Name -> IO Fingerprint)
+mkHashFun hsc_env eps name
+  | isHoleModule orig_mod
+  = lookup (mkModule (thisPackage dflags) (moduleName orig_mod))
+  | otherwise
+  = lookup orig_mod
   where
+      dflags = hsc_dflags hsc_env
       hpt = hsc_HPT hsc_env
       pit = eps_PIT eps
+      occ = nameOccName name
+      orig_mod = nameModule name
+      lookup mod = do
+        MASSERT2( isExternalName name, ppr name )
+        iface <- case lookupIfaceByModule dflags hpt pit mod of
+                  Just iface -> return iface
+                  Nothing -> do
+                      -- This can occur when we're writing out ifaces for
+                      -- requirements; we didn't do any /real/ typechecking
+                      -- so there's no guarantee everything is loaded.
+                      -- Kind of a heinous hack.
+                      iface <- initIfaceLoad hsc_env . withException
+                            $ loadInterface (text "lookupVers2") mod ImportBySystem
+                      return iface
+        return $ snd (mi_hash_fn iface occ `orElse`
+                  pprPanic "lookupVers1" (ppr mod <+> ppr occ))
 
 -- ---------------------------------------------------------------------------
 -- Compute fingerprints for the interface
@@ -382,6 +407,8 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
         -- visible about the declaration that a client can depend on.
         -- see IfaceDeclABI below.
        declABI :: IfaceDecl -> IfaceDeclABI
+       -- TODO: I'm not sure if this should be semantic_mod or this_mod.
+       -- See also Note [Identity versus semantic module]
        declABI decl = (this_mod, decl, extras)
         where extras = declExtras fix_fn ann_fn non_orph_rules non_orph_insts
                                   non_orph_fis decl
@@ -395,8 +422,16 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
 
        name_module n = ASSERT2( isExternalName n, ppr n ) nameModule n
        localOccs = map (getUnique . getParent . getOccName)
-                        . filter ((== this_mod) . name_module)
-                        . nameSetElems
+                        -- NB: names always use semantic module, so
+                        -- filtering must be on the semantic module!
+                        -- See Note [Identity versus semantic module]
+                        . filter ((== semantic_mod) . name_module)
+                        . nonDetEltsUFM
+                   -- It's OK to use nonDetEltsUFM as localOccs is only
+                   -- used to construct the edges and
+                   -- stronglyConnCompFromEdgedVertices is deterministic
+                   -- even with non-deterministic order of edges as
+                   -- explained in Note [Deterministic SCC] in Digraph.
           where getParent occ = lookupOccEnv parent_map occ `orElse` occ
 
         -- maps OccNames to their parents in the current module.
@@ -409,7 +444,7 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
                   where n = ifName d
 
         -- strongly-connected groups of declarations, in dependency order
-       groups = stronglyConnCompFromEdgedVertices edges
+       groups = stronglyConnCompFromEdgedVerticesUniq edges
 
        global_hash_fn = mkHashFun hsc_env eps
 
@@ -426,10 +461,16 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
            -- wired-in names don't have fingerprints
           | otherwise
           = ASSERT2( isExternalName name, ppr name )
-            let hash | nameModule name /= this_mod =  global_hash_fn name
-                     | otherwise = snd (lookupOccEnv local_env (getOccName name)
+            let hash | nameModule name /= semantic_mod =  global_hash_fn name
+                     -- Get it from the REAL interface!!
+                     -- This will trigger when we compile an hsig file
+                     -- and we know a backing impl for it.
+                     -- See Note [Identity versus semantic module]
+                     | semantic_mod /= this_mod
+                     , not (isHoleModule semantic_mod) = global_hash_fn name
+                     | otherwise = return (snd (lookupOccEnv local_env (getOccName name)
                            `orElse` pprPanic "urk! lookup local fingerprint"
-                                       (ppr name)) -- (undefined,fingerprint0))
+                                       (ppr name)))
                 -- This panic indicates that we got the dependency
                 -- analysis wrong, because we needed a fingerprint for
                 -- an entity that wasn't in the environment.  To debug
@@ -437,7 +478,7 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
                 -- pprTraces below, run the compile again, and inspect
                 -- the output and the generated .hi file with
                 -- --show-iface.
-            in put_ bh hash
+            in hash >>= put_ bh
 
         -- take a strongly-connected group of declarations and compute
         -- its fingerprint.
@@ -583,6 +624,7 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
 
   where
     this_mod = mi_module iface0
+    semantic_mod = mi_semantic_module iface0
     dflags = hsc_dflags hsc_env
     this_pkg = thisPackage dflags
     (non_orph_insts, orph_insts) = mkOrphMap ifInstOrph    (mi_insts iface0)
@@ -609,7 +651,7 @@ getOrphanHashes hsc_env mods = do
 sortDependencies :: Dependencies -> Dependencies
 sortDependencies d
  = Deps { dep_mods   = sortBy (compare `on` (moduleNameFS.fst)) (dep_mods d),
-          dep_pkgs   = sortBy (stableUnitIdCmp `on` fst) (dep_pkgs d),
+          dep_pkgs   = sortBy (compare `on` fst) (dep_pkgs d),
           dep_orphs  = sortBy stableModuleCmp (dep_orphs d),
           dep_finsts = sortBy stableModuleCmp (dep_finsts d) }
 
@@ -646,7 +688,7 @@ The ABI of a declaration consists of:
        definition of an Id is included in the fingerprint only if
        it is made available as an unfolding in the interface.
 
-   (c) the fixity of the identifier
+   (c) the fixity of the identifier (if it exists)
    (d) for Ids: rules
    (e) for classes: instances, fixity & rules for methods
    (f) for datatypes: instances, fixity & rules for constrs
@@ -663,29 +705,29 @@ data IfaceDeclExtras
   = IfaceIdExtras IfaceIdExtras
 
   | IfaceDataExtras
-       Fixity                   -- Fixity of the tycon itself
+       (Maybe Fixity)           -- Fixity of the tycon itself (if it exists)
        [IfaceInstABI]           -- Local class and family instances of this tycon
                                 -- See Note [Orphans] in InstEnv
        [AnnPayload]             -- Annotations of the type itself
        [IfaceIdExtras]          -- For each constructor: fixity, RULES and annotations
 
   | IfaceClassExtras
-       Fixity                   -- Fixity of the class itself
+       (Maybe Fixity)           -- Fixity of the class itself (if it exists)
        [IfaceInstABI]           -- Local instances of this class *or*
                                 --   of its associated data types
                                 -- See Note [Orphans] in InstEnv
        [AnnPayload]             -- Annotations of the type itself
        [IfaceIdExtras]          -- For each class method: fixity, RULES and annotations
 
-  | IfaceSynonymExtras Fixity [AnnPayload]
+  | IfaceSynonymExtras (Maybe Fixity) [AnnPayload]
 
-  | IfaceFamilyExtras   Fixity [IfaceInstABI] [AnnPayload]
+  | IfaceFamilyExtras   (Maybe Fixity) [IfaceInstABI] [AnnPayload]
 
   | IfaceOtherDeclExtras
 
 data IfaceIdExtras
   = IdExtras
-       Fixity                   -- Fixity of the Id
+       (Maybe Fixity)           -- Fixity of the Id (if it exists)
        [IfaceRule]              -- Rules for the Id
        [AnnPayload]             -- Annotations for the Id
 
@@ -734,7 +776,7 @@ instance Outputable IfaceDeclExtras where
                                                  ppr_id_extras_s stuff]
 
 ppr_insts :: [IfaceInstABI] -> SDoc
-ppr_insts _ = ptext (sLit "<insts>")
+ppr_insts _ = text "<insts>"
 
 ppr_id_extras_s :: [IfaceIdExtras] -> SDoc
 ppr_id_extras_s stuff = vcat (map ppr_id_extras stuff)
@@ -761,7 +803,7 @@ instance Binary IfaceIdExtras where
   get _bh = panic "no get for IfaceIdExtras"
   put_ bh (IdExtras fix rules anns)= do { put_ bh fix; put_ bh rules; put_ bh anns }
 
-declExtras :: (OccName -> Fixity)
+declExtras :: (OccName -> Maybe Fixity)
            -> (OccName -> [AnnPayload])
            -> OccEnv [IfaceRule]
            -> OccEnv [IfaceClsInst]
@@ -945,7 +987,7 @@ checkOldIface hsc_env mod_summary source_modified maybe_iface
         showPass dflags $
             "Checking old interface for " ++
               (showPpr dflags $ ms_mod mod_summary)
-        initIfaceCheck hsc_env $
+        initIfaceCheck (text "checkOldIface") hsc_env $
             check_old_iface hsc_env mod_summary source_modified maybe_iface
 
 check_old_iface
@@ -967,7 +1009,7 @@ check_old_iface hsc_env mod_summary src_modified maybe_iface
 
         loadIface = do
              let iface_path = msHiFilePath mod_summary
-             read_result <- readIface (ms_mod mod_summary) iface_path
+             read_result <- readIface (ms_installed_mod mod_summary) iface_path
              case read_result of
                  Failed err -> do
                      traceIf (text "FYI: cannot read old interface file:" $$ nest 4 err)
@@ -1030,9 +1072,8 @@ checkVersions hsc_env mod_summary iface
 
        ; recomp <- checkFlagHash hsc_env iface
        ; if recompileRequired recomp then return (recomp, Nothing) else do {
-       ; if getSigOf (hsc_dflags hsc_env) (moduleName (mi_module iface))
-                /= mi_sig_of iface
-            then return (RecompBecause "sig-of changed", Nothing) else do {
+       ; recomp <- checkHsig mod_summary iface
+       ; if recompileRequired recomp then return (recomp, Nothing) else do {
        ; recomp <- checkDependencies hsc_env mod_summary iface
        ; if recompileRequired recomp then return (recomp, Just iface) else do {
 
@@ -1049,15 +1090,27 @@ checkVersions hsc_env mod_summary iface
        -- We do this regardless of compilation mode, although in --make mode
        -- all the dependent modules should be in the HPT already, so it's
        -- quite redundant
-       ; updateEps_ $ \eps  -> eps { eps_is_boot = mod_deps }
+       ; updateEps_ $ \eps  -> eps { eps_is_boot = udfmToUfm mod_deps }
        ; recomp <- checkList [checkModUsage this_pkg u | u <- mi_usages iface]
        ; return (recomp, Just iface)
     }}}}
   where
     this_pkg = thisPackage (hsc_dflags hsc_env)
     -- This is a bit of a hack really
-    mod_deps :: ModuleNameEnv (ModuleName, IsBootInterface)
+    mod_deps :: DModuleNameEnv (ModuleName, IsBootInterface)
     mod_deps = mkModDeps (dep_mods (mi_deps iface))
+
+-- | Check if an hsig file needs recompilation because its
+-- implementing module has changed.
+checkHsig :: ModSummary -> ModIface -> IfG RecompileRequired
+checkHsig mod_summary iface = do
+    dflags <- getDynFlags
+    let outer_mod = ms_mod mod_summary
+        inner_mod = canonicalizeHomeModule dflags (moduleName outer_mod)
+    MASSERT( moduleUnitId outer_mod == thisPackage dflags )
+    case inner_mod == mi_semantic_module iface of
+        True -> up_to_date (text "implementing module unchanged")
+        False -> return (RecompBecause "implementing module changed")
 
 -- | Check the flags haven't changed
 checkFlagHash :: HscEnv -> ModIface -> IfG RecompileRequired
@@ -1067,9 +1120,9 @@ checkFlagHash hsc_env iface = do
                                              (mi_module iface)
                                              putNameLiterally
     case old_hash == new_hash of
-        True  -> up_to_date (ptext $ sLit "Module flags unchanged")
+        True  -> up_to_date (text "Module flags unchanged")
         False -> out_of_date_hash "flags changed"
-                     (ptext $ sLit "  Module flags have changed")
+                     (text "  Module flags have changed")
                      old_hash new_hash
 
 -- If the direct imports of this module are resolved to targets that
@@ -1081,7 +1134,7 @@ checkFlagHash hsc_env iface = do
 --   - a new home module has been added that shadows a package module
 -- See bug #1372.
 --
--- Returns True if recompilation is required.
+-- Returns (RecompBecause <textual reason>) if recompilation is required.
 checkDependencies :: HscEnv -> ModSummary -> ModIface -> IfG RecompileRequired
 checkDependencies hsc_env summary iface
  = checkList (map dep_missing (ms_imps summary ++ ms_srcimps summary))
@@ -1105,7 +1158,7 @@ checkDependencies hsc_env summary iface
                  else
                          return UpToDate
           | otherwise
-           -> if pkg `notElem` (map fst prev_dep_pkgs)
+           -> if toInstalledUnitId pkg `notElem` (map fst prev_dep_pkgs)
                  then do traceHiDiffs $
                            text "imported module " <> quotes (ppr mod) <>
                            text " is from package " <> quotes (ppr pkg) <>
@@ -1120,7 +1173,7 @@ needInterface :: Module -> (ModIface -> IfG RecompileRequired)
               -> IfG RecompileRequired
 needInterface mod continue
   = do  -- Load the imported interface if possible
-    let doc_str = sep [ptext (sLit "need version info for"), ppr mod]
+    let doc_str = sep [text "need version info for", ppr mod]
     traceHiDiffs (text "Checking usages for module" <+> ppr mod)
 
     mb_iface <- loadInterface doc_str mod ImportBySystem
@@ -1129,7 +1182,7 @@ needInterface mod continue
 
     case mb_iface of
       Failed _ -> do
-        traceHiDiffs (sep [ptext (sLit "Couldn't load interface for module"),
+        traceHiDiffs (sep [text "Couldn't load interface for module",
                            ppr mod])
         return MustCompile
                   -- Couldn't find or parse a module mentioned in the
@@ -1137,7 +1190,6 @@ needInterface mod continue
                   -- just be that the current module doesn't need that
                   -- import and it's been deleted
       Succeeded iface -> continue iface
-
 
 -- | Given the usage information extracted from the old
 -- M.hi file for the module being compiled, figure out
@@ -1153,6 +1205,11 @@ checkModUsage _this_pkg UsagePackageModule{
         -- individual entity usages, so if the ABI hash changes we must
         -- recompile.  This is safe but may entail more recompilation when
         -- a dependent package has changed.
+
+checkModUsage _ UsageMergedRequirement{ usg_mod = mod, usg_mod_hash = old_mod_hash }
+  = needInterface mod $ \iface -> do
+    let reason = moduleNameString (moduleName mod) ++ " changed (raw)"
+    checkModuleFingerprint reason old_mod_hash (mi_mod_hash iface)
 
 checkModUsage this_pkg UsageHomeModule{
                                 usg_mod_name = mod_name,
@@ -1178,14 +1235,14 @@ checkModUsage this_pkg UsageHomeModule{
 
         -- CHECK EXPORT LIST
         checkMaybeHash reason maybe_old_export_hash new_export_hash
-            (ptext (sLit "  Export list changed")) $ do
+            (text "  Export list changed") $ do
 
         -- CHECK ITEMS ONE BY ONE
         recompile <- checkList [ checkEntityUsage reason new_decl_hash u
                                | u <- old_decl_hash]
         if recompileRequired recompile
           then return recompile     -- This one failed, so just bail out now
-          else up_to_date (ptext (sLit "  Great!  The bits I use are up to date"))
+          else up_to_date (text "  Great!  The bits I use are up to date")
 
 
 checkModUsage _this_pkg UsageFile{ usg_file_path = file,
@@ -1210,10 +1267,10 @@ checkModuleFingerprint :: String -> Fingerprint -> Fingerprint
                        -> IfG RecompileRequired
 checkModuleFingerprint reason old_mod_hash new_mod_hash
   | new_mod_hash == old_mod_hash
-  = up_to_date (ptext (sLit "Module fingerprint unchanged"))
+  = up_to_date (text "Module fingerprint unchanged")
 
   | otherwise
-  = out_of_date_hash reason (ptext (sLit "  Module fingerprint has changed"))
+  = out_of_date_hash reason (text "  Module fingerprint has changed")
                      old_mod_hash new_mod_hash
 
 ------------------------
@@ -1234,12 +1291,12 @@ checkEntityUsage reason new_hash (name,old_hash)
   = case new_hash name of
 
         Nothing       ->        -- We used it before, but it ain't there now
-                          out_of_date reason (sep [ptext (sLit "No longer exported:"), ppr name])
+                          out_of_date reason (sep [text "No longer exported:", ppr name])
 
         Just (_, new_hash)      -- It's there, but is it up to date?
           | new_hash == old_hash -> do traceHiDiffs (text "  Up to date" <+> ppr name <+> parens (ppr new_hash))
                                        return UpToDate
-          | otherwise            -> out_of_date_hash reason (ptext (sLit "  Out of date:") <+> ppr name)
+          | otherwise            -> out_of_date_hash reason (text "  Out of date:" <+> ppr name)
                                                      old_hash new_hash
 
 up_to_date :: SDoc -> IfG RecompileRequired
@@ -1250,7 +1307,7 @@ out_of_date reason msg = traceHiDiffs msg >> return (RecompBecause reason)
 
 out_of_date_hash :: String -> SDoc -> Fingerprint -> Fingerprint -> IfG RecompileRequired
 out_of_date_hash reason msg old_hash new_hash
-  = out_of_date reason (hsep [msg, ppr old_hash, ptext (sLit "->"), ppr new_hash])
+  = out_of_date reason (hsep [msg, ppr old_hash, text "->", ppr new_hash])
 
 ----------------------
 checkList :: [IfG RecompileRequired] -> IfG RecompileRequired
@@ -1304,8 +1361,8 @@ patSynToIfaceDecl ps
                 , ifPatMatcher    = to_if_pr (patSynMatcher ps)
                 , ifPatBuilder    = fmap to_if_pr (patSynBuilder ps)
                 , ifPatIsInfix    = patSynIsInfix ps
-                , ifPatUnivTvs    = toIfaceTvBndrs univ_tvs'
-                , ifPatExTvs      = toIfaceTvBndrs ex_tvs'
+                , ifPatUnivBndrs  = map toIfaceForAllBndr univ_bndrs'
+                , ifPatExBndrs    = map toIfaceForAllBndr ex_bndrs'
                 , ifPatProvCtxt   = tidyToIfaceContext env2 prov_theta
                 , ifPatReqCtxt    = tidyToIfaceContext env2 req_theta
                 , ifPatArgs       = map (tidyToIfaceType env2) args
@@ -1313,9 +1370,11 @@ patSynToIfaceDecl ps
                 , ifFieldLabels   = (patSynFieldLabels ps)
                 }
   where
-    (univ_tvs, req_theta, ex_tvs, prov_theta, args, rhs_ty) = patSynSig ps
-    (env1, univ_tvs') = tidyTyCoVarBndrs emptyTidyEnv univ_tvs
-    (env2, ex_tvs')   = tidyTyCoVarBndrs env1 ex_tvs
+    (_univ_tvs, req_theta, _ex_tvs, prov_theta, args, rhs_ty) = patSynSig ps
+    univ_bndrs = patSynUnivTyVarBinders ps
+    ex_bndrs   = patSynExTyVarBinders ps
+    (env1, univ_bndrs') = tidyTyVarBinders emptyTidyEnv univ_bndrs
+    (env2, ex_bndrs')   = tidyTyVarBinders env1 ex_bndrs
     to_if_pr (id, needs_dummy) = (idName id, needs_dummy)
 
 --------------------------
@@ -1352,15 +1411,14 @@ coAxBranchToIfaceBranch' :: TyCon -> CoAxBranch -> IfaceAxBranch
 coAxBranchToIfaceBranch' tc (CoAxBranch { cab_tvs = tvs, cab_cvs = cvs
                                         , cab_lhs = lhs
                                         , cab_roles = roles, cab_rhs = rhs })
-  = IfaceAxBranch { ifaxbTyVars  = toIfaceTvBndrs tv_bndrs
+  = IfaceAxBranch { ifaxbTyVars  = toIfaceTvBndrs tidy_tvs
                   , ifaxbCoVars  = map toIfaceIdBndr cvs
                   , ifaxbLHS     = tidyToIfaceTcArgs env1 tc lhs
                   , ifaxbRoles   = roles
                   , ifaxbRHS     = tidyToIfaceType env1 rhs
                   , ifaxbIncomps = [] }
   where
-
-    (env1, tv_bndrs) = tidyTyClTyCoVarBndrs emptyTidyEnv tvs
+    (env1, tidy_tvs) = tidyTyCoVarBndrs emptyTidyEnv tvs
     -- Don't re-bind in-scope tyvars
     -- See Note [CoAxBranch type variables] in CoAxiom
 
@@ -1376,56 +1434,58 @@ tyConToIfaceDecl env tycon
   | Just syn_rhs <- synTyConRhs_maybe tycon
   = ( tc_env1
     , IfaceSynonym { ifName    = getOccName tycon,
-                     ifTyVars  = if_tc_tyvars,
                      ifRoles   = tyConRoles tycon,
                      ifSynRhs  = if_syn_type syn_rhs,
-                     ifSynKind = if_kind
+                     ifBinders = if_binders,
+                     ifResKind = if_res_kind
                    })
 
   | Just fam_flav <- famTyConFlav_maybe tycon
   = ( tc_env1
     , IfaceFamily { ifName    = getOccName tycon,
-                    ifTyVars  = if_tc_tyvars,
                     ifResVar  = if_res_var,
                     ifFamFlav = to_if_fam_flav fam_flav,
-                    ifFamKind = if_kind,
+                    ifBinders = if_binders,
+                    ifResKind = if_res_kind,
                     ifFamInj  = familyTyConInjectivityInfo tycon
                   })
 
   | isAlgTyCon tycon
   = ( tc_env1
     , IfaceData { ifName    = getOccName tycon,
-                  ifKind    = if_kind,
+                  ifBinders = if_binders,
+                  ifResKind = if_res_kind,
                   ifCType   = tyConCType tycon,
-                  ifTyVars  = if_tc_tyvars,
                   ifRoles   = tyConRoles tycon,
                   ifCtxt    = tidyToIfaceContext tc_env1 (tyConStupidTheta tycon),
                   ifCons    = ifaceConDecls (algTyConRhs tycon) (algTcFields tycon),
-                  ifRec     = boolToRecFlag (isRecursiveTyCon tycon),
                   ifGadtSyntax = isGadtSyntaxTyCon tycon,
                   ifParent  = parent })
 
   | otherwise  -- FunTyCon, PrimTyCon, promoted TyCon/DataCon
-  -- For pretty printing purposes only.
+  -- We only convert these TyCons to IfaceTyCons when we are
+  -- just about to pretty-print them, not because we are going
+  -- to put them into interface files
   = ( env
     , IfaceData { ifName       = getOccName tycon,
+                  ifBinders    = if_binders,
+                  ifResKind    = if_res_kind,
                   ifCType      = Nothing,
-                  ifTyVars     = funAndPrimTyVars,
                   ifRoles      = tyConRoles tycon,
-                  ifKind       = if_kind,
                   ifCtxt       = [],
                   ifCons       = IfDataTyCon [] False [],
-                  ifRec        = boolToRecFlag False,
                   ifGadtSyntax = False,
                   ifParent     = IfNoParent })
   where
-    (tc_env1, tc_tyvars) = tidyTyClTyCoVarBndrs env (tyConTyVars tycon)
-    if_tc_tyvars = toIfaceTvBndrs tc_tyvars
-    if_kind = tidyToIfaceType tc_env1 (tyConKind tycon)
+    -- NOTE: Not all TyCons have `tyConTyVars` field. Forcing this when `tycon`
+    -- is one of these TyCons (FunTyCon, PrimTyCon, PromotedDataCon) will cause
+    -- an error.
+    (tc_env1, tc_binders) = tidyTyConBinders env (tyConBinders tycon)
+    tc_tyvars      = binderVars tc_binders
+    if_binders     = toIfaceTyVarBinders tc_binders
+    if_res_kind    = tidyToIfaceType tc_env1 (tyConResKind tycon)
     if_syn_type ty = tidyToIfaceType tc_env1 ty
-    if_res_var     = getFS `fmap` tyConFamilyResVar_maybe tycon
-
-    funAndPrimTyVars = toIfaceTvBndrs $ take (tyConArity tycon) alphaTyVars
+    if_res_var     = getOccFS `fmap` tyConFamilyResVar_maybe tycon
 
     parent = case tyConFamInstSig_maybe tycon of
                Just (tc, ty, ax) -> IfDataInstance (coAxiomName ax)
@@ -1450,6 +1510,7 @@ tyConToIfaceDecl env tycon
     ifaceConDecls (NewTyCon { data_con = con })    flds = IfNewTyCon  (ifaceConDecl con) (ifaceOverloaded flds) (ifaceFields flds)
     ifaceConDecls (DataTyCon { data_cons = cons }) flds = IfDataTyCon (map ifaceConDecl cons) (ifaceOverloaded flds) (ifaceFields flds)
     ifaceConDecls (TupleTyCon { data_con = con })  _    = IfDataTyCon [ifaceConDecl con] False []
+    ifaceConDecls (SumTyCon { data_cons = cons })  flds = IfDataTyCon (map ifaceConDecl cons) (ifaceOverloaded flds) (ifaceFields flds)
     ifaceConDecls (AbstractTyCon distinct)         _    = IfAbstractTyCon distinct
         -- The AbstractTyCon case happens when a TyCon has been trimmed
         -- during tidying.
@@ -1462,7 +1523,7 @@ tyConToIfaceDecl env tycon
         = IfCon   { ifConOcc     = getOccName (dataConName data_con),
                     ifConInfix   = dataConIsInfix data_con,
                     ifConWrapper = isJust (dataConWrapId_maybe data_con),
-                    ifConExTvs   = toIfaceTvBndrs ex_tvs',
+                    ifConExTvs   = map toIfaceForAllBndr ex_bndrs',
                     ifConEqSpec  = map (to_eq_spec . eqSpecPair) eq_spec,
                     ifConCtxt    = tidyToIfaceContext con_env2 theta,
                     ifConArgTys  = map (tidyToIfaceType con_env2) arg_tys,
@@ -1473,8 +1534,9 @@ tyConToIfaceDecl env tycon
                     ifConSrcStricts = map toIfaceSrcBang
                                           (dataConSrcBangs data_con)}
         where
-          (univ_tvs, ex_tvs, eq_spec, theta, arg_tys, _)
+          (univ_tvs, _ex_tvs, eq_spec, theta, arg_tys, _)
             = dataConFullSig data_con
+          ex_bndrs = dataConExTyVarBinders data_con
 
           -- Tidy the univ_tvs of the data constructor to be identical
           -- to the tyConTyVars of the type constructor.  This means
@@ -1486,20 +1548,13 @@ tyConToIfaceDecl env tycon
           con_env1 = (fst tc_env1, mkVarEnv (zipEqual "ifaceConDecl" univ_tvs tc_tyvars))
                      -- A bit grimy, perhaps, but it's simple!
 
-          (con_env2, ex_tvs') = tidyTyCoVarBndrs con_env1 ex_tvs
-          to_eq_spec (tv,ty)  = (toIfaceTyVar (tidyTyVar con_env2 tv), tidyToIfaceType con_env2 ty)
+          (con_env2, ex_bndrs') = tidyTyVarBinders con_env1 ex_bndrs
+          to_eq_spec (tv,ty) = (tidyTyVar con_env2 tv, tidyToIfaceType con_env2 ty)
 
-    ifaceOverloaded flds = case fsEnvElts flds of
+    ifaceOverloaded flds = case dFsEnvElts flds of
                              fl:_ -> flIsOverloaded fl
                              []   -> False
-    ifaceFields flds = sort $ map flLabel $ fsEnvElts flds
-                       -- We need to sort the labels because they come out
-                       -- of FastStringEnv in arbitrary order, because
-                       -- FastStringEnv is keyed on Uniques.
-                       -- Sorting FastString is ok here, because Uniques
-                       -- are only used for equality checks in the Ord
-                       -- instance for FastString.
-                       -- See Note [Unique Determinism] in Unique.
+    ifaceFields flds = map flLabel $ dFsEnvElts flds
 
 toIfaceBang :: TidyEnv -> HsImplBang -> IfaceBang
 toIfaceBang _    HsLazy              = IfNoBang
@@ -1515,20 +1570,18 @@ classToIfaceDecl env clas
   = ( env1
     , IfaceClass { ifCtxt   = tidyToIfaceContext env1 sc_theta,
                    ifName   = getOccName tycon,
-                   ifTyVars = toIfaceTvBndrs clas_tyvars',
                    ifRoles  = tyConRoles (classTyCon clas),
-                   ifKind   = tidyToIfaceType env1 (tyConKind tycon),
+                   ifBinders = toIfaceTyVarBinders tc_binders,
                    ifFDs    = map toIfaceFD clas_fds,
                    ifATs    = map toIfaceAT clas_ats,
                    ifSigs   = map toIfaceClassOp op_stuff,
-                   ifMinDef = fmap getFS (classMinimalDef clas),
-                   ifRec    = boolToRecFlag (isRecursiveTyCon tycon) })
+                   ifMinDef = fmap getOccFS (classMinimalDef clas) })
   where
-    (clas_tyvars, clas_fds, sc_theta, _, clas_ats, op_stuff)
+    (_, clas_fds, sc_theta, _, clas_ats, op_stuff)
       = classExtraBigSig clas
     tycon = classTyCon clas
 
-    (env1, clas_tyvars') = tidyTyCoVarBndrs env clas_tyvars
+    (env1, tc_binders) = tidyTyConBinders env (tyConBinders tycon)
 
     toIfaceAT :: ClassATItem -> IfaceAT
     toIfaceAT (ATI tc def)
@@ -1537,7 +1590,7 @@ classToIfaceDecl env clas
         (env2, if_decl) = tyConToIfaceDecl env1 tc
 
     toIfaceClassOp (sel_id, def_meth)
-        = ASSERT(sel_tyvars == clas_tyvars)
+        = ASSERT( sel_tyvars == binderVars tc_binders )
           IfaceClassOp (getOccName sel_id)
                        (tidyToIfaceType env1 op_ty)
                        (fmap toDmSpec def_meth)
@@ -1554,8 +1607,8 @@ classToIfaceDecl env clas
     toDmSpec (_, VanillaDM)       = VanillaDM
     toDmSpec (_, GenericDM dm_ty) = GenericDM (tidyToIfaceType env1 dm_ty)
 
-    toIfaceFD (tvs1, tvs2) = (map (getFS . tidyTyVar env1) tvs1,
-                              map (getFS . tidyTyVar env1) tvs2)
+    toIfaceFD (tvs1, tvs2) = (map (tidyTyVar env1) tvs1
+                             ,map (tidyTyVar env1) tvs2)
 
 --------------------------
 tidyToIfaceType :: TidyEnv -> Type -> IfaceType
@@ -1567,23 +1620,26 @@ tidyToIfaceTcArgs env tc tys = toIfaceTcArgs tc (tidyTypes env tys)
 tidyToIfaceContext :: TidyEnv -> ThetaType -> IfaceContext
 tidyToIfaceContext env theta = map (tidyToIfaceType env) theta
 
-tidyTyClTyCoVarBndrs :: TidyEnv -> [TyCoVar] -> (TidyEnv, [TyCoVar])
-tidyTyClTyCoVarBndrs env tvs = mapAccumL tidyTyClTyCoVarBndr env tvs
+toIfaceTyVarBinder :: TyVarBndr TyVar vis -> TyVarBndr IfaceTvBndr vis
+toIfaceTyVarBinder (TvBndr tv vis) = TvBndr (toIfaceTvBndr tv) vis
 
-tidyTyClTyCoVarBndr :: TidyEnv -> TyCoVar -> (TidyEnv, TyCoVar)
+toIfaceTyVarBinders :: [TyVarBndr TyVar vis] -> [TyVarBndr IfaceTvBndr vis]
+toIfaceTyVarBinders = map toIfaceTyVarBinder
+
+tidyTyConBinder :: TidyEnv -> TyConBinder -> (TidyEnv, TyConBinder)
 -- If the type variable "binder" is in scope, don't re-bind it
 -- In a class decl, for example, the ATD binders mention
 -- (amd must mention) the class tyvars
-tidyTyClTyCoVarBndr env@(_, subst) tv
- | Just tv' <- lookupVarEnv subst tv = (env, tv')
- | otherwise                         = tidyTyCoVarBndr env tv
+tidyTyConBinder env@(_, subst) tvb@(TvBndr tv vis)
+ = case lookupVarEnv subst tv of
+     Just tv' -> (env,  TvBndr tv' vis)
+     Nothing  -> tidyTyVarBinder env tvb
 
-tidyTyVar :: TidyEnv -> TyVar -> TyVar
-tidyTyVar (_, subst) tv = lookupVarEnv subst tv `orElse` tv
-   -- TcType.tidyTyVarOcc messes around with FlatSkols
+tidyTyConBinders :: TidyEnv -> [TyConBinder] -> (TidyEnv, [TyConBinder])
+tidyTyConBinders = mapAccumL tidyTyConBinder
 
-getFS :: NamedThing a => a -> FastString
-getFS x = occNameFS (getOccName x)
+tidyTyVar :: TidyEnv -> TyVar -> FastString
+tidyTyVar (_, subst) tv = toIfaceTyVar (lookupVarEnv subst tv `orElse` tv)
 
 --------------------------
 instanceToIfaceInst :: ClsInst -> IfaceClsInst
@@ -1627,7 +1683,7 @@ famInstToIfaceFamInst (FamInst { fi_axiom    = axiom,
     orph | is_local fam_decl
          = NotOrphan (nameOccName fam_decl)
          | otherwise
-         = chooseOrphanAnchor $ nameSetElems lhs_names
+         = chooseOrphanAnchor lhs_names
 
 --------------------------
 toIfaceLetBndr :: Id -> IfaceLetBndr
@@ -1647,11 +1703,6 @@ toIfaceIdDetails (RecSelId { sel_naughty = n
                 RecSelData ty_con -> Left (toIfaceTyCon ty_con)
                 RecSelPatSyn pat_syn -> Right (patSynToIfaceDecl pat_syn)
   in IfRecSelId iface n
-
-  -- Currently we don't persist these three "advisory" IdInfos
-  -- through interface files.  We easily could if it mattered
-toIfaceIdDetails PatSynId     = IfVanillaId
-toIfaceIdDetails ReflectionId = IfVanillaId
 
   -- The remaining cases are all "implicit Ids" which don't
   -- appear in interface files at all
@@ -1681,7 +1732,7 @@ toIfaceIdInfo id_info
     ------------  Strictness  --------------
         -- No point in explicitly exporting TopSig
     sig_info = strictnessInfo id_info
-    strict_hsinfo | not (isNopSig sig_info) = Just (HsStrictness sig_info)
+    strict_hsinfo | not (isTopSig sig_info) = Just (HsStrictness sig_info)
                   | otherwise               = Nothing
 
     ------------  Unfolding  --------------
@@ -1765,7 +1816,7 @@ toIfaceExpr (Lam x b)       = IfaceLam (toIfaceBndr x, toIfaceOneShot x) (toIfac
 toIfaceExpr (App f a)       = toIfaceApp f [a]
 toIfaceExpr (Case s x ty as)
   | null as                 = IfaceECase (toIfaceExpr s) (toIfaceType ty)
-  | otherwise               = IfaceCase (toIfaceExpr s) (getFS x) (map toIfaceAlt as)
+  | otherwise               = IfaceCase (toIfaceExpr s) (getOccFS x) (map toIfaceAlt as)
 toIfaceExpr (Let b e)       = IfaceLet (toIfaceBind b) (toIfaceExpr e)
 toIfaceExpr (Cast e co)     = IfaceCast (toIfaceExpr e) (toIfaceCoercion co)
 toIfaceExpr (Tick t e)
@@ -1796,7 +1847,7 @@ toIfaceBind (Rec prs)    = IfaceRec [(toIfaceLetBndr b, toIfaceExpr r) | (b,r) <
 ---------------------
 toIfaceAlt :: (AltCon, [Var], CoreExpr)
            -> (IfaceConAlt, [FastString], IfaceExpr)
-toIfaceAlt (c,bs,r) = (toIfaceCon c, map getFS bs, toIfaceExpr r)
+toIfaceAlt (c,bs,r) = (toIfaceCon c, map getOccFS bs, toIfaceExpr r)
 
 ---------------------
 toIfaceCon :: AltCon -> IfaceConAlt
@@ -1831,6 +1882,81 @@ toIfaceVar :: Id -> IfaceExpr
 toIfaceVar v
     | Just fcall <- isFCallId_maybe v            = IfaceFCall fcall (toIfaceType (idType v))
        -- Foreign calls have special syntax
+    | isBootUnfolding (idUnfolding v)
+    = IfaceApp (IfaceApp (IfaceExt noinlineIdName) (IfaceType (toIfaceType (idType v))))
+               (IfaceExt name) -- don't use mkIfaceApps, or infinite loop
+       -- See Note [Inlining and hs-boot files]
     | isExternalName name                        = IfaceExt name
-    | otherwise                                  = IfaceLcl (getFS name)
+    | otherwise                                  = IfaceLcl (getOccFS name)
   where name = idName v
+
+{-
+Note [Inlining and hs-boot files]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider this example (Trac #10083):
+
+    ---------- RSR.hs-boot ------------
+    module RSR where
+      data RSR
+      eqRSR :: RSR -> RSR -> Bool
+
+    ---------- SR.hs ------------
+    module SR where
+      import {-# SOURCE #-} RSR
+      data SR = MkSR RSR
+      eqSR (MkSR r1) (MkSR r2) = eqRSR r1 r2
+
+    ---------- RSR.hs ------------
+    module RSR where
+      import SR
+      data RSR = MkRSR SR -- deriving( Eq )
+      eqRSR (MkRSR s1) (MkRSR s2) = (eqSR s1 s2)
+      foo x y = not (eqRSR x y)
+
+When compiling RSR we get this code
+
+    RSR.eqRSR :: RSR -> RSR -> Bool
+    RSR.eqRSR = \ (ds1 :: RSR.RSR) (ds2 :: RSR.RSR) ->
+                case ds1 of _ { RSR.MkRSR s1 ->
+                case ds2 of _ { RSR.MkRSR s2 ->
+                SR.eqSR s1 s2 }}
+
+    RSR.foo :: RSR -> RSR -> Bool
+    RSR.foo = \ (x :: RSR) (y :: RSR) -> not (RSR.eqRSR x y)
+
+Now, when optimising foo:
+    Inline eqRSR (small, non-rec)
+    Inline eqSR  (small, non-rec)
+but the result of inlining eqSR from SR is another call to eqRSR, so
+everything repeats.  Neither eqSR nor eqRSR are (apparently) loop
+breakers.
+
+Solution: in the unfolding of eqSR in SR.hi, replace `eqRSR` in SR
+with `noinline eqRSR`, so that eqRSR doesn't get inlined.  This means
+that when GHC inlines `eqSR`, it will not also inline `eqRSR`, exactly
+as would have been the case if `foo` had been defined in SR.hs (and
+marked as a loop-breaker).
+
+But how do we arrange for this to happen?  There are two ingredients:
+
+    1. When we serialize out unfoldings to IfaceExprs (toIfaceVar),
+    for every variable reference we see if we are referring to an
+    'Id' that came from an hs-boot file.  If so, we add a `noinline`
+    to the reference.
+
+    2. But how do we know if a reference came from an hs-boot file
+    or not?  We could record this directly in the 'IdInfo', but
+    actually we deduce this by looking at the unfolding: 'Id's
+    that come from boot files are given a special unfolding
+    (upon typechecking) 'BootUnfolding' which say that there is
+    no unfolding, and the reason is because the 'Id' came from
+    a boot file.
+
+Here is a solution that doesn't work: when compiling RSR,
+add a NOINLINE pragma to every function exported by the boot-file
+for RSR (if it exists).  Doing so makes the bootstrapped GHC itself
+slower by 8% overall (on Trac #9872a-d, and T1969: the reason
+is that these NOINLINE'd functions now can't be profitably inlined
+outside of the hs-boot loop.
+
+-}

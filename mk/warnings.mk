@@ -21,7 +21,13 @@ ifeq "$(GccLT46)" "NO"
 ifneq "$(HostOS_CPP)" "mingw32"
 SRC_CC_WARNING_OPTS += -Werror=unused-but-set-variable
 endif
-# gcc 4.6 gives 3 warning for giveCapabilityToTask not being inlined
+endif
+
+ifeq "$(GccLT44)" "NO"
+# Suppress the warning about __sync_fetch_and_nand (#9678).
+libraries/ghc-prim/cbits/atomic_CC_OPTS += -Wno-sync-nand
+# gcc 4.6 gives 3 warnings for giveCapabilityToTask not being inlined
+# gcc 4.4 gives 2 warnings for lockClosure not being inlined
 SRC_CC_WARNING_OPTS += -Wno-error=inline
 endif
 
@@ -50,6 +56,7 @@ libraries/bytestring_dist-install_EXTRA_HC_OPTS += -Wno-inline-rule-shadowing
 # Turn off import warnings for bad unused imports
 utils/haddock_dist_EXTRA_HC_OPTS += -Wno-unused-imports
 libraries/vector_dist-install_EXTRA_HC_OPTS += -Wno-unused-imports
+libraries/directory_dist-install_EXTRA_HC_OPTS += -Wno-unused-imports
 
 # haddock's attoparsec uses deprecated `inlinePerformIO`
 utils/haddock_dist_EXTRA_HC_OPTS += -Wno-deprecations
@@ -61,10 +68,16 @@ ifeq "$(HostOS_CPP)" "mingw32"
 libraries/time_dist-install_EXTRA_HC_OPTS += -Wno-unused-imports -Wno-identities
 endif
 
+# On Windows, the pattern for CallConv is already exaustive. Ignore the warning
+ifeq "$(HostOS_CPP)" "mingw32"
+libraries/ghci_dist-install_EXTRA_HC_OPTS += -Wno-overlapping-patterns
+endif
+
 # haskeline has warnings about deprecated use of block/unblock
 libraries/haskeline_dist-install_EXTRA_HC_OPTS += -Wno-deprecations
 libraries/haskeline_dist-install_EXTRA_HC_OPTS += -Wno-unused-imports
 libraries/haskeline_dist-install_EXTRA_HC_OPTS += -Wno-redundant-constraints
+libraries/haskeline_dist-install_EXTRA_HC_OPTS += -Wno-simplifiable-class-constraints
 
 
 # temporarily turn off unused-imports warnings for pretty
@@ -99,6 +112,7 @@ libraries/dph/dph-lifted-common-install_EXTRA_HC_OPTS += -Wwarn
 libraries/transformers_dist-boot_EXTRA_HC_OPTS += -fno-warn-unused-matches -fno-warn-unused-imports
 libraries/transformers_dist-install_EXTRA_HC_OPTS += -Wno-unused-matches -Wno-unused-imports
 libraries/transformers_dist-install_EXTRA_HC_OPTS += -Wno-redundant-constraints
+libraries/transformers_dist-install_EXTRA_HC_OPTS += -Wno-orphans
 
 # Turn of trustworthy-safe warning
 libraries/base_dist-install_EXTRA_HC_OPTS += -Wno-trustworthy-safe
@@ -123,10 +137,10 @@ GhcBootLibExtraHcOpts += -fno-warn-deprecated-flags
 #   * Most .cabal files specify -Wall. But not all, and not all building we
 #   do relies on .cabal files. So we have to add -Wall ourselves somewhere.
 #
-#   * Some .cabal also specify warning supression flags. Because -Wall
-#   overrides any warning supression flags that come before it, we have to
-#   make sure -Wall comes before any warning supression flags. So we add it
+#   * Some .cabal also specify warning suppression flags. Because -Wall
+#   overrides any warning suppression flags that come before it, we have to
+#   make sure -Wall comes before any warning suppression flags. So we add it
 #   to SRC_HC_OPTS.
 #
-#   * Similarly, our own warning supression should come after the -Wall from
+#   * Similarly, our own warning suppression should come after the -Wall from
 #   the .cabal files, so we do *not* add them to SRC_HC_OPTS.

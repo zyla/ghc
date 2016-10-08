@@ -26,6 +26,7 @@ import Literal
 import Module
 import Name
 import Type
+import RepType
 import TyCon
 import Coercion
 import TcEnv
@@ -195,12 +196,9 @@ dsFCall :: Id -> Coercion -> ForeignCall -> Maybe Header
         -> DsM ([(Id, Expr TyVar)], SDoc, SDoc)
 dsFCall fn_id co fcall mDeclHeader = do
     let
-        ty                     = pFst $ coercionKind co
-        (all_bndrs, io_res_ty) = tcSplitPiTys ty
-        (named_bndrs, arg_tys) = partitionBindersIntoBinders all_bndrs
-        tvs                    = map (binderVar "dsFCall") named_bndrs
-                -- Must use tcSplit* functions because we want to
-                -- see that (IO t) in the corner
+        ty                   = pFst $ coercionKind co
+        (tv_bndrs, rho)      = tcSplitForAllTyVarBndrs ty
+        (arg_tys, io_res_ty) = tcSplitFunTys rho
 
     args <- newSysLocalsDs arg_tys
     (val_args, arg_wrappers) <- mapAndUnzipM unboxArg (map Var args)
@@ -263,7 +261,8 @@ dsFCall fn_id co fcall mDeclHeader = do
                   return (fcall, empty)
     let
         -- Build the worker
-        worker_ty     = mkForAllTys named_bndrs (mkFunTys (map idType work_arg_ids) ccall_result_ty)
+        worker_ty     = mkForAllTys tv_bndrs (mkFunTys (map idType work_arg_ids) ccall_result_ty)
+        tvs           = map binderVar tv_bndrs
         the_ccall_app = mkFCall dflags ccall_uniq fcall' val_args ccall_result_ty
         work_rhs      = mkLams tvs (mkLams work_arg_ids the_ccall_app)
         work_id       = mkSysLocal (fsLit "$wccall") work_uniq worker_ty
@@ -297,10 +296,8 @@ dsPrimCall :: Id -> Coercion -> ForeignCall
 dsPrimCall fn_id co fcall = do
     let
         ty                   = pFst $ coercionKind co
-        (bndrs, io_res_ty)   = tcSplitPiTys ty
-        (tvs, arg_tys)       = partitionBinders bndrs
-                -- Must use tcSplit* functions because we want to
-                -- see that (IO t) in the corner
+        (tvs, fun_ty)        = tcSplitForAllTys ty
+        (arg_tys, io_res_ty) = tcSplitFunTys fun_ty
 
     args <- newSysLocalsDs arg_tys
 
@@ -475,8 +472,8 @@ dsFExportDynamic id co0 cconv = do
 
  where
   ty                       = pFst (coercionKind co0)
-  (bndrs, fn_res_ty)       = tcSplitPiTys ty
-  (tvs, [arg_ty])          = partitionBinders bndrs
+  (tvs,sans_foralls)       = tcSplitForAllTys ty
+  ([arg_ty], fn_res_ty)    = tcSplitFunTys sans_foralls
   Just (io_tc, res_ty)     = tcSplitIOType_maybe fn_res_ty
         -- Must have an IO type; hence Just
 
@@ -534,7 +531,7 @@ mkFExportCBits dflags c_nm maybe_target arg_htys res_hty is_IO_res_ty cc
 
   arg_cname n stg_ty
         | libffi    = char '*' <> parens (stg_ty <> char '*') <>
-                      ptext (sLit "args") <> brackets (int (n-1))
+                      text "args" <> brackets (int (n-1))
         | otherwise = text ('a':show n)
 
   -- generate a libffi-style stub if this is a "wrapper" and libffi is enabled
@@ -580,7 +577,7 @@ mkFExportCBits dflags c_nm maybe_target arg_htys res_hty is_IO_res_ty cc
   -- Now we can cook up the prototype for the exported function.
   pprCconv = ccallConvAttribute cc
 
-  header_bits = ptext (sLit "extern") <+> fun_proto <> semi
+  header_bits = text "extern" <+> fun_proto <> semi
 
   fun_args
     | null aug_arg_info = text "void"
@@ -589,8 +586,8 @@ mkFExportCBits dflags c_nm maybe_target arg_htys res_hty is_IO_res_ty cc
 
   fun_proto
     | libffi
-      = ptext (sLit "void") <+> ftext c_nm <>
-          parens (ptext (sLit "void *cif STG_UNUSED, void* resp, void** args, void* the_stableptr"))
+      = text "void" <+> ftext c_nm <>
+          parens (text "void *cif STG_UNUSED, void* resp, void** args, void* the_stableptr")
     | otherwise
       = cResType <+> pprCconv <+> ftext c_nm <> parens fun_args
 
@@ -633,14 +630,14 @@ mkFExportCBits dflags c_nm maybe_target arg_htys res_hty is_IO_res_ty cc
     fun_proto  $$
     vcat
      [ lbrace
-     ,   ptext (sLit "Capability *cap;")
+     ,   text "Capability *cap;"
      ,   declareResult
      ,   declareCResult
      ,   text "cap = rts_lock();"
           -- create the application + perform it.
-     ,   ptext (sLit "rts_evalIO") <> parens (
+     ,   text "rts_evalIO" <> parens (
                 char '&' <> cap <>
-                ptext (sLit "rts_apply") <> parens (
+                text "rts_apply" <> parens (
                     cap <>
                     text "(HaskellObj)"
                  <> ptext (if is_IO_res_ty
@@ -651,15 +648,15 @@ mkFExportCBits dflags c_nm maybe_target arg_htys res_hty is_IO_res_ty cc
                 ) <+> comma
                <> text "&ret"
              ) <> semi
-     ,   ptext (sLit "rts_checkSchedStatus") <> parens (doubleQuotes (ftext c_nm)
+     ,   text "rts_checkSchedStatus" <> parens (doubleQuotes (ftext c_nm)
                                                 <> comma <> text "cap") <> semi
      ,   assignCResult
-     ,   ptext (sLit "rts_unlock(cap);")
+     ,   text "rts_unlock(cap);"
      ,   ppUnless res_hty_is_unit $
          if libffi
                   then char '*' <> parens (ffi_cResType <> char '*') <>
-                       ptext (sLit "resp = cret;")
-                  else ptext (sLit "return cret;")
+                       text "resp = cret;"
+                  else text "return cret;"
      , rbrace
      ]
 
@@ -720,7 +717,7 @@ toCType = f False
               = f voidOK t'
            -- Otherwise we don't know the C type. If we are allowing
            -- void then return that; otherwise something has gone wrong.
-           | voidOK = (Nothing, ptext (sLit "void"))
+           | voidOK = (Nothing, text "void")
            | otherwise
               = pprPanic "toCType" (ppr t)
 
@@ -782,7 +779,7 @@ getPrimTyOf ty
   case splitDataProductType_maybe rep_ty of
      Just (_, _, data_con, [prim_ty]) ->
         ASSERT(dataConSourceArity data_con == 1)
-        ASSERT2(isUnLiftedType prim_ty, ppr prim_ty)
+        ASSERT2(isUnliftedType prim_ty, ppr prim_ty)
         prim_ty
      _other -> pprPanic "DsForeign.getPrimTyOf" (ppr ty)
   where

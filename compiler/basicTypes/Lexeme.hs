@@ -28,7 +28,6 @@ module Lexeme (
   ) where
 
 import FastString
-import Util ((<||>))
 
 import Data.Char
 import qualified Data.Set as Set
@@ -155,18 +154,23 @@ okVarSymOcc str = all okSymChar str &&
 -- starts with an acceptable letter?
 okConIdOcc :: String -> Bool
 okConIdOcc str = okIdOcc str ||
-                 is_tuple_name1 str
+                 is_tuple_name1 True  str ||
+                   -- Is it a boxed tuple...
+                 is_tuple_name1 False str
+                   -- ...or an unboxed tuple (Trac #12407)?
   where
     -- check for tuple name, starting at the beginning
-    is_tuple_name1 ('(' : rest) = is_tuple_name2 rest
-    is_tuple_name1 _            = False
+    is_tuple_name1 True  ('(' : rest)       = is_tuple_name2 True  rest
+    is_tuple_name1 False ('(' : '#' : rest) = is_tuple_name2 False rest
+    is_tuple_name1 _     _                  = False
 
     -- check for tuple tail
-    is_tuple_name2 ")"          = True
-    is_tuple_name2 (',' : rest) = is_tuple_name2 rest
-    is_tuple_name2 (ws  : rest)
-      | isSpace ws              = is_tuple_name2 rest
-    is_tuple_name2 _            = False
+    is_tuple_name2 True  ")"          = True
+    is_tuple_name2 False "#)"         = True
+    is_tuple_name2 boxed (',' : rest) = is_tuple_name2 boxed rest
+    is_tuple_name2 boxed (ws  : rest)
+      | isSpace ws                    = is_tuple_name2 boxed rest
+    is_tuple_name2 _     _            = False
 
 -- | Is this an acceptable symbolic constructor name, assuming it
 -- starts with an acceptable character?
@@ -183,8 +187,7 @@ okConSymOcc str = all okSymChar str &&
 -- but not worrying about case or clashing with reserved words?
 okIdOcc :: String -> Bool
 okIdOcc str
-  -- TODO. #10196. Only allow modifier letters in the suffix of an identifier.
-  = let hashes = dropWhile (okIdChar <||> okIdSuffixChar) str in
+  = let hashes = dropWhile okIdChar str in
     all (== '#') hashes   -- -XMagicHash allows a suffix of hashes
                           -- of course, `all` says "True" to an empty list
 
@@ -194,37 +197,13 @@ okIdChar :: Char -> Bool
 okIdChar c = case generalCategory c of
   UppercaseLetter -> True
   LowercaseLetter -> True
-  OtherLetter     -> True
   TitlecaseLetter -> True
+  ModifierLetter  -> True -- See #10196
+  OtherLetter     -> True -- See #1103
+  NonSpacingMark  -> True -- See #7650
   DecimalNumber   -> True
-  OtherNumber     -> True
+  OtherNumber     -> True -- See #4373
   _               -> c == '\'' || c == '_'
-
--- | Is this character acceptable in the suffix of an identifier.
--- See alexGetByte in Lexer.x
-okIdSuffixChar :: Char -> Bool
-okIdSuffixChar c = case generalCategory c of
-  ModifierLetter  -> True  -- See #10196
-  _               -> False
-
--- | Is this character acceptable in a symbol (after the first char)?
--- See alexGetByte in Lexer.x
-okSymChar :: Char -> Bool
-okSymChar c
-  | c `elem` specialSymbols
-  = False
-  | c `elem` "_\"'"
-  = False
-  | otherwise
-  = case generalCategory c of
-      ConnectorPunctuation -> True
-      DashPunctuation      -> True
-      OtherPunctuation     -> True
-      MathSymbol           -> True
-      CurrencySymbol       -> True
-      ModifierSymbol       -> True
-      OtherSymbol          -> True
-      _                    -> False
 
 -- | All reserved identifiers. Taken from section 2.4 of the 2010 Report.
 reservedIds :: Set.Set String
@@ -233,10 +212,6 @@ reservedIds = Set.fromList [ "case", "class", "data", "default", "deriving"
                            , "infix", "infixl", "infixr", "instance", "let"
                            , "module", "newtype", "of", "then", "type", "where"
                            , "_" ]
-
--- | All punctuation that cannot appear in symbols. See $special in Lexer.x.
-specialSymbols :: [Char]
-specialSymbols = "(),;[]`{}"
 
 -- | All reserved operators. Taken from section 2.4 of the 2010 Report.
 reservedOps :: Set.Set String

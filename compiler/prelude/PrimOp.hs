@@ -6,6 +6,11 @@
 
 {-# LANGUAGE CPP #-}
 
+-- The default is a bit too low for the quite large primOpInfo definition
+#if __GLASGOW_HASKELL__ >= 801
+{-# OPTIONS_GHC -fmax-pmcheck-iterations=10000000 #-}
+#endif
+
 module PrimOp (
         PrimOp(..), PrimOpVecCat(..), allThePrimOps,
         primOpType, primOpSig,
@@ -30,8 +35,9 @@ import TysWiredIn
 import CmmType
 import Demand
 import OccName          ( OccName, pprOccName, mkVarOccFS )
-import TyCon            ( TyCon, isPrimTyCon, tyConPrimRep, PrimRep(..) )
+import TyCon            ( TyCon, isPrimTyCon, PrimRep(..) )
 import Type
+import RepType          ( typePrimRep, tyConPrimRep )
 import BasicTypes       ( Arity, Fixity(..), FixityDirection(..), Boxity(..) )
 import ForeignCall      ( CLabelString )
 import Unique           ( Unique, mkPrimOpIdUnique )
@@ -536,7 +542,7 @@ primOpType op
     Compare _occ ty -> compare_fun_ty ty
 
     GenPrimOp _occ tyvars arg_tys res_ty ->
-        mkInvForAllTys tyvars (mkFunTys arg_tys res_ty)
+        mkSpecForAllTys tyvars (mkFunTys arg_tys res_ty)
 
 primOpOcc :: PrimOp -> OccName
 primOpOcc op = case primOpInfo op of
@@ -580,8 +586,8 @@ getPrimOpResultInfo op
                          where
                            tc = tyConAppTyCon ty
                         -- All primops return a tycon-app result
-                        -- The tycon can be an unboxed tuple, though, which
-                        -- gives rise to a ReturnAlg
+                        -- The tycon can be an unboxed tuple or sum, though,
+                        -- which gives rise to a ReturnAlg
 
 {-
 We do not currently make use of whether primops are commutable.

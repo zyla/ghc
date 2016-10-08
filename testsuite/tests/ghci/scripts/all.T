@@ -4,10 +4,14 @@ test('ghci001', combined_output, ghci_script, ['ghci001.script'])
 test('ghci002', combined_output, ghci_script, ['ghci002.script'])
 test('ghci003', combined_output, ghci_script, ['ghci003.script'])
 test('ghci004', [ combined_output,
+		  when(arch('powerpc64') or arch('powerpc64le'),
+                       expect_broken_for(11259,['ghci-ext'])),
                   unless(opsys('mingw32'),extra_ways(['ghci-ext'])) ],
                 ghci_script, ['ghci004.script'])
 test('ghci005', combined_output, ghci_script, ['ghci005.script'])
 test('ghci006', [ combined_output,
+                  when(arch('powerpc64') or arch('powerpc64le'),
+                       expect_broken_for(11259,['ghci-ext'])),
                   unless(opsys('mingw32'),extra_ways(['ghci-ext'])) ],
                 ghci_script, ['ghci006.script'])
 test('ghci007', combined_output, ghci_script, ['ghci007.script'])
@@ -24,10 +28,12 @@ test('ghci012', normal, ghci_script, ['ghci012.script'])
 test('ghci013', normal, ghci_script, ['ghci013.script'])
 test('ghci014', reqlib('QuickCheck'), ghci_script, ['ghci014.script'])
 
-# Ignore output from ghci015, the output is non-deterministic
+# Ignore stderr from ghci015, the output is non-deterministic
 # (has occasional "thread blocked indefinitely" exceptions), and this
 # is part of the test.
-test('ghci015', ignore_output, ghci_script, ['ghci015.script'])
+# But don't silence both stderr and stdout, as then the test would trivially
+# pass when ghci015.hs has errors.
+test('ghci015', [reqlib('stm'), ignore_stderr], ghci_script, ['ghci015.script'])
 
 test('ghci016', expect_broken(552), ghci_script, ['ghci016.script'])
 test('ghci017', [reqlib('haskell98'), extra_run_opts('-hide-package haskell98')], ghci_script, ['ghci017.script'])
@@ -39,11 +45,11 @@ test('ghci022', normal, ghci_script, ['ghci022.script'])
 
 test('ghci023', normal, ghci_script, ['ghci023.script'])
 test('ghci024',
-     when(fast(), skip),
+     [req_interp, when(fast(), skip)],
      run_command,
      ['$MAKE -s --no-print-directory ghci024'])
 test('T9367',
-     when(fast() or config.os != 'mingw32', skip),
+     [req_interp, when(fast() or config.os != 'mingw32', skip)],
      run_command,
      ['$MAKE -s --no-print-directory T9367'])
 test('ghci025', normal, ghci_script, ['ghci025.script'])
@@ -88,7 +94,9 @@ test('ghci056',
      ],
      ghci_script, ['ghci056.script'])
 
-test('ghci057', extra_hc_opts('-fwarn-tabs'), ghci_script, ['ghci057.script'])
+test('ghci057', normal, ghci_script, ['ghci057.script'])
+test('ghci060', normal, ghci_script, ['ghci060.script'])
+test('ghci061', normal, ghci_script, ['ghci061.script'])
 
 test('T2452', normal, ghci_script, ['T2452.script'])
 test('T2766', normal, ghci_script, ['T2766.script'])
@@ -196,7 +204,7 @@ test('T9181', normal, ghci_script, ['T9181.script'])
 test('T9086b', normal, ghci_script, ['T9086b.script'])
 test('T9140', combined_output, ghci_script, ['T9140.script'])
 test('T9658', normal, ghci_script, ['T9658.script'])
-test('T9293', extra_hc_opts('-fwarn-tabs'), ghci_script, ['T9293.script'])
+test('T9293', normal, ghci_script, ['T9293.script'])
 test('T9762',
  [ unless(have_dynamic(),skip)
  , pre_cmd('$MAKE -s --no-print-directory T9762_prep')
@@ -215,7 +223,7 @@ test('T10122', normal, ghci_script, ['T10122.script'])
 
 test('T10321', normal, ghci_script, ['T10321.script'])
 
-test('T10408', normal, run_command,
+test('T10408', req_interp, run_command,
     ['$MAKE -s --no-print-directory T10408'])
 test('T10248', normal, ghci_script, ['T10248.script'])
 test('T10110', normal, ghci_script, ['T10110.script'])
@@ -225,6 +233,7 @@ test('T10466', normal, ghci_script, ['T10466.script'])
 test('T10501', normal, ghci_script, ['T10501.script'])
 test('T10508', normal, ghci_script, ['T10508.script'])
 test('T10520', normal, ghci_script, ['T10520.script'])
+test('T10663', normal, ghci_script, ['T10663.script'])
 test('T10989',
     [
       extra_clean(['dummy.hs', 'dummy.lhs', 'dummy.tags'])
@@ -232,3 +241,26 @@ test('T10989',
     ghci_script, ['T10989.script'])
 test('T11098', normal, ghci_script, ['T11098.script'])
 test('T8316', expect_broken(8316), ghci_script, ['T8316.script'])
+test('T11252', normal, ghci_script, ['T11252.script'])
+
+test('T10576a', expect_broken(10576), ghci_script, ['T10576a.script'])
+test('T10576b', expect_broken(10576), ghci_script, ['T10576b.script'])
+test('T11051a', normal, ghci_script, ['T11051a.script'])
+test('T11051b', normal, ghci_script, ['T11051b.script'])
+test('T11266', ignore_stdout, ghci_script, ['T11266.script'])
+
+test('T11389', req_interp, run_command, ['$MAKE -s --no-print-directory T11389'])
+test('T11524a', normal, ghci_script, ['T11524a.script'])
+test('T11456', normal, ghci_script, ['T11456.script'])
+test('TypeAppData', normal, ghci_script, ['TypeAppData.script'])
+test('T11728', normal, ghci_script, ['T11728.script'])
+test('T11376', normal, ghci_script, ['T11376.script'])
+test('T12007', normal, ghci_script, ['T12007.script'])
+test('T11975', normal, ghci_script, ['T11975.script'])
+test('T10963', normal, ghci_script, ['T10963.script'])
+test('T11547', normal, ghci_script, ['T11547.script'])
+test('T12520', normal, ghci_script, ['T12520.script'])
+test('T12091',
+     [expect_broken(12091), extra_run_opts('-fobject-code')],
+     ghci_script, ['T12091.script'])
+test('T12523', normal, ghci_script, ['T12523.script'])

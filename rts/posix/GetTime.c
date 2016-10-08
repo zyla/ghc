@@ -21,22 +21,22 @@
 # include <sys/times.h>
 #endif
 
-#if ! ((defined(HAVE_GETRUSAGE) && !irix_HOST_OS) || defined(HAVE_TIMES))
+#if ! (defined(HAVE_GETRUSAGE) || defined(HAVE_TIMES))
 #error No implementation for getProcessCPUTime() available.
 #endif
 
-#if defined(HAVE_GETTIMEOFDAY) && defined(HAVE_GETRUSAGE) && !irix_HOST_OS
+#if defined(HAVE_GETTIMEOFDAY) && defined(HAVE_GETRUSAGE)
 // we'll implement getProcessCPUTime() and getProcessElapsedTime()
 // separately, using getrusage() and gettimeofday() respectively
 
-#ifdef darwin_HOST_OS
+#if !defined(HAVE_CLOCK_GETTIME) && defined(darwin_HOST_OS)
 static uint64_t timer_scaling_factor_numer = 0;
 static uint64_t timer_scaling_factor_denom = 0;
 #endif
 
 void initializeTimer()
 {
-#ifdef darwin_HOST_OS
+#if !defined(HAVE_CLOCK_GETTIME) && defined(darwin_HOST_OS)
     mach_timebase_info_data_t info;
     (void) mach_timebase_info(&info);
     timer_scaling_factor_numer = (uint64_t)info.numer;
@@ -140,7 +140,7 @@ Time getProcessElapsedTime(void)
 
 void getProcessTimes(Time *user, Time *elapsed)
 {
-    static nat ClockFreq = 0;
+    static uint32_t ClockFreq = 0;
 
     if (ClockFreq == 0) {
 #if defined(HAVE_SYSCONF)
@@ -171,36 +171,6 @@ void getProcessTimes(Time *user, Time *elapsed)
 
 #endif // HAVE_TIMES
 
-Time getThreadCPUTime(void)
-{
-#if !defined(BE_CONSERVATIVE)            &&  \
-     defined(HAVE_CLOCK_GETTIME)       &&  \
-     defined(_SC_CPUTIME)             &&  \
-     defined(CLOCK_PROCESS_CPUTIME_ID) &&  \
-     defined(HAVE_SYSCONF)
-    {
-        static int checked_sysconf = 0;
-        static int sysconf_result = 0;
-
-        if (!checked_sysconf) {
-            sysconf_result = sysconf(_SC_THREAD_CPUTIME);
-            checked_sysconf = 1;
-        }
-        if (sysconf_result != -1) {
-            // clock_gettime() gives us per-thread CPU time.  It isn't
-            // reliable on Linux, but it's the best we have.
-            struct timespec ts;
-            int res;
-            res = clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
-            if (res == 0) {
-                return SecondsToTime(ts.tv_sec) + NSToTime(ts.tv_nsec);
-            }
-        }
-    }
-#endif
-    return getProcessCPUTime();
-}
-
 void getUnixEpochTime(StgWord64 *sec, StgWord32 *nsec)
 {
 #if defined(HAVE_GETTIMEOFDAY)
@@ -220,7 +190,7 @@ void getUnixEpochTime(StgWord64 *sec, StgWord32 *nsec)
 W_
 getPageFaults(void)
 {
-#if !defined(HAVE_GETRUSAGE) || irix_HOST_OS || haiku_HOST_OS
+#if !defined(HAVE_GETRUSAGE) || haiku_HOST_OS
     return 0;
 #else
     struct rusage t;

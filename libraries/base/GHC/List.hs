@@ -182,10 +182,6 @@ filterFB c p x r | p x       = x `c` r
 --
 -- The list must be finite.
 
--- We write foldl as a non-recursive thing, so that it
--- can be inlined, and then (often) strictness-analysed,
--- and hence the classic space leak on foldl (+) 0 xs
-
 foldl :: forall a b. (b -> a -> b) -> b -> [a] -> b
 {-# INLINE foldl #-}
 foldl k z0 xs =
@@ -400,7 +396,7 @@ scanr1 f (x:xs)         =  f x q : qs
 -- It is a special case of 'Data.List.maximumBy', which allows the
 -- programmer to supply their own comparison function.
 maximum                 :: (Ord a) => [a] -> a
-{-# INLINEABLE maximum #-}
+{-# INLINABLE maximum #-}
 maximum []              =  errorEmptyList "maximum"
 maximum xs              =  foldl1 max xs
 
@@ -415,7 +411,7 @@ maximum xs              =  foldl1 max xs
 -- It is a special case of 'Data.List.minimumBy', which allows the
 -- programmer to supply their own comparison function.
 minimum                 :: (Ord a) => [a] -> a
-{-# INLINEABLE minimum #-}
+{-# INLINABLE minimum #-}
 minimum []              =  errorEmptyList "minimum"
 minimum xs              =  foldl1 min xs
 

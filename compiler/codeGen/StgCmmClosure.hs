@@ -18,6 +18,9 @@ module StgCmmClosure (
         idPrimRep, isVoidRep, isGcPtrRep, addIdReps, addArgReps,
         argPrimRep,
 
+        NonVoid(..), fromNonVoid, nonVoidIds, nonVoidStgArgs,
+        assertNonVoidIds, assertNonVoidStgArgs,
+
         -- * LambdaFormInfo
         LambdaFormInfo,         -- Abstract
         StandardFormInfo,        -- ...ditto...
@@ -61,7 +64,6 @@ module StgCmmClosure (
 
 #include "../includes/MachDeps.h"
 
-#define FAST_STRING_NOT_NEEDED
 #include "HsVersions.h"
 
 import StgSyn
@@ -74,16 +76,18 @@ import CLabel
 import Id
 import IdInfo
 import DataCon
-import FastString
 import Name
 import Type
 import TyCoRep
 import TcType
 import TyCon
+import RepType
 import BasicTypes
 import Outputable
 import DynFlags
 import Util
+
+import Data.Coerce (coerce)
 
 -----------------------------------------------------------------------------
 --                Data types and synonyms
@@ -104,16 +108,52 @@ data CgLoc
         -- and branch to the block id
 
 instance Outputable CgLoc where
-  ppr (CmmLoc e)    = ptext (sLit "cmm") <+> ppr e
-  ppr (LneLoc b rs) = ptext (sLit "lne") <+> ppr b <+> ppr rs
+  ppr (CmmLoc e)    = text "cmm" <+> ppr e
+  ppr (LneLoc b rs) = text "lne" <+> ppr b <+> ppr rs
 
 type SelfLoopInfo = (Id, BlockId, [LocalReg])
 
 -- used by ticky profiling
 isKnownFun :: LambdaFormInfo -> Bool
-isKnownFun (LFReEntrant _ _ _ _) = True
-isKnownFun LFLetNoEscape         = True
-isKnownFun _ = False
+isKnownFun LFReEntrant{} = True
+isKnownFun LFLetNoEscape = True
+isKnownFun _             = False
+
+
+-------------------------------------
+--        Non-void types
+-------------------------------------
+-- We frequently need the invariant that an Id or a an argument
+-- is of a non-void type. This type is a witness to the invariant.
+
+newtype NonVoid a = NonVoid a
+  deriving (Eq, Show)
+
+fromNonVoid :: NonVoid a -> a
+fromNonVoid (NonVoid a) = a
+
+instance (Outputable a) => Outputable (NonVoid a) where
+  ppr (NonVoid a) = ppr a
+
+nonVoidIds :: [Id] -> [NonVoid Id]
+nonVoidIds ids = [NonVoid id | id <- ids, not (isVoidTy (idType id))]
+
+-- | Used in places where some invariant ensures that all these Ids are
+-- non-void; e.g. constructor field binders in case expressions.
+-- See Note [Post-unarisation invariants] in UnariseStg.
+assertNonVoidIds :: [Id] -> [NonVoid Id]
+assertNonVoidIds ids = ASSERT(not (any (isVoidTy . idType) ids))
+                       coerce ids
+
+nonVoidStgArgs :: [StgArg] -> [NonVoid StgArg]
+nonVoidStgArgs args = [NonVoid arg | arg <- args, not (isVoidTy (stgArgType arg))]
+
+-- | Used in places where some invariant ensures that all these arguments are
+-- non-void; e.g. constructor arguments.
+-- See Note [Post-unarisation invariants] in UnariseStg.
+assertNonVoidStgArgs :: [StgArg] -> [NonVoid StgArg]
+assertNonVoidStgArgs args = ASSERT(not (any (isVoidTy . stgArgType) args))
+                            coerce args
 
 
 -----------------------------------------------------------------------------
@@ -127,11 +167,13 @@ idPrimRep id = typePrimRep (idType id)
     -- NB: typePrimRep fails on unboxed tuples,
     --     but by StgCmm no Ids have unboxed tuple type
 
-addIdReps :: [Id] -> [(PrimRep, Id)]
-addIdReps ids = [(idPrimRep id, id) | id <- ids]
+addIdReps :: [NonVoid Id] -> [NonVoid (PrimRep, Id)]
+addIdReps = map (\id -> let id' = fromNonVoid id
+                         in NonVoid (idPrimRep id', id'))
 
-addArgReps :: [StgArg] -> [(PrimRep, StgArg)]
-addArgReps args = [(argPrimRep arg, arg) | arg <- args]
+addArgReps :: [NonVoid StgArg] -> [NonVoid (PrimRep, StgArg)]
+addArgReps = map (\arg -> let arg' = fromNonVoid arg
+                           in NonVoid (argPrimRep arg', arg'))
 
 argPrimRep :: StgArg -> PrimRep
 argPrimRep arg = typePrimRep (stgArgType arg)
@@ -149,6 +191,7 @@ argPrimRep arg = typePrimRep (stgArgType arg)
 data LambdaFormInfo
   = LFReEntrant         -- Reentrant closure (a function)
         TopLevelFlag    -- True if top level
+        OneShotInfo
         !RepArity       -- Arity. Invariant: always > 0
         !Bool           -- True <=> no fvs
         ArgDescr        -- Argument descriptor (should really be in ClosureInfo)
@@ -169,12 +212,12 @@ data LambdaFormInfo
                         -- Imported things which we *do* know something about use
                         -- one of the other LF constructors (eg LFReEntrant for
                         -- known functions)
-        !Bool                -- True <=> *might* be a function type
+        !Bool           -- True <=> *might* be a function type
                         --      The False case is good when we want to enter it,
                         --        because then we know the entry code will do
                         --        For a function, the entry code is the fast entry point
 
-  | LFUnLifted          -- A value of unboxed type;
+  | LFUnlifted          -- A value of unboxed type;
                         -- always a value, needs evaluation
 
   | LFLetNoEscape       -- See LetNoEscape module for precise description
@@ -212,9 +255,9 @@ data StandardFormInfo
 
 mkLFArgument :: Id -> LambdaFormInfo
 mkLFArgument id
-  | isUnLiftedType ty             = LFUnLifted
+  | isUnliftedType ty      = LFUnlifted
   | might_be_a_function ty = LFUnknown True
-  | otherwise                    = LFUnknown False
+  | otherwise              = LFUnknown False
   where
     ty = idType id
 
@@ -229,13 +272,16 @@ mkLFReEntrant :: TopLevelFlag    -- True of top level
               -> ArgDescr        -- Argument descriptor
               -> LambdaFormInfo
 
+mkLFReEntrant _ _ [] _
+  = pprPanic "mkLFReEntrant" empty
 mkLFReEntrant top fvs args arg_descr
-  = LFReEntrant top (length args) (null fvs) arg_descr
+  = LFReEntrant top os_info (length args) (null fvs) arg_descr
+  where os_info = idOneShotInfo (head args)
 
 -------------
 mkLFThunk :: Type -> TopLevelFlag -> [Id] -> UpdateFlag -> LambdaFormInfo
 mkLFThunk thunk_ty top fvs upd_flag
-  = ASSERT( not (isUpdatable upd_flag) || not (isUnLiftedType thunk_ty) )
+  = ASSERT( not (isUpdatable upd_flag) || not (isUnliftedType thunk_ty) )
     LFThunk top (null fvs)
             (isUpdatable upd_flag)
             NonStandardThunk
@@ -279,18 +325,16 @@ mkLFImported id
                 -- the id really does point directly to the constructor
 
   | arity > 0
-  = LFReEntrant TopLevel arity True (panic "arg_descr")
+  = LFReEntrant TopLevel noOneShotInfo arity True (panic "arg_descr")
 
   | otherwise
   = mkLFArgument id -- Not sure of exact arity
   where
-    arity = idRepArity id
+    arity = idFunRepArity id
 
 -----------------------------------------------------
 --                Dynamic pointer tagging
 -----------------------------------------------------
-
-type ConTagZ = Int      -- A *zero-indexed* contructor tag
 
 type DynTag = Int       -- The tag on a *pointer*
                         -- (from the dynamic-tagging paper)
@@ -332,9 +376,9 @@ tagForArity dflags arity
 lfDynTag :: DynFlags -> LambdaFormInfo -> DynTag
 -- Return the tag in the low order bits of a variable bound
 -- to this LambdaForm
-lfDynTag dflags (LFCon con)               = tagForCon dflags con
-lfDynTag dflags (LFReEntrant _ arity _ _) = tagForArity dflags arity
-lfDynTag _      _other                    = 0
+lfDynTag dflags (LFCon con)                 = tagForCon dflags con
+lfDynTag dflags (LFReEntrant _ _ arity _ _) = tagForArity dflags arity
+lfDynTag _      _other                      = 0
 
 
 -----------------------------------------------------------------------------
@@ -360,11 +404,11 @@ isLFReEntrant _                = False
 -----------------------------------------------------------------------------
 
 lfClosureType :: LambdaFormInfo -> ClosureTypeInfo
-lfClosureType (LFReEntrant _ arity _ argd) = Fun arity argd
-lfClosureType (LFCon con)                  = Constr (dataConTagZ con)
+lfClosureType (LFReEntrant _ _ arity _ argd) = Fun arity argd
+lfClosureType (LFCon con)                    = Constr (dataConTagZ con)
                                                     (dataConIdentity con)
-lfClosureType (LFThunk _ _ _ is_sel _)     = thunkClosureType is_sel
-lfClosureType _                            = panic "lfClosureType"
+lfClosureType (LFThunk _ _ _ is_sel _)       = thunkClosureType is_sel
+lfClosureType _                              = panic "lfClosureType"
 
 thunkClosureType :: StandardFormInfo -> ClosureTypeInfo
 thunkClosureType (SelectorThunk off) = ThunkSelector off
@@ -384,7 +428,7 @@ nodeMustPointToIt :: DynFlags -> LambdaFormInfo -> Bool
 -- this closure has R1 (the "Node" register) pointing to the
 -- closure itself --- the "self" argument
 
-nodeMustPointToIt _ (LFReEntrant top _ no_fvs _)
+nodeMustPointToIt _ (LFReEntrant top _ _ no_fvs _)
   =  not no_fvs          -- Certainly if it has fvs we need to point to it
   || isNotTopLevel top   -- See Note [GC recovery]
         -- For lex_profiling we also access the cost centre for a
@@ -422,7 +466,7 @@ nodeMustPointToIt _ (LFCon _) = True
         -- 27/11/92.
 
 nodeMustPointToIt _ (LFUnknown _)   = True
-nodeMustPointToIt _ LFUnLifted      = False
+nodeMustPointToIt _ LFUnlifted      = False
 nodeMustPointToIt _ LFLetNoEscape   = False
 
 {- Note [GC recovery]
@@ -439,7 +483,7 @@ floated them out.  Well, a clever optimiser might leave one there to
 avoid a space leak, deliberately recomputing a thunk.  Also (and this
 really does happen occasionally) let-floating may make a function f smaller
 so it can be inlined, so now (f True) may generate a local no-fv closure.
-This actually happened during bootsrapping GHC itself, with f=mkRdrFunBind
+This actually happened during bootstrapping GHC itself, with f=mkRdrFunBind
 in TcGenDeriv.) -}
 
 -----------------------------------------------------------------------------
@@ -497,6 +541,7 @@ getCallMethod :: DynFlags
                                 -- itself
               -> LambdaFormInfo -- Its info
               -> RepArity       -- Number of available arguments
+              -> RepArity       -- Number of them being void arguments
               -> CgLoc          -- Passed in from cgIdApp so that we can
                                 -- handle let-no-escape bindings and self-recursive
                                 -- tail calls using the same data constructor,
@@ -505,30 +550,36 @@ getCallMethod :: DynFlags
               -> Maybe SelfLoopInfo -- can we perform a self-recursive tail call?
               -> CallMethod
 
-getCallMethod dflags _ id _ n_args _cg_loc (Just (self_loop_id, block_id, args))
-  | gopt Opt_Loopification dflags, id == self_loop_id, n_args == length args
+getCallMethod dflags _ id _ n_args v_args _cg_loc
+              (Just (self_loop_id, block_id, args))
+  | gopt Opt_Loopification dflags
+  , id == self_loop_id
+  , n_args - v_args == length args
   -- If these patterns match then we know that:
   --   * loopification optimisation is turned on
   --   * function is performing a self-recursive call in a tail position
-  --   * number of parameters of the function matches functions arity.
-  -- See Note [Self-recursive tail calls] in StgCmmExpr for more details
+  --   * number of non-void parameters of the function matches functions arity.
+  -- See Note [Self-recursive tail calls] and Note [Void arguments in
+  -- self-recursive tail calls] in StgCmmExpr for more details
   = JumpToIt block_id args
 
-getCallMethod dflags name id (LFReEntrant _ arity _ _) n_args _cg_loc
+getCallMethod dflags name id (LFReEntrant _ _ arity _ _) n_args _v_args _cg_loc
               _self_loop_info
   | n_args == 0    = ASSERT( arity /= 0 )
                      ReturnIt        -- No args at all
   | n_args < arity = SlowCall        -- Not enough args
   | otherwise      = DirectEntry (enterIdLabel dflags name (idCafInfo id)) arity
 
-getCallMethod _ _name _ LFUnLifted n_args _cg_loc _self_loop_info
+getCallMethod _ _name _ LFUnlifted n_args _v_args _cg_loc _self_loop_info
   = ASSERT( n_args == 0 ) ReturnIt
 
-getCallMethod _ _name _ (LFCon _) n_args _cg_loc _self_loop_info
+getCallMethod _ _name _ (LFCon _) n_args _v_args _cg_loc _self_loop_info
   = ASSERT( n_args == 0 ) ReturnIt
+    -- n_args=0 because it'd be ill-typed to apply a saturated
+    --          constructor application to anything
 
 getCallMethod dflags name id (LFThunk _ _ updatable std_form_info is_fun)
-              n_args _cg_loc _self_loop_info
+              n_args _v_args _cg_loc _self_loop_info
   | is_fun      -- it *might* be a function, so we must "call" it (which is always safe)
   = SlowCall    -- We cannot just enter it [in eval/apply, the entry code
                 -- is the fast-entry code]
@@ -559,18 +610,18 @@ getCallMethod dflags name id (LFThunk _ _ updatable std_form_info is_fun)
     DirectEntry (thunkEntryLabel dflags name (idCafInfo id) std_form_info
                 updatable) 0
 
-getCallMethod _ _name _ (LFUnknown True) _n_arg _cg_locs _self_loop_info
+getCallMethod _ _name _ (LFUnknown True) _n_arg _v_args _cg_locs _self_loop_info
   = SlowCall -- might be a function
 
-getCallMethod _ name _ (LFUnknown False) n_args _cg_loc _self_loop_info
+getCallMethod _ name _ (LFUnknown False) n_args _v_args _cg_loc _self_loop_info
   = ASSERT2( n_args == 0, ppr name <+> ppr n_args )
     EnterIt -- Not a function
 
-getCallMethod _ _name _ LFLetNoEscape _n_args (LneLoc blk_id lne_regs)
+getCallMethod _ _name _ LFLetNoEscape _n_args _v_args (LneLoc blk_id lne_regs)
               _self_loop_info
   = JumpToIt blk_id lne_regs
 
-getCallMethod _ _ _ _ _ _ _ = panic "Unknown call method"
+getCallMethod _ _ _ _ _ _ _ _ = panic "Unknown call method"
 
 -----------------------------------------------------------------------------
 --                staticClosureRequired
@@ -650,7 +701,7 @@ staticClosureRequired
         -> LambdaFormInfo
         -> Bool
 staticClosureRequired binder bndr_info
-                      (LFReEntrant top_level _ _ _)        -- It's a function
+                      (LFReEntrant top_level _ _ _ _)        -- It's a function
   = ASSERT( isTopLevel top_level )
         -- Assumption: it's a top-level, no-free-var binding
         not (satCallsOnly bndr_info)
@@ -756,7 +807,7 @@ blackHoleOnEntry cl_info
 
   | otherwise
   = case closureLFInfo cl_info of
-      LFReEntrant _ _ _ _       -> False
+      LFReEntrant {}            -> False
       LFLetNoEscape             -> False
       LFThunk _ _no_fvs upd _ _ -> upd   -- See Note [Black-holing non-updatable thunks]
       _other -> panic "blackHoleOnEntry"
@@ -840,18 +891,19 @@ lfUpdatable _ = False
 
 closureSingleEntry :: ClosureInfo -> Bool
 closureSingleEntry (ClosureInfo { closureLFInfo = LFThunk _ _ upd _ _}) = not upd
+closureSingleEntry (ClosureInfo { closureLFInfo = LFReEntrant _ OneShotLam _ _ _}) = True
 closureSingleEntry _ = False
 
 closureReEntrant :: ClosureInfo -> Bool
-closureReEntrant (ClosureInfo { closureLFInfo = LFReEntrant _ _ _ _ }) = True
+closureReEntrant (ClosureInfo { closureLFInfo = LFReEntrant {} }) = True
 closureReEntrant _ = False
 
 closureFunInfo :: ClosureInfo -> Maybe (RepArity, ArgDescr)
 closureFunInfo (ClosureInfo { closureLFInfo = lf_info }) = lfFunInfo lf_info
 
 lfFunInfo :: LambdaFormInfo ->  Maybe (RepArity, ArgDescr)
-lfFunInfo (LFReEntrant _ arity _ arg_desc)  = Just (arity, arg_desc)
-lfFunInfo _                                 = Nothing
+lfFunInfo (LFReEntrant _ _ arity _ arg_desc)  = Just (arity, arg_desc)
+lfFunInfo _                                   = Nothing
 
 funTag :: DynFlags -> ClosureInfo -> DynTag
 funTag dflags (ClosureInfo { closureLFInfo = lf_info })
@@ -860,9 +912,9 @@ funTag dflags (ClosureInfo { closureLFInfo = lf_info })
 isToplevClosure :: ClosureInfo -> Bool
 isToplevClosure (ClosureInfo { closureLFInfo = lf_info })
   = case lf_info of
-      LFReEntrant TopLevel _ _ _ -> True
-      LFThunk TopLevel _ _ _ _   -> True
-      _other                         -> False
+      LFReEntrant TopLevel _ _ _ _ -> True
+      LFThunk TopLevel _ _ _ _     -> True
+      _other                       -> False
 
 --------------------------------------
 --   Label generation
@@ -960,15 +1012,15 @@ getTyDescription ty
       TyVarTy _              -> "*"
       AppTy fun _            -> getTyDescription fun
       TyConApp tycon _       -> getOccString tycon
-      ForAllTy (Anon _) res  -> '-' : '>' : fun_result res
-      ForAllTy (Named {}) ty -> getTyDescription ty
+      FunTy _ res            -> '-' : '>' : fun_result res
+      ForAllTy _  ty         -> getTyDescription ty
       LitTy n                -> getTyLitDescription n
       CastTy ty _            -> getTyDescription ty
       CoercionTy co          -> pprPanic "getTyDescription" (ppr co)
     }
   where
-    fun_result (ForAllTy (Anon _) res) = '>' : fun_result res
-    fun_result other                   = getTyDescription other
+    fun_result (FunTy _ res) = '>' : fun_result res
+    fun_result other         = getTyDescription other
 
 getTyLitDescription :: TyLit -> String
 getTyLitDescription l =

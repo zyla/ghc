@@ -44,7 +44,10 @@ module GHC.Exts
         breakpoint, breakpointCond,
 
         -- * Ids with special behaviour
-        lazy, inline,
+        lazy, inline, oneShot,
+
+        -- * Running 'RealWorld' state transformers
+        runRW#,
 
         -- * Safe coercions
         --
@@ -56,8 +59,8 @@ module GHC.Exts
         -- * Equality
         type (~~),
 
-        -- * Levity polymorphism
-        GHC.Prim.TYPE, Levity(..),
+        -- * Representation polymorphism
+        GHC.Prim.TYPE, RuntimeRep(..), VecCount(..), VecElem(..),
 
         -- * Transform comprehensions
         Down(..), groupWith, sortWith, the,
@@ -73,6 +76,9 @@ module GHC.Exts
 
         -- * The Constraint kind
         Constraint,
+
+        -- * The Any type
+        Any,
 
         -- * Overloaded lists
         IsList(..)
@@ -181,6 +187,7 @@ class IsList l where
   --   It should satisfy fromList . toList = id.
   toList :: l -> [Item l]
 
+-- | @since 4.7.0.0
 instance IsList [a] where
   type (Item [a]) = a
   fromList = id
@@ -191,3 +198,12 @@ instance IsList Version where
   type (Item Version) = Int
   fromList = makeVersion
   toList = versionBranch
+
+-- | Be aware that 'fromList . toList = id' only for unfrozen 'CallStack's,
+-- since 'toList' removes frozenness information.
+--
+-- @since 4.9.0.0
+instance IsList CallStack where
+  type (Item CallStack) = (String, SrcLoc)
+  fromList = fromCallSiteList
+  toList   = getCallStack

@@ -50,7 +50,7 @@ codeOutput :: DynFlags
            -> FilePath
            -> ModLocation
            -> ForeignStubs
-           -> [UnitId]
+           -> [InstalledUnitId]
            -> Stream IO RawCmmGroup ()                       -- Compiled C--
            -> IO (FilePath,
                   (Bool{-stub_h_exists-}, Maybe FilePath{-stub_c_exists-}))
@@ -64,10 +64,17 @@ codeOutput dflags this_mod filenm location foreign_stubs pkg_deps cmm_stream
                     then Stream.mapM do_lint cmm_stream
                     else cmm_stream
 
-              do_lint cmm = do
-                { showPass dflags "CmmLint"
-                ; case cmmLint dflags cmm of
-                        Just err -> do { log_action dflags dflags SevDump noSrcSpan defaultDumpStyle err
+              do_lint cmm = withTiming (pure dflags)
+                                       (text "CmmLint"<+>brackets (ppr this_mod))
+                                       (const ()) $ do
+                { case cmmLint dflags cmm of
+                        Just err -> do { log_action dflags
+                                                   dflags
+                                                   NoReason
+                                                   SevDump
+                                                   noSrcSpan
+                                                   defaultDumpStyle
+                                                   err
                                        ; ghcExit dflags 1
                                        }
                         Nothing  -> return ()
@@ -100,7 +107,7 @@ doOutput filenm io_action = bracket (openFile filenm WriteMode) hClose io_action
 outputC :: DynFlags
         -> FilePath
         -> Stream IO RawCmmGroup ()
-        -> [UnitId]
+        -> [InstalledUnitId]
         -> IO ()
 
 outputC dflags filenm cmm_stream packages
@@ -124,7 +131,7 @@ outputC dflags filenm cmm_stream packages
                '<':_      -> "#include "++h_file
                _          -> "#include \""++h_file++"\""
 
-       let pkg_names = map unitIdString packages
+       let pkg_names = map installedUnitIdString packages
 
        doOutput filenm $ \ h -> do
           hPutStr h ("/* GHC_PACKAGES " ++ unwords pkg_names ++ "\n*/\n")

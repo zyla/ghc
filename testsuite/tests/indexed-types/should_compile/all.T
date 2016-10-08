@@ -1,6 +1,3 @@
-# Keep optimised tests, so we test coercion optimisation
-setTestOpts(omit_ways(['optasm', 'optllvm', 'hpc']))
-
 test('Simple1', normal, compile, [''])
 test('Simple2', normal, compile, [''])
 test('Simple3', normal, compile, [''])
@@ -209,7 +206,8 @@ test('T7489', normal, compile, [''])
 test('T7585', normal, compile, [''])
 test('T7282', normal, compile, [''])
 test('T7804', normal, compile, [''])
-test('T7837', normal, compile, ['-O -ddump-rule-firings'])
+test('T7837', expect_broken_for(9406, prof_ways), compile,
+     ['-O -ddump-rule-firings'])
 test('T4185', normal, compile, [''])
 
 # Caused infinite loop in the compiler
@@ -268,5 +266,11 @@ test('T10931', normal, compile, [''])
 test('T11187', normal, compile, [''])
 test('T11067', normal, compile, [''])
 test('T10318', normal, compile, [''])
-test('UnusedTyVarWarnings', normal, compile, ['-W'])
-test('UnusedTyVarWarningsNamedWCs', normal, compile, ['-W'])
+test('UnusedTyVarWarnings', normal, compile, ['-Wunused-type-patterns'])
+test('UnusedTyVarWarningsNamedWCs', normal, compile, ['-Wunused-type-patterns'])
+test('T11408', normal, compile, [''])
+test('T11361', normal, compile, ['-dunique-increment=-1'])
+  # -dunique-increment=-1 doesn't work inside the file
+test('T11361a', normal, compile_fail, [''])
+test('T11581', normal, compile, [''])
+test('T12175', normal, compile, [''])

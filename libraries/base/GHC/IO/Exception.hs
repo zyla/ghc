@@ -51,6 +51,8 @@ import GHC.Show
 import GHC.Read
 import GHC.Exception
 import GHC.IO.Handle.Types
+import GHC.OldList ( intercalate )
+import {-# SOURCE #-} GHC.Stack.CCS
 import Foreign.C.Types
 
 import Data.Typeable ( cast )
@@ -62,8 +64,10 @@ import Data.Typeable ( cast )
 -- to the @MVar@ so it can't ever continue.
 data BlockedIndefinitelyOnMVar = BlockedIndefinitelyOnMVar
 
+-- | @since 4.1.0.0
 instance Exception BlockedIndefinitelyOnMVar
 
+-- | @since 4.1.0.0
 instance Show BlockedIndefinitelyOnMVar where
     showsPrec _ BlockedIndefinitelyOnMVar = showString "thread blocked indefinitely in an MVar operation"
 
@@ -76,8 +80,10 @@ blockedIndefinitelyOnMVar = toException BlockedIndefinitelyOnMVar
 -- other references to any @TVar@s involved, so it can't ever continue.
 data BlockedIndefinitelyOnSTM = BlockedIndefinitelyOnSTM
 
+-- | @since 4.1.0.0
 instance Exception BlockedIndefinitelyOnSTM
 
+-- | @since 4.1.0.0
 instance Show BlockedIndefinitelyOnSTM where
     showsPrec _ BlockedIndefinitelyOnSTM = showString "thread blocked indefinitely in an STM transaction"
 
@@ -90,8 +96,10 @@ blockedIndefinitelyOnSTM = toException BlockedIndefinitelyOnSTM
 -- The @Deadlock@ exception is raised in the main thread only.
 data Deadlock = Deadlock
 
+-- | @since 4.1.0.0
 instance Exception Deadlock
 
+-- | @since 4.1.0.0
 instance Show Deadlock where
     showsPrec _ Deadlock = showString "<<deadlock>>"
 
@@ -104,10 +112,12 @@ instance Show Deadlock where
 -- @since 4.8.0.0
 data AllocationLimitExceeded = AllocationLimitExceeded
 
+-- | @since 4.8.0.0
 instance Exception AllocationLimitExceeded where
   toException = asyncExceptionToException
   fromException = asyncExceptionFromException
 
+-- | @since 4.7.1.0
 instance Show AllocationLimitExceeded where
     showsPrec _ AllocationLimitExceeded =
       showString "allocation limit exceeded"
@@ -120,8 +130,10 @@ allocationLimitExceeded = toException AllocationLimitExceeded
 -- |'assert' was applied to 'False'.
 newtype AssertionFailed = AssertionFailed String
 
+-- | @since 4.1.0.0
 instance Exception AssertionFailed
 
+-- | @since 4.1.0.0
 instance Show AssertionFailed where
     showsPrec _ (AssertionFailed err) = showString err
 
@@ -132,9 +144,11 @@ instance Show AssertionFailed where
 -- @since 4.7.0.0
 data SomeAsyncException = forall e . Exception e => SomeAsyncException e
 
+-- | @since 4.7.0.0
 instance Show SomeAsyncException where
     show (SomeAsyncException e) = show e
 
+-- | @since 4.7.0.0
 instance Exception SomeAsyncException
 
 -- |@since 4.7.0.0
@@ -175,6 +189,7 @@ data AsyncException
         -- via the usual mechanism(s) (e.g. Control-C in the console).
   deriving (Eq, Ord)
 
+-- | @since 4.7.0.0
 instance Exception AsyncException where
   toException = asyncExceptionToException
   fromException = asyncExceptionFromException
@@ -189,6 +204,7 @@ data ArrayException
         -- array that had not been initialized.
   deriving (Eq, Ord)
 
+-- | @since 4.1.0.0
 instance Exception ArrayException
 
 -- for the RTS
@@ -196,12 +212,14 @@ stackOverflow, heapOverflow :: SomeException
 stackOverflow = toException StackOverflow
 heapOverflow  = toException HeapOverflow
 
+-- | @since 4.1.0.0
 instance Show AsyncException where
   showsPrec _ StackOverflow   = showString "stack overflow"
   showsPrec _ HeapOverflow    = showString "heap overflow"
   showsPrec _ ThreadKilled    = showString "thread killed"
   showsPrec _ UserInterrupt   = showString "user interrupt"
 
+-- | @since 4.1.0.0
 instance Show ArrayException where
   showsPrec _ (IndexOutOfBounds s)
         = showString "array index out of range"
@@ -228,6 +246,7 @@ data ExitCode
                 -- may be prohibited (e.g. 0 on a POSIX-compliant system).
   deriving (Eq, Ord, Read, Show, Generic)
 
+-- | @since 4.1.0.0
 instance Exception ExitCode
 
 ioException     :: IOException -> IO a
@@ -263,8 +282,10 @@ data IOException
      ioe_filename :: Maybe FilePath  -- filename the error is related to.
    }
 
+-- | @since 4.1.0.0
 instance Exception IOException
 
+-- | @since 4.1.0.0
 instance Eq IOException where
   (IOError h1 e1 loc1 str1 en1 fn1) == (IOError h2 e2 loc2 str2 en2 fn2) =
     e1==e2 && str1==str2 && h1==h2 && loc1==loc2 && en1==en2 && fn1==fn2
@@ -293,9 +314,11 @@ data IOErrorType
   | ResourceVanished
   | Interrupted
 
+-- | @since 4.1.0.0
 instance Eq IOErrorType where
    x == y = isTrue# (getTag x ==# getTag y)
 
+-- | @since 4.1.0.0
 instance Show IOErrorType where
   showsPrec _ e =
     showString $
@@ -334,6 +357,7 @@ userError str   =  IOError Nothing UserError "" str Nothing Nothing
 -- ---------------------------------------------------------------------------
 -- Showing IOErrors
 
+-- | @since 4.1.0.0
 instance Show IOException where
     showsPrec p (IOError hdl iot loc s _ fn) =
       (case fn of
@@ -355,9 +379,13 @@ instance Show IOException where
 assertError :: (?callStack :: CallStack) => Bool -> a -> a
 assertError predicate v
   | predicate = lazy v
-  | otherwise = throw (AssertionFailed
-                        ("Assertion failed\n"
-                         ++ prettyCallStack ?callStack))
+  | otherwise = unsafeDupablePerformIO $ do
+    ccsStack <- currentCallStack
+    let
+      implicitParamCallStack = prettyCallStackLines ?callStack
+      ccsCallStack = showCCSStack ccsStack
+      stack = intercalate "\n" $ implicitParamCallStack ++ ccsCallStack
+    throwIO (AssertionFailed ("Assertion failed\n" ++ stack))
 
 unsupportedOperation :: IOError
 unsupportedOperation =

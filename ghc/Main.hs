@@ -24,6 +24,7 @@ import LoadIface        ( showIface )
 import HscMain          ( newHscEnv )
 import DriverPipeline   ( oneShot, compileFile )
 import DriverMkDepend   ( doMkDependHS )
+import DriverBkp   ( doBackpack )
 #ifdef GHCI
 import GHCi.UI          ( interactiveUI, ghciWelcomeMsg, defaultGhciSettings )
 #endif
@@ -32,6 +33,8 @@ import GHCi.UI          ( interactiveUI, ghciWelcomeMsg, defaultGhciSettings )
 #ifdef GHCI
 import DynamicLoading
 import Plugins
+#else
+import DynamicLoading   ( pluginError )
 #endif
 import Module           ( ModuleName )
 
@@ -40,7 +43,7 @@ import Module           ( ModuleName )
 import Config
 import Constants
 import HscTypes
-import Packages         ( pprPackages, pprPackagesSimple, pprModuleMap )
+import Packages         ( pprPackages, pprPackagesSimple )
 import DriverPhases
 import BasicTypes       ( failed )
 import StaticFlags
@@ -57,7 +60,7 @@ import MonadUtils       ( liftIO )
 -- Imports for --abi-hash
 import LoadIface           ( loadUserInterface )
 import Module              ( mkModuleName )
-import Finder              ( findImportedModule, cannotFindInterface )
+import Finder              ( findImportedModule, cannotFindModule )
 import TcRnMonad           ( initIfaceCheck )
 import Binary              ( openBinMem, put_, fingerprintBinMem )
 
@@ -162,6 +165,7 @@ main' postLoadMode dflags0 args flagWarnings = do
                DoInteractive   -> (CompManager, HscInterpreted, LinkInMemory)
                DoEval _        -> (CompManager, HscInterpreted, LinkInMemory)
                DoMake          -> (CompManager, dflt_target,    LinkBinary)
+               DoBackpack _    -> (CompManager, dflt_target,    LinkBinary)
                DoMkDependHS    -> (MkDepend,    dflt_target,    LinkBinary)
                DoAbiHash       -> (OneShot,     dflt_target,    LinkBinary)
                _               -> (OneShot,     dflt_target,    LinkBinary)
@@ -238,10 +242,6 @@ main' postLoadMode dflags0 args flagWarnings = do
         liftIO $ hPutStrLn stderr ("Hsc static flags: " ++ unwords staticFlags)
 
 
-  when (dopt Opt_D_dump_mod_map dflags6) . liftIO $
-    printInfoForUser (dflags6 { pprCols = 200 })
-                     (pkgQual dflags6) (pprModuleMap dflags6)
-
   liftIO $ initUniqSupply (initialUnique dflags6) (uniqueIncrement dflags6)
         ---------------- Final sanity checking -----------
   liftIO $ checkOptions postLoadMode dflags6 srcs objs
@@ -260,6 +260,7 @@ main' postLoadMode dflags0 args flagWarnings = do
        DoAbiHash              -> abiHash (map fst srcs)
        ShowPackages           -> liftIO $ showPackages dflags6
        DoFrontend f           -> doFrontend f srcs
+       DoBackpack b           -> doBackpack b
 
   liftIO $ dumpFinalStats dflags6
 
@@ -304,7 +305,7 @@ partition_args (arg:args) srcs objs
          the flag parser, and we want them to generate errors later in
          checkOptions, so we class them as source files (#5921)
 
-       - and finally we consider everything not containing a '.' to be
+       - and finally we consider everything without an extension to be
          a comp manager input, as shorthand for a .hs or .lhs filename.
 
       Everything else is considered to be a linker object, and passed
@@ -314,7 +315,7 @@ looks_like_an_input :: String -> Bool
 looks_like_an_input m =  isSourceFilename m
                       || looksLikeModuleName m
                       || "-" `isPrefixOf` m
-                      || '.' `notElem` m
+                      || not (hasExtension m)
 
 -- -----------------------------------------------------------------------------
 -- Option sanity checks
@@ -461,6 +462,7 @@ data PostLoadMode
   | StopBefore Phase        -- ghc -E | -C | -S
                             -- StopBefore StopLn is the default
   | DoMake                  -- ghc --make
+  | DoBackpack String       -- ghc --backpack foo.bkp
   | DoInteractive           -- ghc --interactive
   | DoEval [String]         -- ghc -e foo -e bar => DoEval ["bar", "foo"]
   | DoAbiHash               -- ghc --abi-hash
@@ -486,6 +488,9 @@ doEvalMode str = mkPostLoadMode (DoEval [str])
 
 doFrontendMode :: String -> Mode
 doFrontendMode str = mkPostLoadMode (DoFrontend (mkModuleName str))
+
+doBackpackMode :: String -> Mode
+doBackpackMode str = mkPostLoadMode (DoBackpack str)
 
 mkPostLoadMode :: PostLoadMode -> Mode
 mkPostLoadMode = Right . Right
@@ -598,8 +603,8 @@ mode_flags =
           "LibDir",
           "Global Package DB",
           "C compiler flags",
-          "Gcc Linker flags",
-          "Ld Linker flags"],
+          "C compiler link flags",
+          "ld flags"],
     let k' = "-print-" ++ map (replaceSpace . toLower) k
         replaceSpace ' ' = '-'
         replaceSpace c   = c
@@ -616,6 +621,7 @@ mode_flags =
   , defFlag "C"            (PassFlag (setMode (stopBeforeMode HCc)))
   , defFlag "S"            (PassFlag (setMode (stopBeforeMode (As False))))
   , defFlag "-make"        (PassFlag (setMode doMakeMode))
+  , defFlag "-backpack"    (SepArg   (\s -> setMode (doBackpackMode s) "-backpack"))
   , defFlag "-interactive" (PassFlag (setMode doInteractiveMode))
   , defFlag "-abi-hash"    (PassFlag (setMode doAbiHashMode))
   , defFlag "e"            (SepArg   (\s -> setMode (doEvalMode s) "-e"))
@@ -694,13 +700,7 @@ addFlag s flag = liftEwM $ do
 
 doMake :: [(String,Maybe Phase)] -> Ghc ()
 doMake srcs  = do
-    let (hs_srcs, non_hs_srcs) = partition haskellish srcs
-
-        haskellish (f,Nothing) =
-          looksLikeModuleName f || isHaskellSrcFilename f || '.' `notElem` f
-        haskellish (_,Just phase) =
-          phase `notElem` [ As True, As False, Cc, Cobjc, Cobjcxx, CmmCpp, Cmm
-                          , StopLn]
+    let (hs_srcs, non_hs_srcs) = partition isHaskellishTarget srcs
 
     hsc_env <- GHC.getSession
 
@@ -847,8 +847,7 @@ dumpPackagesSimple dflags = putMsg dflags (pprPackagesSimple dflags)
 
 doFrontend :: ModuleName -> [(String, Maybe Phase)] -> Ghc ()
 #ifndef GHCI
-doFrontend _ _ =
-    throwGhcException (CmdLineError "not built for interactive use")
+doFrontend modname _ = pluginError [modname]
 #else
 doFrontend modname srcs = do
     hsc_env <- getSession
@@ -891,12 +890,12 @@ abiHash strs = do
          case r of
            Found _ m -> return m
            _error    -> throwGhcException $ CmdLineError $ showSDoc dflags $
-                          cannotFindInterface dflags modname r
+                          cannotFindModule dflags modname r
 
   mods <- mapM find_it strs
 
   let get_iface modl = loadUserInterface False (text "abiHash") modl
-  ifaces <- initIfaceCheck hsc_env $ mapM get_iface mods
+  ifaces <- initIfaceCheck (text "abiHash") hsc_env $ mapM get_iface mods
 
   bh <- openBinMem (3*1024) -- just less than a block
   put_ bh hiVersion
@@ -915,7 +914,7 @@ unknownFlagsErr fs = throwGhcException $ UsageError $ concatMap oneError fs
   where
     oneError f =
         "unrecognised flag: " ++ f ++ "\n" ++
-        (case fuzzyMatch f (nub allFlags) of
+        (case fuzzyMatch f (nub allNonDeprecatedFlags) of
             [] -> ""
             suggs -> "did you mean one of:\n" ++ unlines (map ("  " ++) suggs))
 

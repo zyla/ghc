@@ -12,6 +12,7 @@
 
 ghc_USES_CABAL = YES
 ghc_PACKAGE = ghc-bin
+ghc_EXECUTABLE = ghc
 
 ghc_stage1_CONFIGURE_OPTS += --flags=stage1
 ghc_stage2_CONFIGURE_OPTS += --flags=stage2
@@ -20,15 +21,6 @@ ghc_stage3_CONFIGURE_OPTS += --flags=stage3
 ifeq "$(GhcWithInterpreter)" "YES"
 ghc_stage2_CONFIGURE_OPTS += --flags=ghci
 ghc_stage3_CONFIGURE_OPTS += --flags=ghci
-endif
-
-ifeq "$(compiler_stage1_VERSION_MUNGED)" "YES"
-# If we munge the stage1 version, and we're using a devel snapshot for
-# stage0, then stage1 may actually have an earlier version than stage0
-# (e.g. boot with ghc-7.5.20120316, building ghc-7.5). We therefore
-# need to tell Cabal to use version 7.5 of the ghc package when building
-# in ghc/stage1
-ghc_stage1_CONFIGURE_OPTS += --constraint "ghc == $(compiler_stage1_MUNGED_VERSION)"
 endif
 
 # This package doesn't pass the Cabal checks because data-dir

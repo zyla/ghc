@@ -36,11 +36,25 @@ warningsOptions =
          , flagType = DynamicFlag
          , flagReverse = "-Werror"
          }
+  , flag { flagName = "-Wunrecognised-warning-flags"
+         , flagDescription =
+           "throw a warning when an unreconised ``-W...`` flag is "++
+           "encountered on the command line."
+         , flagType = DynamicFlag
+         , flagReverse = "-Wno-unrecognised-warning-flags"
+         }
+  , flag { flagName = "-fshow-warning-groups"
+         , flagDescription = "show which group an emitted warning belongs to."
+         , flagType = DynamicFlag
+         , flagReverse = "-fno-show-warning-groups"
+         }
   , flag { flagName = "-fdefer-type-errors"
          , flagDescription =
            "Turn type errors into warnings, :ref:`deferring the error until "++
-           "runtime <defer-type-errors>`. Implies ``-fdefer-typed-holes``. "++
-           "See also ``-Wdeferred-type-errors``"
+           "runtime <defer-type-errors>`. Implies "++
+           ":ghc-flag:`-fdefer-typed-holes` and "++
+           ":ghc-flag:`-fdefer-out-of-scope-variables`. "++
+           "See also :ghc-flag:`-Wdeferred-type-errors`"
          , flagType = DynamicFlag
          , flagReverse = "-fno-defer-type-errors"
          }
@@ -48,10 +62,18 @@ warningsOptions =
          , flagDescription =
            "Convert :ref:`typed hole <typed-holes>` errors into warnings, "++
            ":ref:`deferring the error until runtime <defer-type-errors>`. "++
-           "Implied by ``-fdefer-type-errors``. "++
-           "See also ``-Wtyped-holes``."
+           "Implied by :ghc-flag:`-fdefer-type-errors`. "++
+           "See also :ghc-flag:`-Wtyped-holes`."
          , flagType = DynamicFlag
          , flagReverse = "-fno-defer-typed-holes"
+         }
+  , flag { flagName = "-fdefer-out-of-scope-variables"
+         , flagDescription =
+           "Convert variable out of scope variables errors into warnings. "++
+           "Implied by :ghc-flag:`-fdefer-type-errors`. "++
+           "See also :ghc-flag:`-Wdeferred-out-of-scope-variables`."
+         , flagType = DynamicFlag
+         , flagReverse = "-fno-defer-out-of-scope-variables"
          }
   , flag { flagName = "-fhelpful-errors"
          , flagDescription = "Make suggestions for mis-spelled names."
@@ -105,17 +127,15 @@ warningsOptions =
          , flagType = DynamicFlag
          , flagReverse = "-Wno-incomplete-uni-patterns"
          }
+  , flag { flagName = "-Wmax-pmcheck-iterations=<N>"
+         , flagDescription =
+           "the iteration limit for the pattern match checker"
+         , flagType = DynamicFlag
+         }
   , flag { flagName = "-Wincomplete-record-updates"
          , flagDescription = "warn when a record update could fail"
          , flagType = DynamicFlag
          , flagReverse = "-Wno-incomplete-record-updates"
-         }
-  , flag { flagName = "-Wlazy-unlifted-bindings"
-         , flagDescription =
-           "*(deprecated)* warn when a pattern binding looks lazy but "++
-           "must be strict"
-         , flagType = DynamicFlag
-         , flagReverse = "-Wno-lazy-unlifted-bindings"
          }
   , flag { flagName = "-Wmissing-fields"
          , flagDescription = "warn when fields of a record are uninitialised"
@@ -141,23 +161,38 @@ warningsOptions =
          }
   , flag { flagName = "-Wmissing-exported-sigs"
          , flagDescription =
+           "*(deprecated)* "++
            "warn about top-level functions without signatures, only if they "++
            "are exported. takes precedence over -Wmissing-signatures"
          , flagType = DynamicFlag
          , flagReverse = "-Wno-missing-exported-sigs"
          }
+  , flag { flagName = "-Wmissing-exported-signatures"
+         , flagDescription =
+           "warn about top-level functions without signatures, only if they "++
+           "are exported. takes precedence over -Wmissing-signatures"
+         , flagType = DynamicFlag
+         , flagReverse = "-Wno-missing-exported-signatures"
+         }
   , flag { flagName = "-Wmissing-local-sigs"
          , flagDescription =
+           "*(deprecated)* "++
            "warn about polymorphic local bindings without signatures"
          , flagType = DynamicFlag
          , flagReverse = "-Wno-missing-local-sigs"
          }
-  , flag { flagName = "-Wmissing-monadfail-instance"
+  , flag { flagName = "-Wmissing-local-signatures"
+         , flagDescription =
+           "warn about polymorphic local bindings without signatures"
+         , flagType = DynamicFlag
+         , flagReverse = "-Wno-missing-local-signatures"
+         }
+  , flag { flagName = "-Wmissing-monadfail-instances"
          , flagDescription =
            "warn when a failable pattern is used in a do-block that does " ++
            "not have a ``MonadFail`` instance."
          , flagType = DynamicFlag
-         , flagReverse = "-Wno-missing-monadfail-instance"
+         , flagReverse = "-Wno-missing-monadfail-instances"
          }
   , flag { flagName = "-Wsemigroup"
          , flagDescription =
@@ -188,22 +223,30 @@ warningsOptions =
          , flagType = DynamicFlag
          , flagReverse = "-Wno-name-shadowing"
          }
-  , flag { flagName = "-Wnoncanonical-monad-instance"
+  , flag { flagName = "-Wnoncanonical-monad-instances"
          , flagDescription =
            "warn when ``Applicative`` or ``Monad`` instances have "++
            "noncanonical definitions of ``return``, ``pure``, ``(>>)``, "++
            "or ``(*>)``. "++
            "See flag description in :ref:`options-sanity` for more details."
          , flagType = DynamicFlag
-         , flagReverse = "-Wno-noncanonical-monad-instance"
+         , flagReverse = "-Wno-noncanonical-monad-instances"
          }
-  , flag { flagName = "-Wnoncanonical-monoid-instance"
+  , flag { flagName = "-Wnoncanonical-monadfail-instances"
+         , flagDescription =
+           "warn when ``Monad`` or ``MonadFail`` instances have "++
+           "noncanonical definitions of ``fail``."++
+           "See flag description in :ref:`options-sanity` for more details."
+         , flagType = DynamicFlag
+         , flagReverse = "-Wno-noncanonical-monadfail-instances"
+         }
+  , flag { flagName = "-Wnoncanonical-monoid-instances"
          , flagDescription =
            "warn when ``Semigroup`` or ``Monoid`` instances have "++
            "noncanonical definitions of ``(<>)`` or ``mappend``. "++
            "See flag description in :ref:`options-sanity` for more details."
          , flagType = DynamicFlag
-         , flagReverse = "-Wno-noncanonical-monoid-instance"
+         , flagReverse = "-Wno-noncanonical-monoid-instances"
          }
   , flag { flagName = "-Worphans"
          , flagDescription =
@@ -241,8 +284,8 @@ warningsOptions =
   , flag { flagName = "-Wunused-binds"
          , flagDescription =
            "warn about bindings that are unused. Alias for "++
-           "``-Wunused-top-binds``, ``-Wunused-local-binds`` and "++
-           "``-Wunused-pattern-binds``"
+           ":ghc-flag:`-Wunused-top-binds`, :ghc-flag:`-Wunused-local-binds` and "++
+           ":ghc-flag:`-Wunused-pattern-binds`"
          , flagType = DynamicFlag
          , flagReverse = "-Wno-unused-binds"
          }
@@ -271,6 +314,18 @@ warningsOptions =
          , flagType = DynamicFlag
          , flagReverse = "-Wno-unused-matches"
          }
+  , flag { flagName = "-Wunused-foralls"
+         , flagDescription = "warn about type variables in user-written "++
+           "``forall``\\s that are unused"
+         , flagType = DynamicFlag
+         , flagReverse = "-Wno-unused-foralls"
+         }
+  , flag { flagName = "-Wunused-type-variables"
+         , flagDescription = "warn about variables in type family or data "++
+           "family instances that are unused"
+         , flagType = DynamicFlag
+         , flagReverse = "-Wno-unused-type-variables"
+         }
   , flag { flagName = "-Wunused-do-bind"
          , flagDescription =
            "warn about do bindings that appear to throw away values of types "++
@@ -291,7 +346,7 @@ warningsOptions =
            "Should be used to check the safety status of modules when using "++
            "safe inference. Works on all module types, even those using "++
            "explicit :ref:`Safe Haskell <safe-haskell>` modes (such as "++
-           "``-XTrustworthy``) and so can be used to have the compiler check "++
+           ":ghc-flag:`-XTrustworthy`) and so can be used to have the compiler check "++
            "any assumptions made."
          , flagType = DynamicFlag
          , flagReverse = "-Wno-unsafe"
@@ -302,17 +357,17 @@ warningsOptions =
            "be used to check the safety status of modules when using safe "++
            "inference. Works on all module types, even those using explicit "++
            ":ref:`Safe Haskell <safe-haskell>` modes (such as "++
-           "``-XTrustworthy``) and so can be used to have the compiler check "++
+           ":ghc-flag:`-XTrustworthy`) and so can be used to have the compiler check "++
            "any assumptions made."
          , flagType = DynamicFlag
          , flagReverse = "-Wno-safe"
          }
   , flag { flagName = "-Wtrustworthy-safe"
          , flagDescription =
-           "warn if the module being compiled is marked as ``-XTrustworthy`` "++
-           "but it could instead be marked as ``-XSafe``, a more informative "++
-           "bound. Can be used to detect once a Safe Haskell bound can be "++
-           "improved as dependencies are updated."
+           "warn if the module being compiled is marked as "++
+           ":ghc-flag:`-XTrustworthy` but it could instead be marked as "++
+           ":ghc-flag:`-XSafe`, a more informative bound. Can be used to detect"++
+           "once a Safe Haskell bound can be improved as dependencies are updated."
          , flagType = DynamicFlag
          , flagReverse = "-Wno-safe"
          }
@@ -330,11 +385,18 @@ warningsOptions =
          , flagType = DynamicFlag
          , flagReverse = "-Wno-amp"
          }
+  , flag { flagName = "-Wredundant-constraints"
+         , flagDescription =
+           "Have the compiler warn about redundant constraints in type"++
+           "signatures."
+         , flagType = DynamicFlag
+         , flagReverse = "-Wno-redundant-constraints"
+         }
   , flag { flagName = "-Wdeferred-type-errors"
          , flagDescription =
            "Report warnings when :ref:`deferred type errors "++
            "<defer-type-errors>` are enabled. This option is enabled by "++
-           "default. See ``-fdefer-type-errors``."
+           "default. See :ghc-flag:`-fdefer-type-errors`."
          , flagType = DynamicFlag
          , flagReverse = "-Wno-deferred-type-errors"
          }
@@ -342,16 +404,25 @@ warningsOptions =
          , flagDescription =
            "Report warnings when :ref:`typed hole <typed-holes>` errors are "++
            ":ref:`deferred until runtime <defer-type-errors>`. See "++
-           "``-fdefer-typed-holes``."
+           ":ghc-flag:`-fdefer-typed-holes`."
          , flagType = DynamicFlag
          , flagReverse = "-Wno-typed-holes"
+         }
+  , flag { flagName = "-Wdeferred-out-of-scope-variables"
+         , flagDescription =
+           "Report warnings when variable out-of-scope errors are "++
+           ":ref:`deferred until runtime <defer-out-of-scope-variables>`. "++
+           "See :ghc-flag:`-fdefer-out-of-scope-variables`."
+         , flagType = DynamicFlag
+         , flagReverse = "-Wno-deferred-out-of-scope-variables"
          }
   , flag { flagName = "-Wpartial-type-signatures"
          , flagDescription =
            "warn about holes in partial type signatures when "++
-           "``-XPartialTypeSignatures`` is enabled. Not applicable when "++
-           "``-XPartialTypesignatures`` is not enabled, in which case errors "++
-           "are generated for such holes. See :ref:`partial-type-signatures`."
+           ":ghc-flag:`-XPartialTypeSignatures` is enabled. Not applicable when "++
+           ":ghc-flag:`-XPartialTypesignatures` is not enabled, in which case "++
+           "errors are generated for such holes. See "++
+           ":ref:`partial-type-signatures`."
          , flagType = DynamicFlag
          , flagReverse = "-Wno-partial-type-signatures"
          }

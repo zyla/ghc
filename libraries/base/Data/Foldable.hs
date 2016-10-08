@@ -1,6 +1,10 @@
-{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE DeriveFoldable #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE TypeOperators #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -50,6 +54,7 @@ module Data.Foldable (
 import Data.Bool
 import Data.Either
 import Data.Eq
+import Data.Functor.Utils (Max(..), Min(..), (#.))
 import qualified GHC.List as List
 import Data.Maybe
 import Data.Monoid
@@ -61,6 +66,7 @@ import GHC.Arr  ( Array(..), elems, numElements,
                   foldlElems', foldrElems',
                   foldl1Elems, foldr1Elems)
 import GHC.Base hiding ( foldr )
+import GHC.Generics
 import GHC.Num  ( Num(..) )
 
 infix  4 `elem`, `notElem`
@@ -125,28 +131,74 @@ class Foldable t where
 
     -- | Right-associative fold of a structure.
     --
-    -- @'foldr' f z = 'Prelude.foldr' f z . 'toList'@
+    -- In the case of lists, 'foldr', when applied to a binary operator, a
+    -- starting value (typically the right-identity of the operator), and a
+    -- list, reduces the list using the binary operator, from right to left:
+    --
+    -- > foldr f z [x1, x2, ..., xn] == x1 `f` (x2 `f` ... (xn `f` z)...)
+    --
+    -- Note that, since the head of the resulting expression is produced by
+    -- an application of the operator to the first element of the list,
+    -- 'foldr' can produce a terminating expression from an infinite list.
+    --
+    -- For a general 'Foldable' structure this should be semantically identical
+    -- to,
+    --
+    -- @foldr f z = 'List.foldr' f z . 'toList'@
+    --
     foldr :: (a -> b -> b) -> b -> t a -> b
     foldr f z t = appEndo (foldMap (Endo #. f) t) z
 
-    -- | Right-associative fold of a structure,
-    -- but with strict application of the operator.
+    -- | Right-associative fold of a structure, but with strict application of
+    -- the operator.
+    --
     foldr' :: (a -> b -> b) -> b -> t a -> b
     foldr' f z0 xs = foldl f' id xs z0
       where f' k x z = k $! f x z
 
     -- | Left-associative fold of a structure.
     --
-    -- @'foldl' f z = 'Prelude.foldl' f z . 'toList'@
+    -- In the case of lists, 'foldl', when applied to a binary
+    -- operator, a starting value (typically the left-identity of the operator),
+    -- and a list, reduces the list using the binary operator, from left to
+    -- right:
+    --
+    -- > foldl f z [x1, x2, ..., xn] == (...((z `f` x1) `f` x2) `f`...) `f` xn
+    --
+    -- Note that to produce the outermost application of the operator the
+    -- entire input list must be traversed. This means that 'foldl'' will
+    -- diverge if given an infinite list.
+    --
+    -- Also note that if you want an efficient left-fold, you probably want to
+    -- use 'foldl'' instead of 'foldl'. The reason for this is that latter does
+    -- not force the "inner" results (e.g. @z `f` x1@ in the above example)
+    -- before applying them to the operator (e.g. to @(`f` x2)@). This results
+    -- in a thunk chain @O(n)@ elements long, which then must be evaluated from
+    -- the outside-in.
+    --
+    -- For a general 'Foldable' structure this should be semantically identical
+    -- to,
+    --
+    -- @foldl f z = 'List.foldl' f z . 'toList'@
+    --
     foldl :: (b -> a -> b) -> b -> t a -> b
     foldl f z t = appEndo (getDual (foldMap (Dual . Endo . flip f) t)) z
     -- There's no point mucking around with coercions here,
     -- because flip forces us to build a new function anyway.
 
-    -- | Left-associative fold of a structure.
-    -- but with strict application of the operator.
+    -- | Left-associative fold of a structure but with strict application of
+    -- the operator.
     --
-    -- @'foldl' f z = 'List.foldl'' f z . 'toList'@
+    -- This ensures that each step of the fold is forced to weak head normal
+    -- form before being applied, avoiding the collection of thunks that would
+    -- otherwise occur. This is often what you want to strictly reduce a finite
+    -- list to a single, monolithic result (e.g. 'length').
+    --
+    -- For a general 'Foldable' structure this should be semantically identical
+    -- to,
+    --
+    -- @foldl f z = 'List.foldl'' f z . 'toList'@
+    --
     foldl' :: (b -> a -> b) -> b -> t a -> b
     foldl' f z0 xs = foldr f' id xs z0
       where f' x k z = k $! f z x
@@ -154,7 +206,7 @@ class Foldable t where
     -- | A variant of 'foldr' that has no base case,
     -- and thus may only be applied to non-empty structures.
     --
-    -- @'foldr1' f = 'Prelude.foldr1' f . 'toList'@
+    -- @'foldr1' f = 'List.foldr1' f . 'toList'@
     foldr1 :: (a -> a -> a) -> t a -> a
     foldr1 f xs = fromMaybe (errorWithoutStackTrace "foldr1: empty structure")
                     (foldr mf Nothing xs)
@@ -166,7 +218,7 @@ class Foldable t where
     -- | A variant of 'foldl' that has no base case,
     -- and thus may only be applied to non-empty structures.
     --
-    -- @'foldl1' f = 'Prelude.foldl1' f . 'toList'@
+    -- @'foldl1' f = 'List.foldl1' f . 'toList'@
     foldl1 :: (a -> a -> a) -> t a -> a
     foldl1 f xs = fromMaybe (errorWithoutStackTrace "foldl1: empty structure")
                     (foldl mf Nothing xs)
@@ -217,6 +269,7 @@ class Foldable t where
 
 -- instances for Prelude types
 
+-- | @since 2.01
 instance Foldable Maybe where
     foldr _ z Nothing = z
     foldr f z (Just x) = f x z
@@ -224,6 +277,7 @@ instance Foldable Maybe where
     foldl _ z Nothing = z
     foldl f z (Just x) = f z x
 
+-- | @since 2.01
 instance Foldable [] where
     elem    = List.elem
     foldl   = List.foldl
@@ -239,6 +293,7 @@ instance Foldable [] where
     sum     = List.sum
     toList  = id
 
+-- | @since 4.7.0.0
 instance Foldable (Either a) where
     foldMap _ (Left _) = mempty
     foldMap f (Right y) = f y
@@ -251,11 +306,13 @@ instance Foldable (Either a) where
 
     null             = isLeft
 
+-- | @since 4.7.0.0
 instance Foldable ((,) a) where
     foldMap f (_, y) = f y
 
     foldr f z (_, y) = f y z
 
+-- | @since 4.8.0.0
 instance Foldable (Array i) where
     foldr = foldrElems
     foldl = foldlElems
@@ -267,6 +324,7 @@ instance Foldable (Array i) where
     length = numElements
     null a = numElements a == 0
 
+-- | @since 4.7.0.0
 instance Foldable Proxy where
     foldMap _ _ = mempty
     {-# INLINE foldMap #-}
@@ -284,6 +342,7 @@ instance Foldable Proxy where
     sum _      = 0
     product _  = 1
 
+-- | @since 4.8.0.0
 instance Foldable Dual where
     foldMap            = coerce
 
@@ -302,6 +361,7 @@ instance Foldable Dual where
     sum                = getDual
     toList (Dual x)    = [x]
 
+-- | @since 4.8.0.0
 instance Foldable Sum where
     foldMap            = coerce
 
@@ -320,6 +380,7 @@ instance Foldable Sum where
     sum                = getSum
     toList (Sum x)     = [x]
 
+-- | @since 4.8.0.0
 instance Foldable Product where
     foldMap               = coerce
 
@@ -338,40 +399,47 @@ instance Foldable Product where
     sum                   = getProduct
     toList (Product x)    = [x]
 
+-- | @since 4.8.0.0
 instance Foldable First where
     foldMap f = foldMap f . getFirst
 
+-- | @since 4.8.0.0
 instance Foldable Last where
     foldMap f = foldMap f . getLast
 
--- We don't export Max and Min because, as Edward Kmett pointed out to me,
--- there are two reasonable ways to define them. One way is to use Maybe, as we
--- do here; the other way is to impose a Bounded constraint on the Monoid
--- instance. We may eventually want to add both versions, but we don't want to
--- trample on anyone's toes by imposing Max = MaxMaybe.
+-- Instances for GHC.Generics
+-- | @since 4.9.0.0
+instance Foldable U1 where
+    foldMap _ _ = mempty
+    {-# INLINE foldMap #-}
+    fold _ = mempty
+    {-# INLINE fold #-}
+    foldr _ z _ = z
+    {-# INLINE foldr #-}
+    foldl _ z _ = z
+    {-# INLINE foldl #-}
+    foldl1 _ _ = errorWithoutStackTrace "foldl1: U1"
+    foldr1 _ _ = errorWithoutStackTrace "foldr1: U1"
+    length _   = 0
+    null _     = True
+    elem _ _   = False
+    sum _      = 0
+    product _  = 1
 
-newtype Max a = Max {getMax :: Maybe a}
-newtype Min a = Min {getMin :: Maybe a}
-
-instance Ord a => Monoid (Max a) where
-  mempty = Max Nothing
-
-  {-# INLINE mappend #-}
-  m `mappend` Max Nothing = m
-  Max Nothing `mappend` n = n
-  (Max m@(Just x)) `mappend` (Max n@(Just y))
-    | x >= y    = Max m
-    | otherwise = Max n
-
-instance Ord a => Monoid (Min a) where
-  mempty = Min Nothing
-
-  {-# INLINE mappend #-}
-  m `mappend` Min Nothing = m
-  Min Nothing `mappend` n = n
-  (Min m@(Just x)) `mappend` (Min n@(Just y))
-    | x <= y    = Min m
-    | otherwise = Min n
+deriving instance Foldable V1
+deriving instance Foldable Par1
+deriving instance Foldable f => Foldable (Rec1 f)
+deriving instance Foldable (K1 i c)
+deriving instance Foldable f => Foldable (M1 i c f)
+deriving instance (Foldable f, Foldable g) => Foldable (f :+: g)
+deriving instance (Foldable f, Foldable g) => Foldable (f :*: g)
+deriving instance (Foldable f, Foldable g) => Foldable (f :.: g)
+deriving instance Foldable UAddr
+deriving instance Foldable UChar
+deriving instance Foldable UDouble
+deriving instance Foldable UFloat
+deriving instance Foldable UInt
+deriving instance Foldable UWord
 
 -- | Monadic fold over the elements of a structure,
 -- associating to the right, i.e. from right to left.
@@ -505,35 +573,3 @@ notElem x = not . elem x
 -- 'Nothing' if there is no such element.
 find :: Foldable t => (a -> Bool) -> t a -> Maybe a
 find p = getFirst . foldMap (\ x -> First (if p x then Just x else Nothing))
-
--- See Note [Function coercion]
-(#.) :: Coercible b c => (b -> c) -> (a -> b) -> (a -> c)
-(#.) _f = coerce
-{-# INLINE (#.) #-}
-
-{-
-Note [Function coercion]
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-Several functions here use (#.) instead of (.) to avoid potential efficiency
-problems relating to #7542. The problem, in a nutshell:
-
-If N is a newtype constructor, then N x will always have the same
-representation as x (something similar applies for a newtype deconstructor).
-However, if f is a function,
-
-N . f = \x -> N (f x)
-
-This looks almost the same as f, but the eta expansion lifts it--the lhs could
-be _|_, but the rhs never is. This can lead to very inefficient code.  Thus we
-steal a technique from Shachaf and Edward Kmett and adapt it to the current
-(rather clean) setting. Instead of using  N . f,  we use  N .## f, which is
-just
-
-coerce f `asTypeOf` (N . f)
-
-That is, we just *pretend* that f has the right type, and thanks to the safety
-of coerce, the type checker guarantees that nothing really goes wrong. We still
-have to be a bit careful, though: remember that #. completely ignores the
-*value* of its left operand.
--}

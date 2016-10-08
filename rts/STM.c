@@ -92,6 +92,7 @@
 #include "Trace.h"
 #include "Threads.h"
 #include "sm/Storage.h"
+#include "SMPClosureOps.h"
 
 #include <stdio.h>
 
@@ -111,8 +112,8 @@
 
 /*......................................................................*/
 
-// If SHAKE is defined then validation will sometime spuriously fail.  They helps test
-// unusualy code paths if genuine contention is rare
+// If SHAKE is defined then validation will sometimes spuriously fail.  They help test
+// unusual code paths if genuine contention is rare
 
 #define TRACE(_x...) debugTrace(DEBUG_stm, "STM: " _x)
 
@@ -353,7 +354,7 @@ static void unlock_inv(StgAtomicInvariant *inv) {
 
 static StgBool watcher_is_tso(StgTVarWatchQueue *q) {
   StgClosure *c = q -> closure;
-  StgInfoTable *info = get_itbl(c);
+  const StgInfoTable *info = get_itbl(c);
   return (info -> type) == TSO;
 }
 

@@ -4,13 +4,13 @@
 \section[HscTypes]{Types for the per-module compiler}
 -}
 
-{-# LANGUAGE CPP, DeriveDataTypeable, ScopedTypeVariables #-}
+{-# LANGUAGE CPP, ScopedTypeVariables #-}
 
 -- | Types for the per-module compiler
 module HscTypes (
         -- * compilation state
         HscEnv(..), hscEPS,
-        FinderCache, FindResult(..),
+        FinderCache, FindResult(..), InstalledFindResult(..),
         Target(..), TargetId(..), pprTarget, pprTargetId,
         ModuleGraph, emptyMG,
         HscStatus(..),
@@ -26,7 +26,7 @@ module HscTypes (
         ModGuts(..), CgGuts(..), ForeignStubs(..), appendStubC,
         ImportedMods, ImportedModsVal(..),
 
-        ModSummary(..), ms_imps, ms_mod_name, showModMsg, isBootSummary,
+        ModSummary(..), ms_imps, ms_installed_mod, ms_mod_name, showModMsg, isBootSummary,
         msHsFilePath, msHiFilePath, msObjFilePath,
         SourceModified(..),
 
@@ -37,6 +37,8 @@ module HscTypes (
 
         -- * State relating to modules in this package
         HomePackageTable, HomeModInfo(..), emptyHomePackageTable,
+        lookupHpt, eltsHpt, filterHpt, allHpt, mapHpt, delFromHpt,
+        addToHpt, addListToHpt, lookupHptDirectly, listToHpt,
         hptInstances, hptRules, hptVectInfo, pprHPT,
         hptObjs,
 
@@ -70,7 +72,10 @@ module HscTypes (
 
         -- * Interfaces
         ModIface(..), mkIfaceWarnCache, mkIfaceHashCache, mkIfaceFixCache,
-        emptyIfaceWarnCache, mi_boot,
+        emptyIfaceWarnCache, mi_boot, mi_fix,
+        mi_semantic_module,
+        mi_free_holes,
+        renameFreeHoles,
 
         -- * Fixity
         FixityEnv, FixItem(..), lookupFixity, emptyFixityEnv,
@@ -85,7 +90,7 @@ module HscTypes (
         TypeEnv, lookupType, lookupTypeHscEnv, mkTypeEnv, emptyTypeEnv,
         typeEnvFromEntities, mkTypeEnvWithImplicits,
         extendTypeEnv, extendTypeEnvList,
-        extendTypeEnvWithIds,
+        extendTypeEnvWithIds, plusTypeEnv,
         lookupTypeEnv,
         typeEnvElts, typeEnvTyCons, typeEnvIds, typeEnvPatSyns,
         typeEnvDataCons, typeEnvCoAxioms, typeEnvClasses,
@@ -111,8 +116,7 @@ module HscTypes (
         HpcInfo(..), emptyHpcInfo, isHpcUsed, AnyHpcUsage,
 
         -- * Breakpoints
-        ModBreaks (..), BreakIndex, emptyModBreaks,
-        CCostCentre,
+        ModBreaks (..), emptyModBreaks,
 
         -- * Vectorisation information
         VectInfo(..), IfaceVectInfo(..), noVectInfo, plusVectInfo,
@@ -134,12 +138,13 @@ module HscTypes (
 #include "HsVersions.h"
 
 #ifdef GHCI
-import ByteCodeTypes        ( CompiledByteCode )
+import ByteCodeTypes
 import InteractiveEvalTypes ( Resume )
 import GHCi.Message         ( Pipe )
 import GHCi.RemoteTypes
 #endif
 
+import UniqFM
 import HsSyn
 import RdrName
 import Avail
@@ -176,10 +181,9 @@ import IfaceSyn
 import CoreSyn          ( CoreRule, CoreVect )
 import Maybes
 import Outputable
-import BreakArray
 import SrcLoc
--- import Unique
-import UniqFM
+import Unique
+import UniqDFM
 import UniqSupply
 import FastString
 import StringBuffer     ( StringBuffer )
@@ -190,18 +194,19 @@ import Binary
 import ErrUtils
 import Platform
 import Util
+import UniqDSet
 import GHC.Serialized   ( Serialized )
 
 import Foreign
 import Control.Monad    ( guard, liftM, when, ap )
-import Control.Concurrent
-import Data.Array       ( Array, array )
 import Data.IORef
 import Data.Time
-import Data.Typeable    ( Typeable )
 import Exception
 import System.FilePath
+#ifdef GHCI
+import Control.Concurrent
 import System.Process   ( ProcessHandle )
+#endif
 
 -- -----------------------------------------------------------------------------
 -- Compilation state
@@ -228,7 +233,6 @@ instance Applicative Hsc where
     (<*>) = ap
 
 instance Monad Hsc where
-    return = pure
     Hsc m >>= k = Hsc $ \e w -> do (a, w1) <- m e w
                                    case k a of
                                        Hsc k' -> k' e w1
@@ -288,7 +292,6 @@ throwOneError err = liftIO $ throwIO $ mkSrcErr $ unitBag err
 -- See 'printExceptionAndWarnings' for more information on what to take care
 -- of when writing a custom error handler.
 newtype SourceError = SourceError ErrorMessages
-  deriving Typeable
 
 instance Show SourceError where
   show (SourceError msgs) = unlines . map show . bagToList $ msgs
@@ -306,7 +309,6 @@ handleSourceError handler act =
 
 -- | An error thrown if the GHC API is used in an incorrect fashion.
 newtype GhcApiError = GhcApiError String
-  deriving Typeable
 
 instance Show GhcApiError where
   show (GhcApiError msg) = msg
@@ -401,7 +403,7 @@ data HscEnv
         hsc_type_env_var :: Maybe (Module, IORef TypeEnv)
                 -- ^ Used for one-shot compilation only, to initialise
                 -- the 'IfGblEnv'. See 'TcRnTypes.tcg_type_env_var' for
-                -- 'TcRunTypes.TcGblEnv'
+                -- 'TcRnTypes.TcGblEnv'.  See also Note [hsc_type_env_var hack]
 
 #ifdef GHCI
         , hsc_iserv :: MVar (Maybe IServ)
@@ -410,9 +412,48 @@ data HscEnv
 #endif
  }
 
-instance ContainsDynFlags HscEnv where
-    extractDynFlags env = hsc_dflags env
-    replaceDynFlags env dflags = env {hsc_dflags = dflags}
+-- Note [hsc_type_env_var hack]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- hsc_type_env_var is used to initialize tcg_type_env_var, and
+-- eventually it is the mutable variable that is queried from
+-- if_rec_types to get a TypeEnv.  So, clearly, it's something
+-- related to knot-tying (see Note [Tying the knot]).
+-- hsc_type_env_var is used in two places: initTcRn (where
+-- it initializes tcg_type_env_var) and initIfaceCheck
+-- (where it initializes if_rec_types).
+--
+-- But why do we need a way to feed a mutable variable in?  Why
+-- can't we just initialize tcg_type_env_var when we start
+-- typechecking?  The problem is we need to knot-tie the
+-- EPS, and we may start adding things to the EPS before type
+-- checking starts.
+--
+-- Here is a concrete example. Suppose we are running
+-- "ghc -c A.hs", and we have this file system state:
+--
+--  A.hs-boot   A.hi-boot **up to date**
+--  B.hs        B.hi      **up to date**
+--  A.hs        A.hi      **stale**
+--
+-- The first thing we do is run checkOldIface on A.hi.
+-- checkOldIface will call loadInterface on B.hi so it can
+-- get its hands on the fingerprints, to find out if A.hi
+-- needs recompilation.  But loadInterface also populates
+-- the EPS!  And so if compilation turns out to be necessary,
+-- as it is in this case, the thunks we put into the EPS for
+-- B.hi need to have the correct if_rec_types mutable variable
+-- to query.
+--
+-- If the mutable variable is only allocated WHEN we start
+-- typechecking, then that's too late: we can't get the
+-- information to the thunks.  So we need to pre-commit
+-- to a type variable in 'hscIncrementalCompile' BEFORE we
+-- check the old interface.
+--
+-- This is all a massive hack because arguably checkOldIface
+-- should not populate the EPS. But that's a refactor for
+-- another day.
+
 
 #ifdef GHCI
 data IServ = IServ
@@ -474,7 +515,7 @@ instance Outputable TargetId where
 -}
 
 -- | Helps us find information about modules in the home package
-type HomePackageTable  = ModuleNameEnv HomeModInfo
+type HomePackageTable  = DModuleNameEnv HomeModInfo
         -- Domain = modules in the home package that have been fully compiled
         -- "home" unit id cached here for convenience
 
@@ -484,7 +525,7 @@ type PackageIfaceTable = ModuleEnv ModIface
 
 -- | Constructs an empty HomePackageTable
 emptyHomePackageTable :: HomePackageTable
-emptyHomePackageTable  = emptyUFM
+emptyHomePackageTable  = emptyUDFM
 
 -- | Constructs an empty PackageIfaceTable
 emptyPackageIfaceTable :: PackageIfaceTable
@@ -492,16 +533,47 @@ emptyPackageIfaceTable = emptyModuleEnv
 
 pprHPT :: HomePackageTable -> SDoc
 -- A bit aribitrary for now
-pprHPT hpt
-  = vcat [ hang (ppr (mi_module (hm_iface hm)))
+pprHPT hpt = pprUDFM hpt $ \hms ->
+    vcat [ hang (ppr (mi_module (hm_iface hm)))
               2 (ppr (md_types (hm_details hm)))
-         | hm <- eltsUFM hpt ]
+         | hm <- hms ]
+
+lookupHpt :: HomePackageTable -> ModuleName -> Maybe HomeModInfo
+lookupHpt = lookupUDFM
+
+lookupHptDirectly :: HomePackageTable -> Unique -> Maybe HomeModInfo
+lookupHptDirectly = lookupUDFM_Directly
+
+eltsHpt :: HomePackageTable -> [HomeModInfo]
+eltsHpt = eltsUDFM
+
+filterHpt :: (HomeModInfo -> Bool) -> HomePackageTable -> HomePackageTable
+filterHpt = filterUDFM
+
+allHpt :: (HomeModInfo -> Bool) -> HomePackageTable -> Bool
+allHpt = allUDFM
+
+mapHpt :: (HomeModInfo -> HomeModInfo) -> HomePackageTable -> HomePackageTable
+mapHpt = mapUDFM
+
+delFromHpt :: HomePackageTable -> ModuleName -> HomePackageTable
+delFromHpt = delFromUDFM
+
+addToHpt :: HomePackageTable -> ModuleName -> HomeModInfo -> HomePackageTable
+addToHpt = addToUDFM
+
+addListToHpt
+  :: HomePackageTable -> [(ModuleName, HomeModInfo)] -> HomePackageTable
+addListToHpt = addListToUDFM
+
+listToHpt :: [(ModuleName, HomeModInfo)] -> HomePackageTable
+listToHpt = listToUDFM
 
 lookupHptByModule :: HomePackageTable -> Module -> Maybe HomeModInfo
 -- The HPT is indexed by ModuleName, not Module,
 -- we must check for a hit on the right Module
 lookupHptByModule hpt mod
-  = case lookupUFM hpt (moduleName mod) of
+  = case lookupHpt hpt (moduleName mod) of
       Just hm | mi_module (hm_iface hm) == mod -> Just hm
       _otherwise                               -> Nothing
 
@@ -584,7 +656,7 @@ hptAnns hsc_env (Just deps) = hptSomeThingsBelowUs (md_anns . hm_details) False 
 hptAnns hsc_env Nothing = hptAllThings (md_anns . hm_details) hsc_env
 
 hptAllThings :: (HomeModInfo -> [a]) -> HscEnv -> [a]
-hptAllThings extract hsc_env = concatMap extract (eltsUFM (hsc_HPT hsc_env))
+hptAllThings extract hsc_env = concatMap extract (eltsHpt (hsc_HPT hsc_env))
 
 -- | Get things from modules "below" this one (in the dependency sense)
 -- C.f Inst.hptInstances
@@ -607,18 +679,18 @@ hptSomeThingsBelowUs extract include_hi_boot hsc_env deps
     , mod /= moduleName gHC_PRIM
 
         -- Look it up in the HPT
-    , let things = case lookupUFM hpt mod of
+    , let things = case lookupHpt hpt mod of
                     Just info -> extract info
                     Nothing -> pprTrace "WARNING in hptSomeThingsBelowUs" msg []
-          msg = vcat [ptext (sLit "missing module") <+> ppr mod,
-                      ptext (sLit "Probable cause: out-of-date interface files")]
+          msg = vcat [text "missing module" <+> ppr mod,
+                      text "Probable cause: out-of-date interface files"]
                         -- This really shouldn't happen, but see Trac #962
 
         -- And get its dfuns
     , thing <- things ]
 
 hptObjs :: HomePackageTable -> [FilePath]
-hptObjs hpt = concat (map (maybe [] linkableObjs . hm_linkable) (eltsUFM hpt))
+hptObjs hpt = concat (map (maybe [] linkableObjs . hm_linkable) (eltsHpt hpt))
 
 {-
 ************************************************************************
@@ -699,12 +771,18 @@ prepareAnnotations hsc_env mb_guts = do
 -- modules along the search path. On @:load@, we flush the entire
 -- contents of this cache.
 --
--- Although the @FinderCache@ range is 'FindResult' for convenience,
--- in fact it will only ever contain 'Found' or 'NotFound' entries.
---
-type FinderCache = ModuleEnv FindResult
+type FinderCache = InstalledModuleEnv InstalledFindResult
+
+data InstalledFindResult
+  = InstalledFound ModLocation InstalledModule
+  | InstalledNoPackage InstalledUnitId
+  | InstalledNotFound [FilePath] (Maybe InstalledUnitId)
 
 -- | The result of searching for an imported module.
+--
+-- NB: FindResult manages both user source-import lookups
+-- (which can result in 'Module') as well as direct imports
+-- for interfaces (which always result in 'InstalledModule').
 data FindResult
   = Found ModLocation Module
         -- ^ The module was found
@@ -834,7 +912,7 @@ data ModIface
                 -- and are not put into the interface file
         mi_warn_fn   :: OccName -> Maybe WarningTxt,
                 -- ^ Cached lookup for 'mi_warns'
-        mi_fix_fn    :: OccName -> Fixity,
+        mi_fix_fn    :: OccName -> Maybe Fixity,
                 -- ^ Cached lookup for 'mi_fixities'
         mi_hash_fn   :: OccName -> Maybe (OccName, Fingerprint),
                 -- ^ Cached lookup for 'mi_decls'.
@@ -862,6 +940,47 @@ data ModIface
 -- file.
 mi_boot :: ModIface -> Bool
 mi_boot iface = mi_hsc_src iface == HsBootFile
+
+-- | Lookups up a (possibly cached) fixity from a 'ModIface'. If one cannot be
+-- found, 'defaultFixity' is returned instead.
+mi_fix :: ModIface -> OccName -> Fixity
+mi_fix iface name = mi_fix_fn iface name `orElse` defaultFixity
+
+-- | The semantic module for this interface; e.g., if it's a interface
+-- for a signature, if 'mi_module' is @p[A=<A>]:A@, 'mi_semantic_module'
+-- will be @<A>@.
+mi_semantic_module :: ModIface -> Module
+mi_semantic_module iface = case mi_sig_of iface of
+                            Nothing -> mi_module iface
+                            Just mod -> mod
+
+-- | The "precise" free holes, e.g., the signatures that this
+-- 'ModIface' depends on.
+mi_free_holes :: ModIface -> UniqDSet ModuleName
+mi_free_holes iface =
+  case splitModuleInsts (mi_module iface) of
+    (_, Just indef)
+        -- A mini-hack: we rely on the fact that 'renameFreeHoles'
+        -- drops things that aren't holes.
+        -> renameFreeHoles (mkUniqDSet cands) (indefUnitIdInsts (indefModuleUnitId indef))
+    _   -> emptyUniqDSet
+  where
+    cands = map fst (dep_mods (mi_deps iface))
+
+-- | Given a set of free holes, and a unit identifier, rename
+-- the free holes according to the instantiation of the unit
+-- identifier.  For example, if we have A and B free, and
+-- our unit identity is @p[A=<C>,B=impl:B]@, the renamed free
+-- holes are just C.
+renameFreeHoles :: UniqDSet ModuleName -> [(ModuleName, Module)] -> UniqDSet ModuleName
+renameFreeHoles fhs insts =
+    unionManyUniqDSets (map lookup_impl (uniqDSetToList fhs))
+  where
+    hmap = listToUFM insts
+    lookup_impl mod_name
+        | Just mod <- lookupUFM hmap mod_name = moduleFreeHoles mod
+        -- It wasn't actually a hole
+        | otherwise                           = emptyUniqDSet
 
 instance Binary ModIface where
    put_ bh (ModIface {
@@ -891,6 +1010,7 @@ instance Binary ModIface where
                  mi_trust     = trust,
                  mi_trust_pkg = trust_pkg }) = do
         put_ bh mod
+        put_ bh sig_of
         put_ bh hsc_src
         put_ bh iface_hash
         put_ bh mod_hash
@@ -914,10 +1034,10 @@ instance Binary ModIface where
         put_ bh hpc_info
         put_ bh trust
         put_ bh trust_pkg
-        put_ bh sig_of
 
    get bh = do
-        mod_name    <- get bh
+        mod         <- get bh
+        sig_of      <- get bh
         hsc_src     <- get bh
         iface_hash  <- get bh
         mod_hash    <- get bh
@@ -941,9 +1061,8 @@ instance Binary ModIface where
         hpc_info    <- get bh
         trust       <- get bh
         trust_pkg   <- get bh
-        sig_of      <- get bh
         return (ModIface {
-                 mi_module      = mod_name,
+                 mi_module      = mod,
                  mi_sig_of      = sig_of,
                  mi_hsc_src     = hsc_src,
                  mi_iface_hash  = iface_hash,
@@ -1100,7 +1219,7 @@ data ModGuts
         mg_warns     :: !Warnings,       -- ^ Warnings declared in the module
         mg_anns      :: [Annotation],    -- ^ Annotations declared in this module
         mg_hpc_info  :: !HpcInfo,        -- ^ Coverage tick boxes in the module
-        mg_modBreaks :: !ModBreaks,      -- ^ Breakpoints for the module
+        mg_modBreaks :: !(Maybe ModBreaks), -- ^ Breakpoints for the module
         mg_vect_decls:: ![CoreVect],     -- ^ Vectorisation declarations in this module
                                          --   (produced by desugarer & consumed by vectoriser)
         mg_vect_info :: !VectInfo,       -- ^ Pool of vectorised declarations in the module
@@ -1155,10 +1274,10 @@ data CgGuts
                 -- as part of the code-gen of tycons
 
         cg_foreign   :: !ForeignStubs,   -- ^ Foreign export stubs
-        cg_dep_pkgs  :: ![UnitId],    -- ^ Dependent packages, used to
-                                         -- generate #includes for C code gen
+        cg_dep_pkgs  :: ![InstalledUnitId], -- ^ Dependent packages, used to
+                                            -- generate #includes for C code gen
         cg_hpc_info  :: !HpcInfo,        -- ^ Program coverage tick box information
-        cg_modBreaks :: !ModBreaks       -- ^ Module breakpoints
+        cg_modBreaks :: !(Maybe ModBreaks) -- ^ Module breakpoints
     }
 
 -----------------------------------
@@ -1226,7 +1345,7 @@ The details are a bit tricky though:
    extend the HPT.
 
  * The 'thisPackage' field of DynFlags is *not* set to 'interactive'.
-   It stays as 'main' (or whatever -this-package-key says), and is the
+   It stays as 'main' (or whatever -this-unit-id says), and is the
    package to which :load'ed modules are added to.
 
  * So how do we arrange that declarations at the command prompt get to
@@ -1235,7 +1354,7 @@ The details are a bit tricky though:
    call to initTc in initTcInteractive, which in turn get the module
    from it 'icInteractiveModule' field of the interactive context.
 
-   The 'thisPackage' field stays as 'main' (or whatever -this-package-key says.
+   The 'thisPackage' field stays as 'main' (or whatever -this-unit-id says.
 
  * The main trickiness is that the type environment (tcg_type_env) and
    fixity envt (tcg_fix_env), now contain entities from all the
@@ -1449,7 +1568,7 @@ extendInteractiveContext ictxt new_tythings new_cls_insts new_fam_insts defaults
   = ictxt { ic_mod_index  = ic_mod_index ictxt + 1
                             -- Always bump this; even instances should create
                             -- a new mod_index (Trac #9426)
-          , ic_tythings   = new_tythings ++ old_tythings
+          , ic_tythings   = new_tythings ++ ic_tythings ictxt
           , ic_rn_gbl_env = ic_rn_gbl_env ictxt `icExtendGblRdrEnv` new_tythings
           , ic_instances  = ( new_cls_insts ++ old_cls_insts
                             , new_fam_insts ++ old_fam_insts )
@@ -1457,8 +1576,6 @@ extendInteractiveContext ictxt new_tythings new_cls_insts new_fam_insts defaults
           , ic_fix_env    = fix_env  -- See Note [Fixity declarations in GHCi]
           }
   where
-    new_ids = [id | AnId id <- new_tythings]
-    old_tythings = filterOut (shadowed_by new_ids) (ic_tythings ictxt)
 
     -- Discard old instances that have been fully overrridden
     -- See Note [Override identical instances in GHCi]
@@ -1471,22 +1588,16 @@ extendInteractiveContextWithIds :: InteractiveContext -> [Id] -> InteractiveCont
 extendInteractiveContextWithIds ictxt new_ids
   | null new_ids = ictxt
   | otherwise    = ictxt { ic_mod_index  = ic_mod_index ictxt + 1
-                         , ic_tythings   = new_tythings ++ old_tythings
+                         , ic_tythings   = new_tythings ++ ic_tythings ictxt
                          , ic_rn_gbl_env = ic_rn_gbl_env ictxt `icExtendGblRdrEnv` new_tythings }
   where
     new_tythings = map AnId new_ids
-    old_tythings = filterOut (shadowed_by new_ids) (ic_tythings ictxt)
-
-shadowed_by :: [Id] -> TyThing -> Bool
-shadowed_by ids = shadowed
-  where
-    shadowed id = getOccName id `elemOccSet` new_occs
-    new_occs = mkOccSet (map getOccName ids)
 
 setInteractivePackage :: HscEnv -> HscEnv
 -- Set the 'thisPackage' DynFlag to 'interactive'
 setInteractivePackage hsc_env
-   = hsc_env { hsc_dflags = (hsc_dflags hsc_env) { thisPackage = interactiveUnitId } }
+   = hsc_env { hsc_dflags = (hsc_dflags hsc_env)
+                { thisInstalledUnitId = toInstalledUnitId interactiveUnitId } }
 
 setInteractivePrintName :: InteractiveContext -> Name -> InteractiveContext
 setInteractivePrintName ic n = ic{ic_int_print = n}
@@ -1505,9 +1616,9 @@ icExtendGblRdrEnv env tythings
        | is_sub_bndr thing
        = env
        | otherwise
-       = foldl extendGlobalRdrEnv env1 (localGREsFromAvail avail)
+       = foldl extendGlobalRdrEnv env1 (concatMap localGREsFromAvail avail)
        where
-          env1  = shadowNames env (availNames avail)
+          env1  = shadowNames env (concatMap availNames avail)
           avail = tyThingAvailInfo thing
 
     -- Ugh! The new_tythings may include record selectors, since they
@@ -1526,7 +1637,7 @@ substInteractiveContext ictxt@InteractiveContext{ ic_tythings = tts } subst
   | isEmptyTCvSubst subst = ictxt
   | otherwise             = ictxt { ic_tythings = map subst_ty tts }
   where
-    subst_ty (AnId id) = AnId $ id `setIdType` substTy subst (idType id)
+    subst_ty (AnId id) = AnId $ id `setIdType` substTyUnchecked subst (idType id)
     subst_ty tt        = tt
 
 instance Outputable InteractiveImport where
@@ -1620,12 +1731,13 @@ mkPrintUnqualified dflags env = QueryQualify qual_name
                             -- Eg  f = True; g = 0; f = False
       where
         is_name :: Name -> Bool
-        is_name name = nameModule name == mod && nameOccName name == occ
+        is_name name = ASSERT2( isExternalName name, ppr name )
+                       nameModule name == mod && nameOccName name == occ
 
         forceUnqualNames :: [Name]
         forceUnqualNames =
           map tyConName [ constraintKindTyCon, heqTyCon, coercibleTyCon
-                        , starKindTyCon, unicodeStarKindTyCon, ipTyCon ]
+                        , starKindTyCon, unicodeStarKindTyCon ]
           ++ [ eqTyConName ]
 
         right_name gre = nameModule_maybe (gre_name gre) == Just mod
@@ -1763,7 +1875,7 @@ implicitTyConThings tc
     implicitCoTyCon tc ++
 
       -- for each data constructor in order,
-      --   the contructor, worker, and (possibly) wrapper
+      --   the constructor, worker, and (possibly) wrapper
     [ thing | dc    <- tyConDataCons tc
             , thing <- AConLike (RealDataCon dc) : dataConImplicitTyThings dc ]
       -- NB. record selectors are *not* implicit, they have fully-fledged
@@ -1830,19 +1942,21 @@ tyThingsTyCoVars tts =
 
 -- | The Names that a TyThing should bring into scope.  Used to build
 -- the GlobalRdrEnv for the InteractiveContext.
-tyThingAvailInfo :: TyThing -> AvailInfo
+tyThingAvailInfo :: TyThing -> [AvailInfo]
 tyThingAvailInfo (ATyCon t)
    = case tyConClass_maybe t of
-        Just c  -> AvailTC n (n : map getName (classMethods c)
+        Just c  -> [AvailTC n (n : map getName (classMethods c)
                                  ++ map getName (classATs c))
-                             []
+                             [] ]
              where n = getName c
-        Nothing -> AvailTC n (n : map getName dcs) flds
+        Nothing -> [AvailTC n (n : map getName dcs) flds]
              where n    = getName t
                    dcs  = tyConDataCons t
                    flds = tyConFieldLabels t
+tyThingAvailInfo (AConLike (PatSynCon p))
+  = map patSynAvail ((getName p) : map flSelector (patSynFieldLabels p))
 tyThingAvailInfo t
-   = avail (getName t)
+   = [avail (getName t)]
 
 {-
 ************************************************************************
@@ -1908,6 +2022,9 @@ extendTypeEnvWithIds :: TypeEnv -> [Id] -> TypeEnv
 extendTypeEnvWithIds env ids
   = extendNameEnvList env [(getName id, AnId id) | id <- ids]
 
+plusTypeEnv :: TypeEnv -> TypeEnv -> TypeEnv
+plusTypeEnv env1 env2 = plusNameEnv env1 env2
+
 -- | Find the 'TyThing' for the given 'Name' by using all the resources
 -- at our disposal: the compiled modules in the 'HomePackageTable' and the
 -- compiled modules in other packages that live in 'PackageTypeEnv'. Note
@@ -1927,7 +2044,10 @@ lookupType dflags hpt pte name
        Just hm -> lookupNameEnv (md_types (hm_details hm)) name
        Nothing -> lookupNameEnv pte name
   where
-    mod = ASSERT2( isExternalName name, ppr name ) nameModule name
+    mod = ASSERT2( isExternalName name, ppr name )
+          if isHoleName name
+            then mkModule (thisPackage dflags) (moduleName (nameModule name))
+            else nameModule name
 
 -- | As 'lookupType', but with a marginally easier-to-use interface
 -- if you have a 'HscEnv'
@@ -1942,23 +2062,23 @@ lookupTypeHscEnv hsc_env name = do
 -- | Get the 'TyCon' from a 'TyThing' if it is a type constructor thing. Panics otherwise
 tyThingTyCon :: TyThing -> TyCon
 tyThingTyCon (ATyCon tc) = tc
-tyThingTyCon other       = pprPanic "tyThingTyCon" (pprTyThing other)
+tyThingTyCon other       = pprPanic "tyThingTyCon" (ppr other)
 
 -- | Get the 'CoAxiom' from a 'TyThing' if it is a coercion axiom thing. Panics otherwise
 tyThingCoAxiom :: TyThing -> CoAxiom Branched
 tyThingCoAxiom (ACoAxiom ax) = ax
-tyThingCoAxiom other         = pprPanic "tyThingCoAxiom" (pprTyThing other)
+tyThingCoAxiom other         = pprPanic "tyThingCoAxiom" (ppr other)
 
 -- | Get the 'DataCon' from a 'TyThing' if it is a data constructor thing. Panics otherwise
 tyThingDataCon :: TyThing -> DataCon
 tyThingDataCon (AConLike (RealDataCon dc)) = dc
-tyThingDataCon other                       = pprPanic "tyThingDataCon" (pprTyThing other)
+tyThingDataCon other                       = pprPanic "tyThingDataCon" (ppr other)
 
 -- | Get the 'Id' from a 'TyThing' if it is a id *or* data constructor thing. Panics otherwise
 tyThingId :: TyThing -> Id
 tyThingId (AnId id)                   = id
 tyThingId (AConLike (RealDataCon dc)) = dataConWrapId dc
-tyThingId other                       = pprPanic "tyThingId" (pprTyThing other)
+tyThingId other                       = pprPanic "tyThingId" (ppr other)
 
 {-
 ************************************************************************
@@ -2059,14 +2179,14 @@ plusWarns (WarnAll t) _ = WarnAll t
 plusWarns (WarnSome v1) (WarnSome v2) = WarnSome (v1 ++ v2)
 
 -- | Creates cached lookup for the 'mi_fix_fn' field of 'ModIface'
-mkIfaceFixCache :: [(OccName, Fixity)] -> OccName -> Fixity
+mkIfaceFixCache :: [(OccName, Fixity)] -> OccName -> Maybe Fixity
 mkIfaceFixCache pairs
-  = \n -> lookupOccEnv env n `orElse` defaultFixity
+  = \n -> lookupOccEnv env n
   where
    env = mkOccEnv pairs
 
-emptyIfaceFixCache :: OccName -> Fixity
-emptyIfaceFixCache _ = defaultFixity
+emptyIfaceFixCache :: OccName -> Maybe Fixity
+emptyIfaceFixCache _ = Nothing
 
 -- | Fixity environment mapping names to their fixities
 type FixityEnv = NameEnv FixItem
@@ -2123,7 +2243,7 @@ data Dependencies
                         -- I.e. modules that this one imports, or that are in the
                         --      dep_mods of those directly-imported modules
 
-         , dep_pkgs   :: [(UnitId, Bool)]
+         , dep_pkgs   :: [(InstalledUnitId, Bool)]
                         -- ^ All packages transitively below this module
                         -- I.e. packages to which this module's direct imports belong,
                         --      or that are in the dep_pkgs of those modules
@@ -2210,6 +2330,11 @@ data Usage
         -- contents don't change.  This previously lead to odd
         -- recompilation behaviors; see #8114
   }
+  -- | A requirement which was merged into this one.
+  | UsageMergedRequirement {
+        usg_mod :: Module,
+        usg_mod_hash :: Fingerprint
+  }
     deriving( Eq )
         -- The export list field is (Just v) if we depend on the export list:
         --      i.e. we imported the module directly, whether or not we
@@ -2244,6 +2369,11 @@ instance Binary Usage where
         put_ bh (usg_file_path usg)
         put_ bh (usg_file_hash usg)
 
+    put_ bh usg@UsageMergedRequirement{} = do
+        putByte bh 3
+        put_ bh (usg_mod      usg)
+        put_ bh (usg_mod_hash usg)
+
     get bh = do
         h <- getByte bh
         case h of
@@ -2264,6 +2394,10 @@ instance Binary Usage where
             fp   <- get bh
             hash <- get bh
             return UsageFile { usg_file_path = fp, usg_file_hash = hash }
+          3 -> do
+            mod <- get bh
+            hash <- get bh
+            return UsageMergedRequirement { usg_mod = mod, usg_mod_hash = hash }
           i -> error ("Binary.get(Usage): " ++ show i)
 
 {-
@@ -2317,6 +2451,16 @@ data ExternalPackageState
                 -- * Fixities
                 --
                 -- * Deprecations and warnings
+
+        eps_free_holes :: InstalledModuleEnv (UniqDSet ModuleName),
+                -- ^ Cache for 'mi_free_holes'.  Ordinarily, we can rely on
+                -- the 'eps_PIT' for this information, EXCEPT that when
+                -- we do dependency analysis, we need to look at the
+                -- 'Dependencies' of our imports to determine what their
+                -- precise free holes are ('moduleFreeHolesPrecise').  We
+                -- don't want to repeatedly reread in the interface
+                -- for every import, so cache it here.  When the PIT
+                -- gets filled in we can drop these entries.
 
         eps_PTE :: !PackageTypeEnv,
                 -- ^ Result of typechecking all the external package
@@ -2449,6 +2593,9 @@ data ModSummary
           -- ^ Source imports of the module
         ms_textual_imps :: [(Maybe FastString, Located ModuleName)],
           -- ^ Non-source imports of the module from the module *text*
+        ms_parsed_mod   :: Maybe HsParsedModule,
+          -- ^ The parsed, nonrenamed source, if we have it.  This is also
+          -- used to support "inline module syntax" in Backpack files.
         ms_hspp_file    :: FilePath,
           -- ^ Filename of preprocessed source file
         ms_hspp_opts    :: DynFlags,
@@ -2457,6 +2604,9 @@ data ModSummary
         ms_hspp_buf     :: Maybe StringBuffer
           -- ^ The actual preprocessed source, if we have it
      }
+
+ms_installed_mod :: ModSummary -> InstalledModule
+ms_installed_mod = fst . splitModuleInsts . ms_mod
 
 ms_mod_name :: ModSummary -> ModuleName
 ms_mod_name = moduleName . ms_mod
@@ -2507,24 +2657,12 @@ showModMsg dflags target recomp mod_summary
                   HscInterpreted | recomp
                              -> text "interpreted"
                   HscNothing -> text "nothing"
-                  _ | HsigFile == ms_hsc_src mod_summary -> text "nothing"
-                    | otherwise -> text (normalise $ msObjFilePath mod_summary),
+                  _ -> text (normalise $ msObjFilePath mod_summary),
               char ')']
  where
     mod     = moduleName (ms_mod mod_summary)
     mod_str = showPpr dflags mod
-                ++ hscSourceString' dflags mod (ms_hsc_src mod_summary)
-
--- | Variant of hscSourceString which prints more information for signatures.
--- This can't live in DriverPhases because this would cause a module loop.
-hscSourceString' :: DynFlags -> ModuleName -> HscSource -> String
-hscSourceString' _ _ HsSrcFile   = ""
-hscSourceString' _ _ HsBootFile  = "[boot]"
-hscSourceString' dflags mod HsigFile =
-     "[" ++ (maybe "abstract sig"
-               (("sig of "++).showPpr dflags)
-               (getSigOf dflags mod)) ++ "]"
-    -- NB: -sig-of could be missing if we're just typechecking
+                ++ hscSourceString (ms_hsc_src mod_summary)
 
 {-
 ************************************************************************
@@ -2607,10 +2745,10 @@ on just the OccName easily in a Core pass.
 --
 data VectInfo
   = VectInfo
-    { vectInfoVar            :: VarEnv  (Var    , Var  )    -- ^ @(f, f_v)@ keyed on @f@
+    { vectInfoVar            :: DVarEnv (Var    , Var  )    -- ^ @(f, f_v)@ keyed on @f@
     , vectInfoTyCon          :: NameEnv (TyCon  , TyCon)    -- ^ @(T, T_v)@ keyed on @T@
     , vectInfoDataCon        :: NameEnv (DataCon, DataCon)  -- ^ @(C, C_v)@ keyed on @C@
-    , vectInfoParallelVars   :: VarSet                      -- ^ set of parallel variables
+    , vectInfoParallelVars   :: DVarSet                     -- ^ set of parallel variables
     , vectInfoParallelTyCons :: NameSet                     -- ^ set of parallel type constructors
     }
 
@@ -2641,14 +2779,14 @@ data IfaceVectInfo
 
 noVectInfo :: VectInfo
 noVectInfo
-  = VectInfo emptyVarEnv emptyNameEnv emptyNameEnv emptyVarSet emptyNameSet
+  = VectInfo emptyDVarEnv emptyNameEnv emptyNameEnv emptyDVarSet emptyNameSet
 
 plusVectInfo :: VectInfo -> VectInfo -> VectInfo
 plusVectInfo vi1 vi2 =
-  VectInfo (vectInfoVar            vi1 `plusVarEnv`    vectInfoVar            vi2)
+  VectInfo (vectInfoVar            vi1 `plusDVarEnv`   vectInfoVar            vi2)
            (vectInfoTyCon          vi1 `plusNameEnv`   vectInfoTyCon          vi2)
            (vectInfoDataCon        vi1 `plusNameEnv`   vectInfoDataCon        vi2)
-           (vectInfoParallelVars   vi1 `unionVarSet`   vectInfoParallelVars   vi2)
+           (vectInfoParallelVars   vi1 `unionDVarSet`  vectInfoParallelVars   vi2)
            (vectInfoParallelTyCons vi1 `unionNameSet` vectInfoParallelTyCons vi2)
 
 concatVectInfo :: [VectInfo] -> VectInfo
@@ -2663,20 +2801,20 @@ isNoIfaceVectInfo (IfaceVectInfo l1 l2 l3 l4 l5)
 
 instance Outputable VectInfo where
   ppr info = vcat
-             [ ptext (sLit "variables       :") <+> ppr (vectInfoVar            info)
-             , ptext (sLit "tycons          :") <+> ppr (vectInfoTyCon          info)
-             , ptext (sLit "datacons        :") <+> ppr (vectInfoDataCon        info)
-             , ptext (sLit "parallel vars   :") <+> ppr (vectInfoParallelVars   info)
-             , ptext (sLit "parallel tycons :") <+> ppr (vectInfoParallelTyCons info)
+             [ text "variables       :" <+> ppr (vectInfoVar            info)
+             , text "tycons          :" <+> ppr (vectInfoTyCon          info)
+             , text "datacons        :" <+> ppr (vectInfoDataCon        info)
+             , text "parallel vars   :" <+> ppr (vectInfoParallelVars   info)
+             , text "parallel tycons :" <+> ppr (vectInfoParallelTyCons info)
              ]
 
 instance Outputable IfaceVectInfo where
   ppr info = vcat
-             [ ptext (sLit "variables       :") <+> ppr (ifaceVectInfoVar            info)
-             , ptext (sLit "tycons          :") <+> ppr (ifaceVectInfoTyCon          info)
-             , ptext (sLit "tycons reuse    :") <+> ppr (ifaceVectInfoTyConReuse     info)
-             , ptext (sLit "parallel vars   :") <+> ppr (ifaceVectInfoParallelVars   info)
-             , ptext (sLit "parallel tycons :") <+> ppr (ifaceVectInfoParallelTyCons info)
+             [ text "variables       :" <+> ppr (ifaceVectInfoVar            info)
+             , text "tycons          :" <+> ppr (ifaceVectInfoTyCon          info)
+             , text "tycons reuse    :" <+> ppr (ifaceVectInfoTyConReuse     info)
+             , text "parallel vars   :" <+> ppr (ifaceVectInfoParallelVars   info)
+             , text "parallel tycons :" <+> ppr (ifaceVectInfoParallelTyCons info)
              ]
 
 
@@ -2741,10 +2879,10 @@ numToTrustInfo 4 = setSafeMode Sf_Safe -- retained for backwards compat, used
 numToTrustInfo n = error $ "numToTrustInfo: bad input number! (" ++ show n ++ ")"
 
 instance Outputable IfaceTrustInfo where
-    ppr (TrustInfo Sf_None)          = ptext $ sLit "none"
-    ppr (TrustInfo Sf_Unsafe)        = ptext $ sLit "unsafe"
-    ppr (TrustInfo Sf_Trustworthy)   = ptext $ sLit "trustworthy"
-    ppr (TrustInfo Sf_Safe)          = ptext $ sLit "safe"
+    ppr (TrustInfo Sf_None)          = text "none"
+    ppr (TrustInfo Sf_Unsafe)        = text "unsafe"
+    ppr (TrustInfo Sf_Trustworthy)   = text "trustworthy"
+    ppr (TrustInfo Sf_Safe)          = text "safe"
 
 instance Binary IfaceTrustInfo where
     put_ bh iftrust = putByte bh $ trustInfoToNum iftrust
@@ -2820,12 +2958,16 @@ data Unlinked
    = DotO FilePath      -- ^ An object file (.o)
    | DotA FilePath      -- ^ Static archive file (.a)
    | DotDLL FilePath    -- ^ Dynamically linked library file (.so, .dll, .dylib)
-   | BCOs CompiledByteCode ModBreaks    -- ^ A byte-code object, lives only in memory
+   | BCOs CompiledByteCode    -- ^ A byte-code object, lives only in memory
 
 #ifndef GHCI
 data CompiledByteCode = CompiledByteCodeUndefined
-_unused :: CompiledByteCode
-_unused = CompiledByteCodeUndefined
+_unusedCompiledByteCode :: CompiledByteCode
+_unusedCompiledByteCode = CompiledByteCodeUndefined
+
+data ModBreaks = ModBreaksUndefined
+emptyModBreaks :: ModBreaks
+emptyModBreaks = ModBreaksUndefined
 #endif
 
 instance Outputable Unlinked where
@@ -2833,9 +2975,9 @@ instance Outputable Unlinked where
    ppr (DotA path)   = text "DotA" <+> text path
    ppr (DotDLL path) = text "DotDLL" <+> text path
 #ifdef GHCI
-   ppr (BCOs bcos _) = text "BCOs" <+> ppr bcos
+   ppr (BCOs bcos) = text "BCOs" <+> ppr bcos
 #else
-   ppr (BCOs _ _)    = text "No byte code"
+   ppr (BCOs _)    = text "No byte code"
 #endif
 
 -- | Is this an actual file on disk we can link in somehow?
@@ -2858,50 +3000,6 @@ nameOfObject other       = pprPanic "nameOfObject" (ppr other)
 
 -- | Retrieve the compiled byte-code if possible. Panic if it is a file-based linkable
 byteCodeOfObject :: Unlinked -> CompiledByteCode
-byteCodeOfObject (BCOs bc _) = bc
-byteCodeOfObject other       = pprPanic "byteCodeOfObject" (ppr other)
+byteCodeOfObject (BCOs bc) = bc
+byteCodeOfObject other     = pprPanic "byteCodeOfObject" (ppr other)
 
-{-
-************************************************************************
-*                                                                      *
-\subsection{Breakpoint Support}
-*                                                                      *
-************************************************************************
--}
-
--- | Breakpoint index
-type BreakIndex = Int
-
--- | C CostCentre type
-data CCostCentre
-
--- | All the information about the breakpoints for a given module
-data ModBreaks
-   = ModBreaks
-   { modBreaks_flags :: BreakArray
-        -- ^ The array of flags, one per breakpoint,
-        -- indicating which breakpoints are enabled.
-   , modBreaks_locs :: !(Array BreakIndex SrcSpan)
-        -- ^ An array giving the source span of each breakpoint.
-   , modBreaks_vars :: !(Array BreakIndex [OccName])
-        -- ^ An array giving the names of the free variables at each breakpoint.
-   , modBreaks_decls :: !(Array BreakIndex [String])
-        -- ^ An array giving the names of the declarations enclosing each breakpoint.
-#ifdef GHCI
-   , modBreaks_ccs :: !(Array BreakIndex (RemotePtr {- CCostCentre -}))
-        -- ^ Array pointing to cost centre for each breakpoint
-#endif
-   }
-
--- | Construct an empty ModBreaks
-emptyModBreaks :: ModBreaks
-emptyModBreaks = ModBreaks
-   { modBreaks_flags = error "ModBreaks.modBreaks_array not initialised"
-         -- ToDo: can we avoid this?
-   , modBreaks_locs  = array (0,-1) []
-   , modBreaks_vars  = array (0,-1) []
-   , modBreaks_decls = array (0,-1) []
-#ifdef GHCI
-   , modBreaks_ccs = array (0,-1) []
-#endif
-   }

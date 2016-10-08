@@ -30,6 +30,8 @@ module Text.Read.Lex
   , readOctP
   , readDecP
   , readHexP
+
+  , isSymbolChar
   )
  where
 
@@ -214,18 +216,19 @@ lexSymbol =
         return (Punc s)         -- Reserved-ops count as punctuation
       else
         return (Symbol s)
- where
-  isSymbolChar c = not (isPuncChar c) && case generalCategory c of
-      MathSymbol              -> True
-      CurrencySymbol          -> True
-      ModifierSymbol          -> True
-      OtherSymbol             -> True
-      DashPunctuation         -> True
-      OtherPunctuation        -> not (c `elem` "'\"")
-      ConnectorPunctuation    -> c /= '_'
-      _                       -> False
-  reserved_ops   = ["..", "::", "=", "\\", "|", "<-", "->", "@", "~", "=>"]
+  where
+    reserved_ops   = ["..", "::", "=", "\\", "|", "<-", "->", "@", "~", "=>"]
 
+isSymbolChar :: Char -> Bool
+isSymbolChar c = not (isPuncChar c) && case generalCategory c of
+    MathSymbol              -> True
+    CurrencySymbol          -> True
+    ModifierSymbol          -> True
+    OtherSymbol             -> True
+    DashPunctuation         -> True
+    OtherPunctuation        -> not (c `elem` "'\"")
+    ConnectorPunctuation    -> c /= '_'
+    _                       -> False
 -- ----------------------------------------------------------------------
 -- identifiers
 
@@ -250,7 +253,16 @@ lexLitChar =
      return (Char c)
 
 lexChar :: ReadP Char
-lexChar = do { (c,_) <- lexCharE; return c }
+lexChar = do { (c,_) <- lexCharE; consumeEmpties; return c }
+    where
+    -- Consumes the string "\&" repeatedly and greedily (will only produce one match)
+    consumeEmpties :: ReadP ()
+    consumeEmpties = do
+        rest <- look
+        case rest of
+            ('\\':'&':_) -> string "\\&" >> consumeEmpties
+            _ -> return ()
+
 
 lexCharE :: ReadP (Char, Bool)  -- "escaped or not"?
 lexCharE =

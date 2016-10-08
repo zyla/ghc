@@ -21,7 +21,7 @@ module CoreSubst (
 
         -- ** Operations on substitutions
         emptySubst, mkEmptySubst, mkSubst, mkOpenSubst, substInScope, isEmptySubst,
-        extendIdSubst, extendIdSubstList, extendTCvSubst, extendTCvSubstList,
+        extendIdSubst, extendIdSubstList, extendTCvSubst, extendTvSubstList,
         extendSubst, extendSubstList, extendSubstWithVar, zapSubstEnv,
         addInScopeSet, extendInScope, extendInScopeList, extendInScopeIds,
         isInScope, setInScope,
@@ -50,7 +50,7 @@ import qualified Type
 import qualified Coercion
 
         -- We are defining local versions
-import Type     hiding ( substTy, extendTCvSubst, extendTCvSubstList
+import Type     hiding ( substTy, extendTvSubst, extendCvSubst, extendTvSubstList
                        , isInScope, substTyVarBndr, cloneTyVarBndr )
 import Coercion hiding ( substCo, substCoVarBndr )
 
@@ -110,7 +110,7 @@ import TysWiredIn
 data Subst
   = Subst InScopeSet  -- Variables in in scope (both Ids and TyVars) /after/
                       -- applying the substitution
-          IdSubstEnv  -- Substitution for Ids
+          IdSubstEnv  -- Substitution from NcIds to CoreExprs
           TvSubstEnv  -- Substitution from TyVars to Types
           CvSubstEnv  -- Substitution from CoVars to Coercions
 
@@ -180,7 +180,7 @@ TvSubstEnv and CvSubstEnv?
 -}
 
 -- | An environment for substituting for 'Id's
-type IdSubstEnv = IdEnv CoreExpr
+type IdSubstEnv = IdEnv CoreExpr   -- Domain is NcIds, i.e. not coercions
 
 ----------------------------
 isEmptySubst :: Subst -> Bool
@@ -209,54 +209,53 @@ zapSubstEnv (Subst in_scope _ _ _) = Subst in_scope emptyVarEnv emptyVarEnv empt
 -- such that the "CoreSubst#in_scope_invariant" is true after extending the substitution like this
 extendIdSubst :: Subst -> Id -> CoreExpr -> Subst
 -- ToDo: add an ASSERT that fvs(subst-result) is already in the in-scope set
-extendIdSubst (Subst in_scope ids tvs cvs) v r = Subst in_scope (extendVarEnv ids v r) tvs cvs
+extendIdSubst (Subst in_scope ids tvs cvs) v r
+  = ASSERT2( isNonCoVarId v, ppr v $$ ppr r )
+    Subst in_scope (extendVarEnv ids v r) tvs cvs
 
 -- | Adds multiple 'Id' substitutions to the 'Subst': see also 'extendIdSubst'
 extendIdSubstList :: Subst -> [(Id, CoreExpr)] -> Subst
-extendIdSubstList (Subst in_scope ids tvs cvs) prs = Subst in_scope (extendVarEnvList ids prs) tvs cvs
+extendIdSubstList (Subst in_scope ids tvs cvs) prs
+  = ASSERT( all (isNonCoVarId . fst) prs )
+    Subst in_scope (extendVarEnvList ids prs) tvs cvs
 
--- | Add a substitution for a 'TyVar' to the 'Subst': the 'TyVar' *must*
--- be a real TyVar, and not a CoVar
-extend_tv_subst :: Subst -> TyVar -> Type -> Subst
-extend_tv_subst (Subst in_scope ids tvs cvs) tv ty
+-- | Add a substitution for a 'TyVar' to the 'Subst'
+-- The 'TyVar' *must* be a real TyVar, and not a CoVar
+-- You must ensure that the in-scope set is such that
+-- the "CoreSubst#in_scope_invariant" is true after extending
+-- the substitution like this.
+extendTvSubst :: Subst -> TyVar -> Type -> Subst
+extendTvSubst (Subst in_scope ids tvs cvs) tv ty
   = ASSERT( isTyVar tv )
     Subst in_scope ids (extendVarEnv tvs tv ty) cvs
 
--- | Add a substitution for a 'TyVar' to the 'Subst': you must ensure that the in-scope set is
--- such that the "CoreSubst#in_scope_invariant" is true after extending the substitution like this
-extendTCvSubst :: Subst -> TyVar -> Type -> Subst
-extendTCvSubst subst v r
-  | isTyVar v
-  = extend_tv_subst subst v r
-  | Just co <- isCoercionTy_maybe r
-  = extendCvSubst subst v co
-  | otherwise
-  = pprPanic "CoreSubst.extendTCvSubst" (ppr v <+> ptext (sLit "|->") <+> ppr r)
-
--- | Adds multiple 'TyVar' substitutions to the 'Subst': see also 'extendTCvSubst'
-extendTCvSubstList :: Subst -> [(TyVar,Type)] -> Subst
-extendTCvSubstList subst vrs
+-- | Adds multiple 'TyVar' substitutions to the 'Subst': see also 'extendTvSubst'
+extendTvSubstList :: Subst -> [(TyVar,Type)] -> Subst
+extendTvSubstList subst vrs
   = foldl' extend subst vrs
-  where extend subst (v, r) = extendTCvSubst subst v r
+  where
+    extend subst (v, r) = extendTvSubst subst v r
 
 -- | Add a substitution from a 'CoVar' to a 'Coercion' to the 'Subst': you must ensure that the in-scope set is
 -- such that the "CoreSubst#in_scope_invariant" is true after extending the substitution like this
 extendCvSubst :: Subst -> CoVar -> Coercion -> Subst
-extendCvSubst (Subst in_scope ids tvs cvs) v r = Subst in_scope ids tvs (extendVarEnv cvs v r)
+extendCvSubst (Subst in_scope ids tvs cvs) v r
+  = ASSERT( isCoVar v )
+    Subst in_scope ids tvs (extendVarEnv cvs v r)
 
 -- | Add a substitution appropriate to the thing being substituted
 --   (whether an expression, type, or coercion). See also
---   'extendIdSubst', 'extendTCvSubst'
+--   'extendIdSubst', 'extendTvSubst', 'extendCvSubst'
 extendSubst :: Subst -> Var -> CoreArg -> Subst
 extendSubst subst var arg
   = case arg of
-      Type ty     -> ASSERT( isTyVar var ) extend_tv_subst subst var ty
+      Type ty     -> ASSERT( isTyVar var ) extendTvSubst subst var ty
       Coercion co -> ASSERT( isCoVar var ) extendCvSubst subst var co
       _           -> ASSERT( isId    var ) extendIdSubst subst var arg
 
 extendSubstWithVar :: Subst -> Var -> Var -> Subst
 extendSubstWithVar subst v1 v2
-  | isTyVar v1 = ASSERT( isTyVar v2 ) extend_tv_subst subst v1 (mkTyVarTy v2)
+  | isTyVar v1 = ASSERT( isTyVar v2 ) extendTvSubst subst v1 (mkTyVarTy v2)
   | isCoVar v1 = ASSERT( isCoVar v2 ) extendCvSubst subst v1 (mkCoVarCo v2)
   | otherwise  = ASSERT( isId    v2 ) extendIdSubst subst v1 (Var v2)
 
@@ -274,7 +273,7 @@ lookupIdSubst doc (Subst in_scope ids _ _) v
   | Just e  <- lookupVarEnv ids       v = e
   | Just v' <- lookupInScope in_scope v = Var v'
         -- Vital! See Note [Extending the Subst]
-  | otherwise = WARN( True, ptext (sLit "CoreSubst.lookupIdSubst") <+> doc <+> ppr v
+  | otherwise = WARN( True, text "CoreSubst.lookupIdSubst" <+> doc <+> ppr v
                             $$ ppr in_scope)
                 Var v
 
@@ -344,11 +343,13 @@ setInScope (Subst _ ids tvs cvs) in_scope = Subst in_scope ids tvs cvs
 
 instance Outputable Subst where
   ppr (Subst in_scope ids tvs cvs)
-        =  ptext (sLit "<InScope =") <+> braces (fsep (map ppr (varEnvElts (getInScopeVars in_scope))))
-        $$ ptext (sLit " IdSubst   =") <+> ppr ids
-        $$ ptext (sLit " TvSubst   =") <+> ppr tvs
-        $$ ptext (sLit " CvSubst   =") <+> ppr cvs
+        =  text "<InScope =" <+> in_scope_doc
+        $$ text " IdSubst   =" <+> ppr ids
+        $$ text " TvSubst   =" <+> ppr tvs
+        $$ text " CvSubst   =" <+> ppr cvs
          <> char '>'
+    where
+    in_scope_doc = pprVarSet (getInScopeVars in_scope) (braces . fsep . map ppr)
 
 {-
 ************************************************************************
@@ -364,19 +365,19 @@ instance Outputable Subst where
 -- Do *not* attempt to short-cut in the case of an empty substitution!
 -- See Note [Extending the Subst]
 substExprSC :: SDoc -> Subst -> CoreExpr -> CoreExpr
-substExprSC _doc subst orig_expr
+substExprSC doc subst orig_expr
   | isEmptySubst subst = orig_expr
   | otherwise          = -- pprTrace "enter subst-expr" (doc $$ ppr orig_expr) $
-                         subst_expr subst orig_expr
+                         subst_expr doc subst orig_expr
 
 substExpr :: SDoc -> Subst -> CoreExpr -> CoreExpr
-substExpr _doc subst orig_expr = subst_expr subst orig_expr
+substExpr doc subst orig_expr = subst_expr doc subst orig_expr
 
-subst_expr :: Subst -> CoreExpr -> CoreExpr
-subst_expr subst expr
+subst_expr :: SDoc -> Subst -> CoreExpr -> CoreExpr
+subst_expr doc subst expr
   = go expr
   where
-    go (Var v)         = lookupIdSubst (text "subst_expr") subst v
+    go (Var v)         = lookupIdSubst (doc $$ text "subst_expr") subst v
     go (Type ty)       = Type (substTy subst ty)
     go (Coercion co)   = Coercion (substCo subst co)
     go (Lit lit)       = Lit lit
@@ -389,11 +390,11 @@ subst_expr subst expr
        --         lose a binder. We optimise the LHS of rules at
        --         construction time
 
-    go (Lam bndr body) = Lam bndr' (subst_expr subst' body)
+    go (Lam bndr body) = Lam bndr' (subst_expr doc subst' body)
                        where
                          (subst', bndr') = substBndr subst bndr
 
-    go (Let bind body) = Let bind' (subst_expr subst' body)
+    go (Let bind body) = Let bind' (subst_expr doc subst' body)
                        where
                          (subst', bind') = substBind subst bind
 
@@ -401,7 +402,7 @@ subst_expr subst expr
                                  where
                                  (subst', bndr') = substBndr subst bndr
 
-    go_alt subst (con, bndrs, rhs) = (con, bndrs', subst_expr subst' rhs)
+    go_alt subst (con, bndrs, rhs) = (con, bndrs', subst_expr doc subst' rhs)
                                  where
                                    (subst', bndrs') = substBndrs subst bndrs
 
@@ -421,18 +422,22 @@ substBindSC subst bind    -- Short-cut if the substitution is empty
           where
             (bndrs, rhss)    = unzip pairs
             (subst', bndrs') = substRecBndrs subst bndrs
-            rhss' | isEmptySubst subst' = rhss
-                  | otherwise           = map (subst_expr subst') rhss
+            rhss' | isEmptySubst subst'
+                  = rhss
+                  | otherwise
+                  = map (subst_expr (text "substBindSC") subst') rhss
 
-substBind subst (NonRec bndr rhs) = (subst', NonRec bndr' (subst_expr subst rhs))
-                                  where
-                                    (subst', bndr') = substBndr subst bndr
+substBind subst (NonRec bndr rhs)
+  = (subst', NonRec bndr' (subst_expr (text "substBind") subst rhs))
+  where
+    (subst', bndr') = substBndr subst bndr
 
-substBind subst (Rec pairs) = (subst', Rec (bndrs' `zip` rhss'))
-                            where
-                                (bndrs, rhss)    = unzip pairs
-                                (subst', bndrs') = substRecBndrs subst bndrs
-                                rhss' = map (subst_expr subst') rhss
+substBind subst (Rec pairs)
+   = (subst', Rec (bndrs' `zip` rhss'))
+   where
+       (bndrs, rhss)    = unzip pairs
+       (subst', bndrs') = substRecBndrs subst bndrs
+       rhss' = map (subst_expr (text "substBind") subst') rhss
 
 -- | De-shadowing the program is sometimes a useful pre-pass. It can be done simply
 -- by running over the bindings with an empty substitution, because substitution
@@ -538,8 +543,8 @@ cloneBndrs subst us vs
 
 cloneBndr :: Subst -> Unique -> Var -> (Subst, Var)
 cloneBndr subst uniq v
-      | isTyVar v = cloneTyVarBndr subst v uniq
-      | otherwise = clone_id subst subst (v,uniq)  -- Works for coercion variables too
+  | isTyVar v = cloneTyVarBndr subst v uniq
+  | otherwise = clone_id subst subst (v,uniq)  -- Works for coercion variables too
 
 -- | Clone a mutually recursive group of 'Id's
 cloneRecIdBndrs :: Subst -> UniqSupply -> [Id] -> (Subst, [Id])
@@ -596,7 +601,7 @@ substCoVarBndr (Subst in_scope id_env tv_env cv_env) cv
 
 -- | See 'Type.substTy'
 substTy :: Subst -> Type -> Type
-substTy subst ty = Type.substTy (getTCvSubst subst) ty
+substTy subst ty = Type.substTyUnchecked (getTCvSubst subst) ty
 
 getTCvSubst :: Subst -> TCvSubst
 getTCvSubst (Subst in_scope _ tenv cenv) = TCvSubst in_scope tenv cenv
@@ -710,7 +715,7 @@ substRule subst subst_ru_fn rule@(Rule { ru_bndrs = bndrs, ru_args = args
            -- Do NOT optimise the RHS (previously we did simplOptExpr here)
            -- See Note [Substitute lazily]
   where
-    doc = ptext (sLit "subst-rule") <+> ppr fn_name
+    doc = text "subst-rule" <+> ppr fn_name
     (subst', bndrs') = substBndrs subst bndrs
 
 ------------------
@@ -732,17 +737,19 @@ substDVarSet subst fvs
   where
   subst_fv subst fv acc
      | isId fv = expr_fvs (lookupIdSubst (text "substDVarSet") subst fv) isLocalVar emptyVarSet $! acc
-     | otherwise = tyCoVarsOfTypeAcc (lookupTCvSubst subst fv) (const True) emptyVarSet $! acc
+     | otherwise = tyCoFVsOfType (lookupTCvSubst subst fv) (const True) emptyVarSet $! acc
 
 ------------------
 substTickish :: Subst -> Tickish Id -> Tickish Id
-substTickish subst (Breakpoint n ids) = Breakpoint n (map do_one ids)
- where do_one = getIdFromTrivialExpr . lookupIdSubst (text "subst_tickish") subst
+substTickish subst (Breakpoint n ids)
+   = Breakpoint n (map do_one ids)
+ where
+    do_one = getIdFromTrivialExpr . lookupIdSubst (text "subst_tickish") subst
 substTickish _subst other = other
 
 {- Note [Substitute lazily]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The functions that substitute over IdInfo must be pretty lazy, becuause
+The functions that substitute over IdInfo must be pretty lazy, because
 they are knot-tied by substRecBndrs.
 
 One case in point was Trac #10627 in which a rule for a function 'f'
@@ -1044,7 +1051,7 @@ maybe_substitute :: Subst -> InVar -> OutExpr -> Maybe Subst
 maybe_substitute subst b r
   | Type ty <- r        -- let a::* = TYPE ty in <body>
   = ASSERT( isTyVar b )
-    Just (extendTCvSubst subst b ty)
+    Just (extendTvSubst subst b ty)
 
   | Coercion co <- r
   = ASSERT( isCoVar b )
@@ -1057,7 +1064,7 @@ maybe_substitute subst b r
   , isAlwaysActive (idInlineActivation b)       -- Note [Inline prag in simplOpt]
   , not (isStableUnfolding (idUnfolding b))
   , not (isExportedId b)
-  , not (isUnLiftedType (idType b)) || exprOkForSpeculation r
+  , not (isUnliftedType (idType b)) || exprOkForSpeculation r
   = Just (extendIdSubst subst b r)
 
   | otherwise
@@ -1296,12 +1303,11 @@ dealWithStringLiteral fun str co
 dealWithCoercion :: Coercion -> DataCon -> [CoreExpr]
                  -> Maybe (DataCon, [Type], [CoreExpr])
 dealWithCoercion co dc dc_args
-  | isReflCo co
+  | isReflCo co || from_ty `eqType` to_ty  -- try cheap test first
   , let (univ_ty_args, rest_args) = splitAtList (dataConUnivTyVars dc) dc_args
   = Just (dc, map exprToType univ_ty_args, rest_args)
 
-  | Pair _from_ty to_ty <- coercionKind co
-  , Just (to_tc, to_tc_arg_tys) <- splitTyConApp_maybe to_ty
+  | Just (to_tc, to_tc_arg_tys) <- splitTyConApp_maybe to_ty
   , to_tc == dataConTyCon dc
         -- These two tests can fail; we might see
         --      (C x y) `cast` (g :: T a ~ S [a]),
@@ -1341,14 +1347,18 @@ dealWithCoercion co dc dc_args
 
         dump_doc = vcat [ppr dc,      ppr dc_univ_tyvars, ppr dc_ex_tyvars,
                          ppr arg_tys, ppr dc_args,
-                         ppr ex_args, ppr val_args, ppr co, ppr _from_ty, ppr to_ty, ppr to_tc ]
+                         ppr ex_args, ppr val_args, ppr co, ppr from_ty, ppr to_ty, ppr to_tc ]
     in
-    ASSERT2( eqType _from_ty (mkTyConApp to_tc (map exprToType $ takeList dc_univ_tyvars dc_args)), dump_doc )
+    ASSERT2( eqType from_ty (mkTyConApp to_tc (map exprToType $ takeList dc_univ_tyvars dc_args)), dump_doc )
     ASSERT2( equalLength val_args arg_tys, dump_doc )
     Just (dc, to_tc_arg_tys, to_ex_args ++ new_val_args)
 
   | otherwise
   = Nothing
+
+  where
+    Pair from_ty to_ty = coercionKind co
+
 
 {-
 Note [Unfolding DFuns]
@@ -1424,7 +1434,7 @@ exprIsLambda_maybe (in_scope_set, id_unf) (Cast casted_e co)
 -- Another attempt: See if we find a partial unfolding
 exprIsLambda_maybe (in_scope_set, id_unf) e
     | (Var f, as, ts) <- collectArgsTicks tickishFloatable e
-    , idArity f > length (filter isValArg as)
+    , idArity f > count isValArg as
     -- Make sure there is hope to get a lambda
     , Just rhs <- expandUnfolding_maybe (id_unf f)
     -- Optimize, for beta-reduction
@@ -1457,7 +1467,7 @@ pushCoercionIntoLambda in_scope x e co
           subst = extendIdSubst (mkEmptySubst in_scope')
                                 x
                                 (mkCast (Var x') co1)
-      in Just (x', subst_expr subst e `mkCast` co2)
+      in Just (x', subst_expr (text "pushCoercionIntoLambda") subst e `mkCast` co2)
     | otherwise
     = pprTrace "exprIsLambda_maybe: Unexpected lambda in case" (ppr (Lam x e))
       Nothing

@@ -22,11 +22,13 @@ module ByteCodeLink (
 import GHCi.RemoteTypes
 import GHCi.ResolvedBCO
 import GHCi.InfoTable
+import GHCi.BreakArray
 import SizedSeq
 
 import GHCi
 import ByteCodeTypes
 import HscTypes
+import DynFlags
 import Name
 import NameEnv
 import PrimOp
@@ -38,6 +40,8 @@ import Util
 
 -- Standard libraries
 import Data.Array.Unboxed
+import Data.Array.Base
+import Data.Word
 import Foreign.Ptr
 import GHC.IO           ( IO(..) )
 import GHC.Exts
@@ -60,15 +64,25 @@ extendClosureEnv cl_env pairs
 -}
 
 linkBCO
-  :: HscEnv -> ItblEnv -> ClosureEnv -> NameEnv Int -> UnlinkedBCO
+  :: HscEnv -> ItblEnv -> ClosureEnv -> NameEnv Int -> RemoteRef BreakArray
+  -> UnlinkedBCO
   -> IO ResolvedBCO
-linkBCO hsc_env ie ce bco_ix
+linkBCO hsc_env ie ce bco_ix breakarray
            (UnlinkedBCO _ arity insns bitmap lits0 ptrs0) = do
   lits <- mapM (lookupLiteral hsc_env ie) (ssElts lits0)
-  ptrs <- mapM (resolvePtr hsc_env ie ce bco_ix) (ssElts ptrs0)
-  return (ResolvedBCO arity insns bitmap
-            (listArray (0, fromIntegral (sizeSS lits0)-1) lits)
-            (addListToSS emptySS ptrs))
+  ptrs <- mapM (resolvePtr hsc_env ie ce bco_ix breakarray) (ssElts ptrs0)
+  let dflags = hsc_dflags hsc_env
+  return (ResolvedBCO arity (toWordArray dflags insns) bitmap
+              (listArray (0, fromIntegral (sizeSS lits0)-1) lits)
+              (addListToSS emptySS ptrs))
+
+-- Turn the insns array from a Word16 array into a Word array.  The
+-- latter is much faster to serialize/deserialize. Assumes the input
+-- array is zero-indexed.
+toWordArray :: DynFlags -> UArray Int Word16 -> UArray Int Word
+toWordArray dflags (UArray _ _ n arr) = UArray 0 (n'-1) n' arr
+  where n' = (n + w16s_per_word - 1) `quot` w16s_per_word
+        w16s_per_word = wORD_SIZE dflags `quot` 2
 
 lookupLiteral :: HscEnv -> ItblEnv -> BCONPtr -> IO Word
 lookupLiteral _ _ (BCONPtrWord lit) = return lit
@@ -78,8 +92,9 @@ lookupLiteral hsc_env _ (BCONPtrLbl  sym) = do
 lookupLiteral hsc_env ie (BCONPtrItbl nm)  = do
   Ptr a# <- lookupIE hsc_env ie nm
   return (W# (int2Word# (addr2Int# a#)))
-lookupLiteral hsc_env _ (BCONPtrStr bs) = do
-  fromIntegral . ptrToWordPtr <$> mallocData hsc_env bs
+lookupLiteral _ _ (BCONPtrStr _) =
+  -- should be eliminated during assembleBCOs
+  panic "lookupLiteral: BCONPtrStr"
 
 lookupStaticPtr :: HscEnv -> FastString -> IO (Ptr ())
 lookupStaticPtr hsc_env addr_of_label_string = do
@@ -89,26 +104,26 @@ lookupStaticPtr hsc_env addr_of_label_string = do
     Nothing  -> linkFail "ByteCodeLink: can't find label"
                   (unpackFS addr_of_label_string)
 
-lookupIE :: HscEnv -> ItblEnv -> Name -> IO (Ptr a)
+lookupIE :: HscEnv -> ItblEnv -> Name -> IO (Ptr ())
 lookupIE hsc_env ie con_nm =
   case lookupNameEnv ie con_nm of
-    Just (_, ItblPtr a) -> return (castPtr (conInfoPtr a))
+    Just (_, ItblPtr a) -> return (conInfoPtr (fromRemotePtr (castRemotePtr a)))
     Nothing -> do -- try looking up in the object files.
        let sym_to_find1 = nameToCLabel con_nm "con_info"
        m <- lookupSymbol hsc_env sym_to_find1
        case m of
-          Just addr -> return (castPtr addr)
+          Just addr -> return addr
           Nothing
              -> do -- perhaps a nullary constructor?
                    let sym_to_find2 = nameToCLabel con_nm "static_info"
                    n <- lookupSymbol hsc_env sym_to_find2
                    case n of
-                      Just addr -> return (castPtr addr)
+                      Just addr -> return addr
                       Nothing   -> linkFail "ByteCodeLink.lookupIE"
                                       (unpackFS sym_to_find1 ++ " or " ++
                                        unpackFS sym_to_find2)
 
-lookupPrimOp :: HscEnv -> PrimOp -> IO RemotePtr
+lookupPrimOp :: HscEnv -> PrimOp -> IO (RemotePtr ())
 lookupPrimOp hsc_env primop = do
   let sym_to_find = primopToCLabel primop "closure"
   m <- lookupSymbol hsc_env (mkFastString sym_to_find)
@@ -117,13 +132,14 @@ lookupPrimOp hsc_env primop = do
     Nothing -> linkFail "ByteCodeLink.lookupCE(primop)" sym_to_find
 
 resolvePtr
-  :: HscEnv -> ItblEnv -> ClosureEnv -> NameEnv Int -> BCOPtr
+  :: HscEnv -> ItblEnv -> ClosureEnv -> NameEnv Int -> RemoteRef BreakArray
+  -> BCOPtr
   -> IO ResolvedBCOPtr
-resolvePtr hsc_env _ie ce bco_ix (BCOPtrName nm)
+resolvePtr hsc_env _ie ce bco_ix _ (BCOPtrName nm)
   | Just ix <- lookupNameEnv bco_ix nm =
     return (ResolvedBCORef ix) -- ref to another BCO in this group
   | Just (_, rhv) <- lookupNameEnv ce nm =
-    return (ResolvedBCOPtr (unsafeForeignHValueToHValueRef rhv))
+    return (ResolvedBCOPtr (unsafeForeignRefToRemoteRef rhv))
   | otherwise =
     ASSERT2(isExternalName nm, ppr nm)
     do let sym_to_find = nameToCLabel nm "closure"
@@ -131,14 +147,12 @@ resolvePtr hsc_env _ie ce bco_ix (BCOPtrName nm)
        case m of
          Just p -> return (ResolvedBCOStaticPtr (toRemotePtr p))
          Nothing -> linkFail "ByteCodeLink.lookupCE" (unpackFS sym_to_find)
-resolvePtr hsc_env _ _ _ (BCOPtrPrimOp op) =
+resolvePtr hsc_env _ _ _ _ (BCOPtrPrimOp op) =
   ResolvedBCOStaticPtr <$> lookupPrimOp hsc_env op
-resolvePtr hsc_env ie ce bco_ix (BCOPtrBCO bco) =
-  ResolvedBCOPtrBCO <$> linkBCO hsc_env ie ce bco_ix bco
-resolvePtr _ _ _ _ (BCOPtrBreakInfo break_info) =
-  return (ResolvedBCOPtrLocal (unsafeCoerce# break_info))
-resolvePtr _ _ _ _ (BCOPtrArray break_array) =
-  return (ResolvedBCOPtrLocal (unsafeCoerce# break_array))
+resolvePtr hsc_env ie ce bco_ix breakarray (BCOPtrBCO bco) =
+  ResolvedBCOPtrBCO <$> linkBCO hsc_env ie ce bco_ix breakarray bco
+resolvePtr _ _ _ _ breakarray BCOPtrBreakArray =
+  return (ResolvedBCOPtrBreakArray breakarray)
 
 linkFail :: String -> String -> IO a
 linkFail who what

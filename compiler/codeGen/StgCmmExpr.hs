@@ -11,7 +11,6 @@
 
 module StgCmmExpr ( cgExpr ) where
 
-#define FAST_STRING_NOT_NEEDED
 #include "HsVersions.h"
 
 import {-# SOURCE #-} StgCmmBind ( cgBind )
@@ -41,6 +40,7 @@ import Id
 import PrimOp
 import TyCon
 import Type
+import RepType          ( isVoidTy, countConRepArgs )
 import CostCentre       ( CostCentreStack, currentCCS )
 import Maybes
 import Util
@@ -50,9 +50,7 @@ import Outputable
 import Control.Monad (unless,void)
 import Control.Arrow (first)
 
-#if __GLASGOW_HASKELL__ >= 709
 import Prelude hiding ((<*>))
-#endif
 
 ------------------------------------------------------------------------
 --              cgExpr: the main function
@@ -67,13 +65,13 @@ cgExpr (StgOpApp (StgPrimOp SeqOp) [StgVarArg a, _] _res_ty) =
   cgIdApp a []
 
 cgExpr (StgOpApp op args ty) = cgOpApp op args ty
-cgExpr (StgConApp con args)  = cgConApp con args
+cgExpr (StgConApp con args _)= cgConApp con args
 cgExpr (StgTick t e)         = cgTick t >> cgExpr e
 cgExpr (StgLit lit)       = do cmm_lit <- cgLit lit
                                emitReturn [CmmLit cmm_lit]
 
 cgExpr (StgLet binds expr)             = do { cgBind binds;     cgExpr expr }
-cgExpr (StgLetNoEscape _ _ binds expr) =
+cgExpr (StgLetNoEscape binds expr) =
   do { u <- newUnique
      ; let join_id = mkBlockId u
      ; cgLneBinds join_id binds
@@ -81,7 +79,7 @@ cgExpr (StgLetNoEscape _ _ binds expr) =
      ; emitLabel join_id
      ; return r }
 
-cgExpr (StgCase expr _live_vars _save_vars bndr _srt alt_type alts) =
+cgExpr (StgCase expr bndr alt_type alts) =
   cgCase expr bndr alt_type alts
 
 cgExpr (StgLam {}) = panic "cgExpr: StgLam"
@@ -142,10 +140,12 @@ cgLetNoEscapeRhsBody
     -> Id
     -> StgRhs
     -> FCode (CgIdInfo, FCode ())
-cgLetNoEscapeRhsBody local_cc bndr (StgRhsClosure cc _bi _ _upd _ args body)
+cgLetNoEscapeRhsBody local_cc bndr (StgRhsClosure cc _bi _ _upd args body)
   = cgLetNoEscapeClosure bndr local_cc cc (nonVoidIds args) body
 cgLetNoEscapeRhsBody local_cc bndr (StgRhsCon cc con args)
-  = cgLetNoEscapeClosure bndr local_cc cc [] (StgConApp con args)
+  = cgLetNoEscapeClosure bndr local_cc cc []
+      (StgConApp con args (pprPanic "cgLetNoEscapeRhsBody" $
+                           text "StgRhsCon doesn't have type args"))
         -- For a constructor RHS we want to generate a single chunk of
         -- code which can be jumped to from many places, which will
         -- return the constructor. It's easy; just behave as if it
@@ -227,7 +227,7 @@ Suppose the inner loop is P->R->P->R etc.  Then here is
 how many heap checks we get in the *inner loop* under various
 conditions
 
-  Alooc   Heap check in branches (!Q!, !R!)?
+  Alloc   Heap check in branches (!Q!, !R!)?
   P Q R      yes     no (absorb to !P!)
 --------------------------------------
   n n n      0          0
@@ -360,7 +360,7 @@ of compilation (i.e. at the Core level).
 Note [Scrutinising VoidRep]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Suppose we have this STG code:
-   f = \[s : State# RealWorld] -> 
+   f = \[s : State# RealWorld] ->
        case s of _ -> blah
 This is very odd.  Why are we scrutinising a state token?  But it
 can arise with bizarre NOINLINE pragmas (Trac #9964)
@@ -371,18 +371,18 @@ can arise with bizarre NOINLINE pragmas (Trac #9964)
 
 Now the trouble is that 's' has VoidRep, and we do not bind void
 arguments in the environment; they don't live anywhere.  See the
-calls to nonVoidIds in various places.  So we must not look up 
+calls to nonVoidIds in various places.  So we must not look up
 's' in the environment.  Instead, just evaluate the RHS!  Simple.
 -}
 
 cgCase (StgApp v []) _ (PrimAlt _) alts
   | isVoidRep (idPrimRep v)  -- See Note [Scrutinising VoidRep]
-  , [(DEFAULT, _, _, rhs)] <- alts
+  , [(DEFAULT, _, rhs)] <- alts
   = cgExpr rhs
 
 {- Note [Dodgy unsafeCoerce 1]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Consider 
+Consider
     case (x :: HValue) |> co of (y :: MutVar# Int)
         DEFAULT -> ...
 We want to gnerate an assignment
@@ -397,7 +397,7 @@ MutVar#.  The types are compatible though, so we can just generate an
 assignment.
 -}
 cgCase (StgApp v []) bndr alt_type@(PrimAlt _) alts
-  | isUnLiftedType (idType v)  -- Note [Dodgy unsafeCoerce 1]
+  | isUnliftedType (idType v)  -- Note [Dodgy unsafeCoerce 1]
   || reps_compatible
   = -- assignment suffices for unlifted types
     do { dflags <- getDynFlags
@@ -406,7 +406,7 @@ cgCase (StgApp v []) bndr alt_type@(PrimAlt _) alts
        ; v_info <- getCgIdInfo v
        ; emitAssign (CmmLocal (idToReg dflags (NonVoid bndr)))
                     (idInfoToAmode v_info)
-       ; bindArgsToRegs [NonVoid bndr]
+       ; bindArgToReg (NonVoid bndr)
        ; cgAlts (NoGcInAlts,AssignedDirectly) (NonVoid bndr) alt_type alts }
   where
     reps_compatible = idPrimRep v == idPrimRep bndr
@@ -525,32 +525,33 @@ isSimpleOp (StgPrimCallOp _) _                           = return False
 
 -----------------
 chooseReturnBndrs :: Id -> AltType -> [StgAlt] -> [NonVoid Id]
--- These are the binders of a case that are assigned
--- by the evaluation of the scrutinee
--- Only non-void ones come back
+-- These are the binders of a case that are assigned by the evaluation of the
+-- scrutinee.
+-- They're non-void, see Note [Post-unarisation invariants] in UnariseStg.
 chooseReturnBndrs bndr (PrimAlt _) _alts
-  = nonVoidIds [bndr]
+  = assertNonVoidIds [bndr]
 
-chooseReturnBndrs _bndr (UbxTupAlt _) [(_, ids, _, _)]
-  = nonVoidIds ids      -- 'bndr' is not assigned!
+chooseReturnBndrs _bndr (MultiValAlt n) [(_, ids, _)]
+  = ASSERT2(n == length ids, ppr n $$ ppr ids $$ ppr _bndr)
+    assertNonVoidIds ids     -- 'bndr' is not assigned!
 
 chooseReturnBndrs bndr (AlgAlt _) _alts
-  = nonVoidIds [bndr]   -- Only 'bndr' is assigned
+  = assertNonVoidIds [bndr]  -- Only 'bndr' is assigned
 
 chooseReturnBndrs bndr PolyAlt _alts
-  = nonVoidIds [bndr]   -- Only 'bndr' is assigned
+  = assertNonVoidIds [bndr]  -- Only 'bndr' is assigned
 
 chooseReturnBndrs _ _ _ = panic "chooseReturnBndrs"
-        -- UbxTupALt has only one alternative
+                             -- MultiValAlt has only one alternative
 
 -------------------------------------
 cgAlts :: (GcPlan,ReturnKind) -> NonVoid Id -> AltType -> [StgAlt]
        -> FCode ReturnKind
 -- At this point the result of the case are in the binders
-cgAlts gc_plan _bndr PolyAlt [(_, _, _, rhs)]
+cgAlts gc_plan _bndr PolyAlt [(_, _, rhs)]
   = maybeAltHeapCheck gc_plan (cgExpr rhs)
 
-cgAlts gc_plan _bndr (UbxTupAlt _) [(_, _, _, rhs)]
+cgAlts gc_plan _bndr (MultiValAlt _) [(_, _, rhs)]
   = maybeAltHeapCheck gc_plan (cgExpr rhs)
         -- Here bndrs are *already* in scope, so don't rebind them
 
@@ -584,7 +585,6 @@ cgAlts gc_plan bndr (AlgAlt tycon) alts
                    tag_expr = cmmConstrTag1 dflags (CmmReg bndr_reg)
                    branches' = [(tag+1,branch) | (tag,branch) <- branches]
                 emitSwitch tag_expr branches' mb_deflt 1 fam_sz
-                return AssignedDirectly
 
            else         -- No, get tag from info table
                 do dflags <- getDynFlags
@@ -593,7 +593,8 @@ cgAlts gc_plan bndr (AlgAlt tycon) alts
                        untagged_ptr = cmmRegOffB bndr_reg (-1)
                        tag_expr = getConstrTag dflags (untagged_ptr)
                    emitSwitch tag_expr branches mb_deflt 0 (fam_sz - 1)
-                   return AssignedDirectly }
+
+        ; return AssignedDirectly }
 
 cgAlts _ _ _ _ = panic "cgAlts"
         -- UbxTupAlt and PolyAlt have only one alternative
@@ -647,10 +648,12 @@ cgAltRhss gc_plan bndr alts = do
   let
     base_reg = idToReg dflags bndr
     cg_alt :: StgAlt -> FCode (AltCon, CmmAGraphScoped)
-    cg_alt (con, bndrs, _uses, rhs)
+    cg_alt (con, bndrs, rhs)
       = getCodeScoped             $
         maybeAltHeapCheck gc_plan $
-        do { _ <- bindConArgs con base_reg bndrs
+        do { _ <- bindConArgs con base_reg (assertNonVoidIds bndrs)
+                    -- alt binders are always non-void,
+                    -- see Note [Post-unarisation invariants] in UnariseStg
            ; _ <- cgExpr rhs
            ; return con }
   forkAlts (map cg_alt alts)
@@ -674,14 +677,17 @@ cgConApp con stg_args
        ; emitReturn arg_exprs }
 
   | otherwise   --  Boxed constructors; allocate and return
-  = ASSERT2( stg_args `lengthIs` dataConRepRepArity con, ppr con <+> ppr stg_args )
+  = ASSERT2( stg_args `lengthIs` countConRepArgs con, ppr con <> parens (ppr (countConRepArgs con)) <+> ppr stg_args )
     do  { (idinfo, fcode_init) <- buildDynCon (dataConWorkId con) False
-                                     currentCCS con stg_args
+                                     currentCCS con (assertNonVoidStgArgs stg_args)
+                                     -- con args are always non-void,
+                                     -- see Note [Post-unarisation invariants] in UnariseStg
                 -- The first "con" says that the name bound to this
                 -- closure is is "con", which is a bit of a fudge, but
                 -- it only affects profiling (hence the False)
 
         ; emit =<< fcode_init
+        ; tickyReturnNewCon (length stg_args)
         ; emitReturn [idInfoToAmode idinfo] }
 
 cgIdApp :: Id -> [StgArg] -> FCode ReturnKind
@@ -699,11 +705,13 @@ cgIdApp fun_id args = do
         fun_name    = idName    cg_fun_id
         fun         = idInfoToAmode fun_info
         lf_info     = cg_lf         fun_info
+        n_args      = length args
+        v_args      = length $ filter (isVoidTy . stgArgType) args
         node_points dflags = nodeMustPointToIt dflags lf_info
-    case (getCallMethod dflags fun_name cg_fun_id lf_info (length args) (cg_loc fun_info) self_loop_info) of
+    case getCallMethod dflags fun_name cg_fun_id lf_info n_args v_args (cg_loc fun_info) self_loop_info of
 
             -- A value in WHNF, so we can just return it.
-        ReturnIt -> emitReturn [fun]    -- ToDo: does ReturnIt guarantee tagged?
+        ReturnIt -> emitReturn [fun] -- ToDo: does ReturnIt guarantee tagged?
 
         EnterIt -> ASSERT( null args )  -- Discarding arguments
                    emitEnter fun
@@ -804,14 +812,36 @@ cgIdApp fun_id args = do
 --     of call will be generated. getCallMethod decides to generate a self
 --     recursive tail call when (a) environment stores information about
 --     possible self tail-call; (b) that tail call is to a function currently
---     being compiled; (c) number of passed arguments is equal to function's
---     arity. (d) loopification is turned on via -floopification command-line
---     option.
+--     being compiled; (c) number of passed non-void arguments is equal to
+--     function's arity. (d) loopification is turned on via -floopification
+--     command-line option.
 --
 --   * Command line option to turn loopification on and off is implemented in
 --     DynFlags.
 --
-
+--
+-- Note [Void arguments in self-recursive tail calls]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--
+-- State# tokens can get in the way of the loopification optimization as seen in
+-- #11372. Consider this:
+--
+-- foo :: [a]
+--     -> (a -> State# s -> (# State s, Bool #))
+--     -> State# s
+--     -> (# State# s, Maybe a #)
+-- foo [] f s = (# s, Nothing #)
+-- foo (x:xs) f s = case f x s of
+--      (# s', b #) -> case b of
+--          True -> (# s', Just x #)
+--          False -> foo xs f s'
+--
+-- We would like to compile the call to foo as a local jump instead of a call
+-- (see Note [Self-recursive tail calls]). However, the generated function has
+-- an arity of 2 while we apply it to 3 arguments, one of them being of void
+-- type. Thus, we mustn't count arguments of void type when checking whether
+-- we can turn a call into a self-recursive jump.
+--
 
 emitEnter :: CmmExpr -> FCode ReturnKind
 emitEnter fun = do
@@ -828,7 +858,7 @@ emitEnter fun = do
       --
       -- Right now, we do what the old codegen did, and omit the tag
       -- test, just generating an enter.
-      Return _ -> do
+      Return -> do
         { let entry = entryCode dflags $ closureInfoPtr dflags $ CmmReg nodeReg
         ; emit $ mkJump dflags NativeNodeCall entry
                         [cmmUntag dflags fun] updfr_off
@@ -851,7 +881,7 @@ emitEnter fun = do
       --
       -- Note in particular that the label Lret is used as a
       -- destination by both the tag-test and the call.  This is
-      -- becase Lret will necessarily be a proc-point, and we want to
+      -- because Lret will necessarily be a proc-point, and we want to
       -- ensure that we generate only one proc-point for this
       -- sequence.
       --

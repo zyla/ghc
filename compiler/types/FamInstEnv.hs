@@ -12,11 +12,11 @@ module FamInstEnv (
 
         FamInstEnvs, FamInstEnv, emptyFamInstEnv, emptyFamInstEnvs,
         extendFamInstEnv, deleteFromFamInstEnv, extendFamInstEnvList,
-        identicalFamInstHead, famInstEnvElts, familyInstances, orphNamesOfFamInst,
+        identicalFamInstHead, famInstEnvElts, familyInstances,
 
         -- * CoAxioms
         mkCoAxBranch, mkBranchedCoAxiom, mkUnbranchedCoAxiom, mkSingleCoAxiom,
-        computeAxiomIncomps,
+        mkNewTypeCoAxiom,
 
         FamInstMatch(..),
         lookupFamInstEnv, lookupFamInstEnvConflicts, lookupFamInstEnvByTyCon,
@@ -38,10 +38,8 @@ module FamInstEnv (
 
 #include "HsVersions.h"
 
-import InstEnv
 import Unify
 import Type
-import TcType ( orphNamesOfTypes )
 import TyCoRep
 import TyCon
 import Coercion
@@ -50,7 +48,7 @@ import VarSet
 import VarEnv
 import Name
 import PrelNames ( eqPrimTyConKey )
-import UniqFM
+import UniqDFM
 import Outputable
 import Maybes
 import TrieMap
@@ -59,11 +57,11 @@ import Util
 import Var
 import Pair
 import SrcLoc
-import NameSet
 import FastString
 import MonadUtils
 import Control.Monad
 import Data.Function ( on )
+import Data.List( mapAccumL )
 
 {-
 ************************************************************************
@@ -92,6 +90,12 @@ data FamInst  -- See Note [FamInsts and CoAxioms]
   = FamInst { fi_axiom  :: CoAxiom Unbranched -- The new coercion axiom
                                               -- introduced by this family
                                               -- instance
+                 -- INVARIANT: apart from freshening (see below)
+                 --    fi_tvs = cab_tvs of the (single) axiom branch
+                 --    fi_cvs = cab_cvs ...ditto...
+                 --    fi_tys = cab_lhs ...ditto...
+                 --    fi_rhs = cab_rhs ...ditto...
+
             , fi_flavor :: FamFlavor
 
             -- Everything below here is a redundant,
@@ -106,15 +110,12 @@ data FamInst  -- See Note [FamInsts and CoAxioms]
 
             -- Used for "proper matching"; ditto
             , fi_tvs :: [TyVar]      -- Template tyvars for full match
+            , fi_cvs :: [CoVar]      -- Template covars for full match
                  -- Like ClsInsts, these variables are always fresh
                  -- See Note [Template tyvars are fresh] in InstEnv
-                 -- INVARIANT: fi_tvs = coAxiomTyVars fi_axiom
-
-            , fi_cvs    :: [CoVar]      -- Template covars for full match
 
             , fi_tys    :: [Type]       --   The LHS type patterns
             -- May be eta-reduced; see Note [Eta reduction for data families]
-
 
             , fi_rhs :: Type         --   the RHS, with its freshened vars
             }
@@ -159,6 +160,9 @@ Bottom line:
        i.e. LHS is unsaturated
   - fi_rhs will be (rep_tc fi_tvs)
        i.e. RHS is un-saturated
+
+  But when fi_flavour = SynFamilyInst,
+  - fi_tys has the exact arity of the family tycon
 -}
 
 -- Obtain the axiom of a family instance
@@ -217,10 +221,10 @@ pprFamInst famInst
   = hang (pprFamInstHdr famInst) 2 (ifPprDebug debug_stuff)
   where
     ax = fi_axiom famInst
-    debug_stuff = vcat [ ptext (sLit "Coercion axiom:") <+> ppr ax
-                       , ptext (sLit "Tvs:") <+> ppr (fi_tvs famInst)
-                       , ptext (sLit "LHS:") <+> ppr (fi_tys famInst)
-                       , ptext (sLit "RHS:") <+> ppr (fi_rhs famInst) ]
+    debug_stuff = vcat [ text "Coercion axiom:" <+> ppr ax
+                       , text "Tvs:" <+> ppr (fi_tvs famInst)
+                       , text "LHS:" <+> ppr (fi_tys famInst)
+                       , text "RHS:" <+> ppr (fi_rhs famInst) ]
 
 pprFamInstHdr :: FamInst -> SDoc
 pprFamInstHdr fi@(FamInst {fi_flavor = flavor})
@@ -230,7 +234,7 @@ pprFamInstHdr fi@(FamInst {fi_flavor = flavor})
     -- For *top level* type instances, say "type instance T Int = blah"
     pp_instance
       | isTyConAssoc fam_tc = empty
-      | otherwise           = ptext (sLit "instance")
+      | otherwise           = text "instance"
 
     (fam_tc, etad_lhs_tys) = famInstSplitLHS fi
     vanilla_pp_head = pprTypeApp fam_tc etad_lhs_tys
@@ -252,12 +256,12 @@ pprFamInstHdr fi@(FamInst {fi_flavor = flavor})
             = vanilla_pp_head
 
     pprTyConSort = case flavor of
-                     SynFamilyInst        -> ptext (sLit "type")
+                     SynFamilyInst        -> text "type"
                      DataFamilyInst tycon
-                       | isDataTyCon     tycon -> ptext (sLit "data")
-                       | isNewTyCon      tycon -> ptext (sLit "newtype")
-                       | isAbstractTyCon tycon -> ptext (sLit "data")
-                       | otherwise             -> ptext (sLit "WEIRD") <+> ppr tycon
+                       | isDataTyCon     tycon -> text "data"
+                       | isNewTyCon      tycon -> text "newtype"
+                       | isAbstractTyCon tycon -> text "data"
+                       | otherwise             -> text "WEIRD" <+> ppr tycon
 
 pprFamInsts :: [FamInst] -> SDoc
 pprFamInsts finsts = vcat (map pprFamInst finsts)
@@ -325,7 +329,7 @@ A FamInstEnv maps a family name to the list of known instances for that family.
 
 The same FamInstEnv includes both 'data family' and 'type family' instances.
 Type families are reduced during type inference, but not data families;
-the user explains when to use a data family instance by using contructors
+the user explains when to use a data family instance by using constructors
 and pattern matching.
 
 Nevertheless it is still useful to have data families in the FamInstEnv:
@@ -355,10 +359,23 @@ Then we get a data type for each instance, and an axiom:
 
 These two axioms for T, one with one pattern, one with two;
 see Note [Eta reduction for data families]
+
+Note [FamInstEnv determinism]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We turn FamInstEnvs into a list in some places that don't directly affect
+the ABI. That happens in family consistency checks and when producing output
+for `:info`. Unfortunately that nondeterminism is nonlocal and it's hard
+to tell what it affects without following a chain of functions. It's also
+easy to accidentally make that nondeterminism affect the ABI. Furthermore
+the envs should be relatively small, so it should be free to use deterministic
+maps here. Testing with nofib and validate detected no difference between
+UniqFM and UniqDFM.
+See Note [Deterministic UniqFM].
 -}
 
-type FamInstEnv = UniqFM FamilyInstEnv  -- Maps a family to its instances
+type FamInstEnv = UniqDFM FamilyInstEnv  -- Maps a family to its instances
      -- See Note [FamInstEnv]
+     -- See Note [FamInstEnv determinism]
 
 type FamInstEnvs = (FamInstEnv, FamInstEnv)
      -- External package inst-env, Home-package inst-env
@@ -367,7 +384,7 @@ newtype FamilyInstEnv
   = FamIE [FamInst]     -- The instances for a particular family, in any order
 
 instance Outputable FamilyInstEnv where
-  ppr (FamIE fs) = ptext (sLit "FamIE") <+> vcat (map ppr fs)
+  ppr (FamIE fs) = text "FamIE" <+> vcat (map ppr fs)
 
 -- INVARIANTS:
 --  * The fs_tvs are distinct in each FamInst
@@ -377,33 +394,19 @@ emptyFamInstEnvs :: (FamInstEnv, FamInstEnv)
 emptyFamInstEnvs = (emptyFamInstEnv, emptyFamInstEnv)
 
 emptyFamInstEnv :: FamInstEnv
-emptyFamInstEnv = emptyUFM
+emptyFamInstEnv = emptyUDFM
 
 famInstEnvElts :: FamInstEnv -> [FamInst]
-famInstEnvElts fi = [elt | FamIE elts <- eltsUFM fi, elt <- elts]
+famInstEnvElts fi = [elt | FamIE elts <- eltsUDFM fi, elt <- elts]
+  -- See Note [FamInstEnv determinism]
 
 familyInstances :: (FamInstEnv, FamInstEnv) -> TyCon -> [FamInst]
 familyInstances (pkg_fie, home_fie) fam
   = get home_fie ++ get pkg_fie
   where
-    get env = case lookupUFM env fam of
+    get env = case lookupUDFM env fam of
                 Just (FamIE insts) -> insts
                 Nothing                      -> []
-
--- | Collects the names of the concrete types and type constructors that
--- make up the LHS of a type family instance, including the family
--- name itself.
---
--- For instance, given `type family Foo a b`:
--- `type instance Foo (F (G (H a))) b = ...` would yield [Foo,F,G,H]
---
--- Used in the implementation of ":info" in GHCi.
-orphNamesOfFamInst :: FamInst -> NameSet
-orphNamesOfFamInst fam_inst
-  = orphNamesOfTypes (concat (map cab_lhs (fromBranches $ coAxiomBranches axiom)))
-    `extendNameSet` getName (coAxiomTyCon axiom)
-  where
-    axiom = fi_axiom fam_inst
 
 extendFamInstEnvList :: FamInstEnv -> [FamInst] -> FamInstEnv
 extendFamInstEnvList inst_env fis = foldl extendFamInstEnv inst_env fis
@@ -411,14 +414,14 @@ extendFamInstEnvList inst_env fis = foldl extendFamInstEnv inst_env fis
 extendFamInstEnv :: FamInstEnv -> FamInst -> FamInstEnv
 extendFamInstEnv inst_env
                  ins_item@(FamInst {fi_fam = cls_nm})
-  = addToUFM_C add inst_env cls_nm (FamIE [ins_item])
+  = addToUDFM_C add inst_env cls_nm (FamIE [ins_item])
   where
     add (FamIE items) _ = FamIE (ins_item:items)
 
 deleteFromFamInstEnv :: FamInstEnv -> FamInst -> FamInstEnv
 -- Used only for overriding in GHCi
 deleteFromFamInstEnv inst_env fam_inst@(FamInst {fi_fam = fam_nm})
- = adjustUFM adjust inst_env fam_nm
+ = adjustUDFM adjust inst_env fam_nm
  where
    adjust :: FamilyInstEnv -> FamilyInstEnv
    adjust (FamIE items)
@@ -436,11 +439,9 @@ identicalFamInstHead (FamInst { fi_axiom = ax1 }) (FamInst { fi_axiom = ax2 })
     brs2 = coAxiomBranches ax2
 
     identical_branch br1 br2
-      =  isJust (tcMatchTys tvs1 lhs1 lhs2)
-      && isJust (tcMatchTys tvs2 lhs2 lhs1)
+      =  isJust (tcMatchTys lhs1 lhs2)
+      && isJust (tcMatchTys lhs2 lhs1)
       where
-        tvs1 = mkVarSet (coAxBranchTyVars br1)
-        tvs2 = mkVarSet (coAxBranchTyVars br2)
         lhs1 = coAxBranchLHS br1
         lhs2 = coAxBranchLHS br2
 
@@ -525,10 +526,11 @@ irrelevant (clause 1 of compatible) or benign (clause 2 of compatible).
 compatibleBranches :: CoAxBranch -> CoAxBranch -> Bool
 compatibleBranches (CoAxBranch { cab_lhs = lhs1, cab_rhs = rhs1 })
                    (CoAxBranch { cab_lhs = lhs2, cab_rhs = rhs2 })
-  = case tcUnifyTysFG instanceBindFun lhs1 lhs2 of
+  = case tcUnifyTysFG (const BindMe) lhs1 lhs2 of
       SurelyApart -> True
       Unifiable subst
-        | Type.substTy subst rhs1 `eqType` Type.substTy subst rhs2
+        | Type.substTyAddInScope subst rhs1 `eqType`
+          Type.substTyAddInScope subst rhs2
         -> True
       _ -> False
 
@@ -573,15 +575,19 @@ injectiveBranches injectivity
 -- takes a CoAxiom with unknown branch incompatibilities and computes
 -- the compatibilities
 -- See Note [Storing compatibility] in CoAxiom
-computeAxiomIncomps :: CoAxiom br -> CoAxiom br
-computeAxiomIncomps ax@(CoAxiom { co_ax_branches = branches })
-  = ax { co_ax_branches = mapAccumBranches go branches }
+computeAxiomIncomps :: [CoAxBranch] -> [CoAxBranch]
+computeAxiomIncomps branches
+  = snd (mapAccumL go [] branches)
   where
-    go :: [CoAxBranch] -> CoAxBranch -> CoAxBranch
-    go prev_branches br = br { cab_incomps = mk_incomps br prev_branches }
+    go :: [CoAxBranch] -> CoAxBranch -> ([CoAxBranch], CoAxBranch)
+    go prev_brs cur_br
+       = (cur_br : prev_brs, new_br)
+       where
+         new_br = cur_br { cab_incomps = mk_incomps prev_brs cur_br }
 
-    mk_incomps :: CoAxBranch -> [CoAxBranch] -> [CoAxBranch]
-    mk_incomps br = filter (not . compatibleBranches br)
+    mk_incomps :: [CoAxBranch] -> CoAxBranch -> [CoAxBranch]
+    mk_incomps prev_brs cur_br
+       = filter (not . compatibleBranches cur_br) prev_brs
 
 {-
 ************************************************************************
@@ -589,6 +595,8 @@ computeAxiomIncomps ax@(CoAxiom { co_ax_branches = branches })
            Constructing axioms
     These functions are here because tidyType / tcUnifyTysFG
     are not available in CoAxiom
+
+    Also computeAxiomIncomps is too sophisticated for CoAxiom
 *                                                                      *
 ************************************************************************
 
@@ -604,13 +612,14 @@ mkCoAxBranch :: [TyVar] -- original, possibly stale, tyvars
              -> [CoVar] -- possibly stale covars
              -> [Type]  -- LHS patterns
              -> Type    -- RHS
+             -> [Role]
              -> SrcSpan
              -> CoAxBranch
-mkCoAxBranch tvs cvs lhs rhs loc
+mkCoAxBranch tvs cvs lhs rhs roles loc
   = CoAxBranch { cab_tvs     = tvs1
                , cab_cvs     = cvs1
                , cab_lhs     = tidyTypes env lhs
-               , cab_roles   = map (const Nominal) tvs1
+               , cab_roles   = roles
                , cab_rhs     = tidyType  env rhs
                , cab_loc     = loc
                , cab_incomps = placeHolderIncomps }
@@ -623,13 +632,12 @@ mkCoAxBranch tvs cvs lhs rhs loc
 -- Coercion
 mkBranchedCoAxiom :: Name -> TyCon -> [CoAxBranch] -> CoAxiom Branched
 mkBranchedCoAxiom ax_name fam_tc branches
-  = computeAxiomIncomps $
-    CoAxiom { co_ax_unique   = nameUnique ax_name
+  = CoAxiom { co_ax_unique   = nameUnique ax_name
             , co_ax_name     = ax_name
             , co_ax_tc       = fam_tc
             , co_ax_role     = Nominal
             , co_ax_implicit = False
-            , co_ax_branches = manyBranches branches }
+            , co_ax_branches = manyBranches (computeAxiomIncomps branches) }
 
 mkUnbranchedCoAxiom :: Name -> TyCon -> CoAxBranch -> CoAxiom Unbranched
 mkUnbranchedCoAxiom ax_name fam_tc branch
@@ -654,7 +662,26 @@ mkSingleCoAxiom role ax_name tvs cvs fam_tc lhs_tys rhs_ty
             , co_ax_implicit = False
             , co_ax_branches = unbranched (branch { cab_incomps = [] }) }
   where
-    branch = mkCoAxBranch tvs cvs lhs_tys rhs_ty (getSrcSpan ax_name)
+    branch = mkCoAxBranch tvs cvs lhs_tys rhs_ty
+                          (map (const Nominal) tvs)
+                          (getSrcSpan ax_name)
+
+-- | Create a coercion constructor (axiom) suitable for the given
+--   newtype 'TyCon'. The 'Name' should be that of a new coercion
+--   'CoAxiom', the 'TyVar's the arguments expected by the @newtype@ and
+--   the type the appropriate right hand side of the @newtype@, with
+--   the free variables a subset of those 'TyVar's.
+mkNewTypeCoAxiom :: Name -> TyCon -> [TyVar] -> [Role] -> Type -> CoAxiom Unbranched
+mkNewTypeCoAxiom name tycon tvs roles rhs_ty
+  = CoAxiom { co_ax_unique   = nameUnique name
+            , co_ax_name     = name
+            , co_ax_implicit = True  -- See Note [Implicit axioms] in TyCon
+            , co_ax_role     = Representational
+            , co_ax_tc       = tycon
+            , co_ax_branches = unbranched (branch { cab_incomps = [] }) }
+  where
+    branch = mkCoAxBranch tvs [] (mkTyVarTys tvs) rhs_ty
+                          roles (getSrcSpan name)
 
 {-
 ************************************************************************
@@ -693,13 +720,13 @@ instance Outputable FamInstMatch where
   ppr (FamInstMatch { fim_instance = inst
                     , fim_tys      = tys
                     , fim_cos      = cos })
-    = ptext (sLit "match with") <+> parens (ppr inst) <+> ppr tys <+> ppr cos
+    = text "match with" <+> parens (ppr inst) <+> ppr tys <+> ppr cos
 
 lookupFamInstEnvByTyCon :: FamInstEnvs -> TyCon -> [FamInst]
 lookupFamInstEnvByTyCon (pkg_ie, home_ie) fam_tc
   = get pkg_ie ++ get home_ie
   where
-    get ie = case lookupUFM ie fam_tc of
+    get ie = case lookupUDFM ie fam_tc of
                Nothing          -> []
                Just (FamIE fis) -> fis
 
@@ -712,7 +739,7 @@ lookupFamInstEnv
 lookupFamInstEnv
    = lookup_fam_inst_env match
    where
-     match _ tpl_tvs tpl_tys tys = tcMatchTys tpl_tvs tpl_tys tys
+     match _ _ tpl_tys tys = tcMatchTys tpl_tys tys
 
 lookupFamInstEnvConflicts
     :: FamInstEnvs
@@ -862,7 +889,7 @@ lookupFamInstEnvInjectivityConflicts injList (pkg_ie, home_ie)
           | otherwise = True
 
       lookup_inj_fam_conflicts ie
-          | isOpenFamilyTyCon fam, Just (FamIE insts) <- lookupUFM ie fam
+          | isOpenFamilyTyCon fam, Just (FamIE insts) <- lookupUDFM ie fam
           = map (coAxiomSingleBranch . fi_axiom) $
             filter isInjConflict insts
           | otherwise = []
@@ -902,7 +929,7 @@ lookup_fam_inst_env'          -- The worker, local to this module
     -> [FamInstMatch]
 lookup_fam_inst_env' match_fun ie fam match_tys
   | isOpenFamilyTyCon fam
-  , Just (FamIE insts) <- lookupUFM ie fam
+  , Just (FamIE insts) <- lookupUDFM ie fam
   = find insts    -- The common case
   | otherwise = []
   where
@@ -1000,8 +1027,8 @@ isDominatedBy branch branches
   = or $ map match branches
     where
       lhs = coAxBranchLHS branch
-      match (CoAxBranch { cab_tvs = tvs, cab_lhs = tys })
-        = isJust $ tcMatchTys (mkVarSet tvs) tys lhs
+      match (CoAxBranch { cab_lhs = tys })
+        = isJust $ tcMatchTys tys lhs
 
 {-
 ************************************************************************
@@ -1091,7 +1118,7 @@ findBranch branches target_tys
                             map (tyCoVarsOfTypes . coAxBranchLHS) incomps)
             -- See Note [Flattening] below
             flattened_target = flattenTys in_scope target_tys
-        in case tcMatchTys (mkVarSet (tpl_tvs ++ tpl_cvs)) tpl_lhs target_tys of
+        in case tcMatchTys tpl_lhs target_tys of
         Just subst -- matching worked. now, check for apartness.
           |  apartnessCheck flattened_target branch
           -> -- matching worked & we're apart from all incompatible branches.
@@ -1118,7 +1145,7 @@ apartnessCheck :: [Type]     -- ^ /flattened/ target arguments. Make sure
                -> Bool       -- ^ True <=> equation can fire
 apartnessCheck flattened_target (CoAxBranch { cab_incomps = incomps })
   = all (isSurelyApart
-         . tcUnifyTysFG instanceBindFun flattened_target
+         . tcUnifyTysFG (const BindMe) flattened_target
          . coAxBranchLHS) incomps
   where
     isSurelyApart SurelyApart = True
@@ -1195,7 +1222,7 @@ topNormaliseType_maybe :: FamInstEnvs -> Type -> Maybe (Coercion, Type)
 -- Its a bit like Type.repType, but handles type families too
 
 topNormaliseType_maybe env ty
-  = topNormaliseTypeX_maybe stepper ty
+  = topNormaliseTypeX stepper mkTransCo ty
   where
     stepper = unwrapNewTypeStepper `composeSteppers` tyFamStepper
 
@@ -1225,7 +1252,7 @@ normalise_tc_app tc tys
        ; case expandSynTyCon_maybe tc ntys of
          { Just (tenv, rhs, ntys') ->
            do { (co2, ninst_rhs)
-                  <- normalise_type (substTy (mkTopTCvSubst tenv) rhs)
+                  <- normalise_type (substTy (mkTvSubstPrs tenv) rhs)
               ; return $
                 if isReflCo co2
                 then (args_co,                 mkTyConApp tc ntys)
@@ -1292,16 +1319,16 @@ normalise_type
       = do { (co,  nty1) <- go ty1
            ; (arg, nty2) <- withRole Nominal $ go ty2
            ; return (mkAppCo co arg, mkAppTy nty1 nty2) }
-    go (ForAllTy (Anon ty1) ty2)
+    go (FunTy ty1 ty2)
       = do { (co1, nty1) <- go ty1
            ; (co2, nty2) <- go ty2
            ; r <- getRole
            ; return (mkFunCo r co1 co2, mkFunTy nty1 nty2) }
-    go (ForAllTy (Named tyvar vis) ty)
+    go (ForAllTy (TvBndr tyvar vis) ty)
       = do { (lc', tv', h, ki') <- normalise_tyvar_bndr tyvar
            ; (co, nty)          <- withLC lc' $ normalise_type ty
            ; let tv2 = setTyVarKind tv' ki'
-           ; return (mkForAllCo tv' h co, mkNamedForAllTy tv2 vis nty) }
+           ; return (mkForAllCo tv' h co, ForAllTy (TvBndr tv2 vis) nty) }
     go (TyVarTy tv)    = normalise_tyvar tv
     go (CastTy ty co)
       = do { (nco, nty) <- go ty
@@ -1364,7 +1391,6 @@ withLC :: LiftingContext -> NormM a -> NormM a
 withLC lc thing = NormM $ \ envs _old_lc r -> runNormM thing envs lc r
 
 instance Monad NormM where
-  return     = pure
   ma >>= fmb = NormM $ \env lc r ->
                let a = runNormM ma env lc r in
                runNormM (fmb a) env lc r
@@ -1416,15 +1442,12 @@ flattenTys is defined here because of module dependencies.
 -}
 
 data FlattenEnv = FlattenEnv { fe_type_map :: TypeMap TyVar
-                             , fe_in_scope :: InScopeSet
                              , fe_subst    :: TCvSubst }
 
 emptyFlattenEnv :: InScopeSet -> FlattenEnv
 emptyFlattenEnv in_scope
   = FlattenEnv { fe_type_map = emptyTypeMap
-               , fe_in_scope = in_scope
-               , fe_subst    = mkTCvSubst in_scope ( emptyTvSubstEnv
-                                                   , emptyCvSubstEnv ) }
+               , fe_subst    = mkEmptyTCvSubst in_scope }
 
 -- See Note [Flattening]
 flattenTys :: InScopeSet -> [Type] -> [Type]
@@ -1466,14 +1489,14 @@ coreFlattenTy = go
       = let (env', tys') = coreFlattenTys env tys in
         (env', mkTyConApp tc tys')
 
-    go env (ForAllTy (Anon ty1) ty2) = let (env1, ty1') = go env  ty1
-                                           (env2, ty2') = go env1 ty2 in
-                                       (env2, mkFunTy ty1' ty2')
+    go env (FunTy ty1 ty2) = let (env1, ty1') = go env  ty1
+                                 (env2, ty2') = go env1 ty2 in
+                             (env2, mkFunTy ty1' ty2')
 
-    go env (ForAllTy (Named tv vis) ty)
+    go env (ForAllTy (TvBndr tv vis) ty)
       = let (env1, tv') = coreFlattenVarBndr env tv
             (env2, ty') = go env1 ty in
-        (env2, mkNamedForAllTy tv' vis ty')
+        (env2, ForAllTy (TvBndr tv' vis) ty')
 
     go env ty@(LitTy {}) = (env, ty)
 
@@ -1492,28 +1515,27 @@ coreFlattenCo env co
   where
     (env1, kind') = coreFlattenTy env (coercionType co)
     fresh_name    = mkFlattenFreshCoName
-    in_scope      = fe_in_scope env1
-    covar         = uniqAway in_scope $ mkCoVar fresh_name kind'
-    env2          = env1 { fe_in_scope = in_scope `extendInScopeSet` covar }
+    subst1        = fe_subst env1
+    in_scope      = getTCvInScope subst1
+    covar         = uniqAway in_scope (mkCoVar fresh_name kind')
+    env2          = env1 { fe_subst = subst1 `extendTCvInScope` covar }
 
 coreFlattenVarBndr :: FlattenEnv -> TyVar -> (FlattenEnv, TyVar)
 coreFlattenVarBndr env tv
   | kind' `eqType` kind
-  = ( env { fe_subst = extendTCvSubst old_subst tv (mkTyVarTy tv) }
+  = ( env { fe_subst = extendTvSubst old_subst tv (mkTyVarTy tv) }
              -- override any previous binding for tv
     , tv)
+
   | otherwise
-  = let new_tv    = uniqAway (fe_in_scope env) (setTyVarKind tv kind')
-        new_subst = extendTCvSubst old_subst tv (mkTyVarTy new_tv)
-        new_is    = extendInScopeSet old_in_scope new_tv
+  = let new_tv    = uniqAway (getTCvInScope old_subst) (setTyVarKind tv kind')
+        new_subst = extendTvSubstWithClone old_subst tv new_tv
     in
-    (env' { fe_in_scope = new_is
-          , fe_subst    = new_subst }, new_tv)
+    (env' { fe_subst = new_subst }, new_tv)
   where
     kind          = tyVarKind tv
     (env', kind') = coreFlattenTy env kind
     old_subst     = fe_subst env
-    old_in_scope  = fe_in_scope env
 
 coreFlattenTyFamApp :: FlattenEnv
                     -> TyCon         -- type family tycon
@@ -1528,14 +1550,14 @@ coreFlattenTyFamApp env fam_tc fam_args
               -- contains *all* tyvars, even locally bound ones elsewhere in the
               -- overall type, so this really is fresh.
       Nothing -> let tyvar_name = mkFlattenFreshTyName fam_tc
-                     tv = uniqAway in_scope $ mkTyVar tyvar_name
-                                                      (typeKind fam_ty)
+                     tv = uniqAway (getTCvInScope subst) $
+                          mkTyVar tyvar_name (typeKind fam_ty)
                      env' = env { fe_type_map = extendTypeMap type_map fam_ty tv
-                                , fe_in_scope = extendInScopeSet in_scope tv }
+                                , fe_subst = extendTCvInScope subst tv }
                  in (env', tv)
   where fam_ty   = mkTyConApp fam_tc fam_args
         FlattenEnv { fe_type_map = type_map
-                   , fe_in_scope = in_scope } = env
+                   , fe_subst = subst } = env
 
 -- | Get the set of all type variables mentioned anywhere in the list
 -- of types. These variables are not necessarily free.
@@ -1548,12 +1570,13 @@ allTyVarsInTy :: Type -> VarSet
 allTyVarsInTy = go
   where
     go (TyVarTy tv)      = unitVarSet tv
-    go (AppTy ty1 ty2)   = (go ty1) `unionVarSet` (go ty2)
     go (TyConApp _ tys)  = allTyVarsInTys tys
-    go (ForAllTy bndr ty) =
-      caseBinder bndr (\tv -> unitVarSet tv) (const emptyVarSet)
-      `unionVarSet` go (binderType bndr) `unionVarSet` go ty
-        -- don't remove the tv from the set!
+    go (AppTy ty1 ty2)   = (go ty1) `unionVarSet` (go ty2)
+    go (FunTy ty1 ty2)   = (go ty1) `unionVarSet` (go ty2)
+    go (ForAllTy (TvBndr tv _) ty) = unitVarSet tv     `unionVarSet`
+                                     go (tyVarKind tv) `unionVarSet`
+                                     go ty
+                                     -- Don't remove the tv from the set!
     go (LitTy {})        = emptyVarSet
     go (CastTy ty co)    = go ty `unionVarSet` go_co co
     go (CoercionTy co)   = go_co co

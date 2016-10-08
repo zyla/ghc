@@ -12,6 +12,7 @@
 {-# LANGUAGE ExplicitNamespaces     #-}
 {-# LANGUAGE MultiParamTypeClasses  #-}
 {-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE Trustworthy            #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -54,7 +55,7 @@ import Data.Type.Bool
 -- | Lifted, homogeneous equality. By lifted, we mean that it can be
 -- bogus (deferred type error). By homogeneous, the two types @a@
 -- and @b@ must have the same kind.
-class a ~~ b => (a :: k) ~ (b :: k) | a -> b, b -> a
+class a ~~ b => (a :: k) ~ (b :: k)
   -- See Note [The equality types story] in TysPrim
   -- NB: All this class does is to wrap its superclass, which is
   --     the "real", inhomogeneous equality; this is needed when
@@ -62,6 +63,11 @@ class a ~~ b => (a :: k) ~ (b :: k) | a -> b, b -> a
   -- NB: Not exported, as (~) is magical syntax. That's also why there's
   -- no fixity.
 
+  -- It's tempting to put functional dependencies on (~), but it's not
+  -- necessary because the functional-dependency coverage check looks
+  -- through superclasses, and (~#) is handled in that check.
+
+-- | @since 4.9.0.0
 instance {-# INCOHERENT #-} a ~~ b => a ~ b
   -- See Note [The equality types story] in TysPrim
   -- If we have a Wanted (t1 ~ t2), we want to immediately
@@ -117,18 +123,19 @@ deriving instance Eq   (a :~: b)
 deriving instance Show (a :~: b)
 deriving instance Ord  (a :~: b)
 
+-- | @since 4.7.0.0
 instance a ~ b => Read (a :~: b) where
   readsPrec d = readParen (d > 10) (\r -> [(Refl, s) | ("Refl",s) <- lex r ])
 
+-- | @since 4.7.0.0
 instance a ~ b => Enum (a :~: b) where
   toEnum 0 = Refl
   toEnum _ = errorWithoutStackTrace "Data.Type.Equality.toEnum: bad argument"
 
   fromEnum Refl = 0
 
-instance a ~ b => Bounded (a :~: b) where
-  minBound = Refl
-  maxBound = Refl
+-- | @since 4.7.0.0
+deriving instance a ~ b => Bounded (a :~: b)
 
 -- | This class contains types where you can learn the equality of two types
 -- from information contained in /terms/. Typically, only singleton types should
@@ -137,6 +144,7 @@ class TestEquality f where
   -- | Conditionally prove the equality of @a@ and @b@.
   testEquality :: f a -> f b -> Maybe (a :~: b)
 
+-- | @since 4.7.0.0
 instance TestEquality ((:~:) a) where
   testEquality Refl Refl = Just Refl
 
@@ -205,37 +213,37 @@ families.
 
 -- all of the following closed type families are local to this module
 type family EqStar (a :: *) (b :: *) where
-  EqStar _a _a = 'True
-  EqStar _a _b = 'False
+  EqStar a a = 'True
+  EqStar a b = 'False
 
 -- This looks dangerous, but it isn't. This allows == to be defined
 -- over arbitrary type constructors.
 type family EqArrow (a :: k1 -> k2) (b :: k1 -> k2) where
-  EqArrow _a _a = 'True
-  EqArrow _a _b = 'False
+  EqArrow a a = 'True
+  EqArrow a b = 'False
 
 type family EqBool a b where
   EqBool 'True  'True  = 'True
   EqBool 'False 'False = 'True
-  EqBool _a     _b     = 'False
+  EqBool a      b      = 'False
 
 type family EqOrdering a b where
   EqOrdering 'LT 'LT = 'True
   EqOrdering 'EQ 'EQ = 'True
   EqOrdering 'GT 'GT = 'True
-  EqOrdering _a  _b  = 'False
+  EqOrdering a   b   = 'False
 
 type EqUnit (a :: ()) (b :: ()) = 'True
 
 type family EqList a b where
   EqList '[]        '[]        = 'True
   EqList (h1 ': t1) (h2 ': t2) = (h1 == h2) && (t1 == t2)
-  EqList _a         _b         = 'False
+  EqList a          b          = 'False
 
 type family EqMaybe a b where
   EqMaybe 'Nothing   'Nothing  = 'True
   EqMaybe ('Just x) ('Just y)  = x == y
-  EqMaybe _a        _b         = 'False
+  EqMaybe a         b          = 'False
 
 type family Eq2 a b where
   Eq2 '(a1, b1) '(a2, b2) = a1 == a2 && b1 == b2

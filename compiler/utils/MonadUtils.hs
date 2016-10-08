@@ -1,6 +1,7 @@
+{-# LANGUAGE CPP #-}
 
 -- | Utilities related to Monad and Applicative classes
---   Mostly for backwards compatability.
+--   Mostly for backwards compatibility.
 
 module MonadUtils
         ( Applicative(..)
@@ -21,7 +22,7 @@ module MonadUtils
         , anyM, allM, orM
         , foldlM, foldlM_, foldrM
         , maybeMapM
-        , whenM
+        , whenM, unlessM
         ) where
 
 -------------------------------------------------------------------------------
@@ -30,11 +31,12 @@ module MonadUtils
 
 import Maybes
 
-import Control.Applicative
 import Control.Monad
 import Control.Monad.Fix
 import Control.Monad.IO.Class
-import Prelude -- avoid redundant import warning due to AMP
+#if __GLASGOW_HASKELL__ < 800
+import Control.Monad.Trans.Error () -- for orphan `instance MonadPlus IO`
+#endif
 
 -------------------------------------------------------------------------------
 -- Lift combinators
@@ -91,7 +93,7 @@ zipWith4M f (x:xs) (y:ys) (z:zs) (a:as)
 
 zipWithAndUnzipM :: Monad m
                  => (a -> b -> m (c, d)) -> [a] -> [b] -> m ([c], [d])
-{-# INLINE zipWithAndUnzipM #-}
+{-# INLINABLE zipWithAndUnzipM #-}
 -- See Note [flatten_many performance] in TcFlatten for why this
 -- pragma is essential.
 zipWithAndUnzipM f (x:xs) (y:ys)
@@ -124,7 +126,7 @@ mapAndUnzip5M f (x:xs) = do
 
 -- | Monadic version of mapAccumL
 mapAccumLM :: Monad m
-            => (acc -> x -> m (acc, y)) -- ^ combining funcction
+            => (acc -> x -> m (acc, y)) -- ^ combining function
             -> acc                      -- ^ initial state
             -> [x]                      -- ^ inputs
             -> m (acc, [y])             -- ^ final state, outputs
@@ -195,3 +197,8 @@ maybeMapM m (Just x) = liftM Just $ m x
 whenM :: Monad m => m Bool -> m () -> m ()
 whenM mb thing = do { b <- mb
                     ; when b thing }
+
+-- | Monadic version of @unless@, taking the condition in the monad
+unlessM :: Monad m => m Bool -> m () -> m ()
+unlessM condM acc = do { cond <- condM
+                       ; unless cond acc }

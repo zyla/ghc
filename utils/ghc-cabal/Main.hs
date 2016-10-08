@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
 
 module Main (main) where
 
@@ -149,7 +150,7 @@ doCopy directory distDir
     where
       noGhcPrimHook f pd lbi us flags
               = let pd'
-                     | packageName pd == PackageName "ghc-prim" =
+                     | packageName pd == mkPackageName "ghc-prim" =
                         case library pd of
                         Just lib ->
                             let ghcPrim = fromJust (simpleParse "GHC.Prim")
@@ -227,12 +228,7 @@ doRegister directory distDir ghc ghcpkg topdir
             progs' <- configurePrograms [ghcProgram', ghcPkgProgram'] progs
             instInfos <- dump (hcPkgInfo progs') verbosity GlobalPackageDB
             let installedPkgs' = PackageIndex.fromList instInfos
-            let updateComponentConfig (cn, clbi, deps)
-                    = (cn, updateComponentLocalBuildInfo clbi, deps)
-                updateComponentLocalBuildInfo clbi = clbi -- TODO: remove
-                ccs' = map updateComponentConfig (componentsConfigs lbi)
-                lbi' = lbi {
-                               componentsConfigs = ccs',
+            let lbi' = lbi {
                                installedPkgs = installedPkgs',
                                installDirTemplates = idts,
                                withPrograms = progs'
@@ -308,17 +304,18 @@ generate directory distdir dll0Modules config_args
       let pd = updatePackageDescription hooked_bi pd0
 
       -- generate Paths_<pkg>.hs and cabal-macros.h
-      writeAutogenFiles verbosity pd lbi
+      withAllComponentsInBuildOrder pd lbi $ \_ clbi ->
+        writeAutogenFiles verbosity pd lbi clbi
 
       -- generate inplace-pkg-config
       withLibLBI pd lbi $ \lib clbi ->
           do cwd <- getCurrentDirectory
-             let ipid = ComponentId (display (packageId pd))
+             let ipid = mkUnitId (display (packageId pd))
              let installedPkgInfo = inplaceInstalledPackageInfo cwd distdir
-                                        pd (Installed.AbiHash "") lib lbi clbi
+                                        pd (mkAbiHash "") lib lbi clbi
                  final_ipi = mangleIPI directory distdir lbi $ installedPkgInfo {
-                                 Installed.installedComponentId = ipid,
-                                 Installed.compatPackageKey = ipid,
+                                 Installed.installedUnitId = ipid,
+                                 Installed.compatPackageKey = display (packageId pd),
                                  Installed.haddockHTMLs = []
                              }
                  content = Installed.showInstalledPackageInfo final_ipi ++ "\n"
@@ -328,7 +325,7 @@ generate directory distdir dll0Modules config_args
           comp = compiler lbi
           libBiModules lib = (libBuildInfo lib, libModules lib)
           exeBiModules exe = (buildInfo exe, ModuleName.main : exeModules exe)
-          biModuless = (maybeToList $ fmap libBiModules $ library pd)
+          biModuless = (map libBiModules . maybeToList $ library pd)
                     ++ (map exeBiModules $ executables pd)
           buildableBiModuless = filter isBuildable biModuless
               where isBuildable (bi', _) = buildable bi'
@@ -353,7 +350,7 @@ generate directory distdir dll0Modules config_args
           -- stricter than gnu ld). Thus we remove the ldOptions for
           -- GHC's rts package:
           hackRtsPackage index =
-            case PackageIndex.lookupPackageName index (PackageName "rts") of
+            case PackageIndex.lookupPackageName index (mkPackageName "rts") of
               [(_,[rts])] ->
                  PackageIndex.insert rts{
                      Installed.ldOptions = [],
@@ -369,12 +366,12 @@ generate directory distdir dll0Modules config_args
           dep_ids  = map snd (externalPackageDeps lbi)
           deps     = map display dep_ids
           dep_direct = map (fromMaybe (error "ghc-cabal: dep_keys failed")
-                           . PackageIndex.lookupComponentId
+                           . PackageIndex.lookupUnitId
                                             (installedPkgs lbi)
                            . fst)
                        . externalPackageDeps
                        $ lbi
-          dep_ipids = map (display . Installed.installedComponentId) dep_direct
+          dep_ipids = map (display . Installed.installedUnitId) dep_direct
           depLibNames
             | packageKeySupported comp = dep_ipids
             | otherwise = deps
@@ -406,15 +403,16 @@ generate directory distdir dll0Modules config_args
           allMods = mods ++ otherMods
       let xs = [variablePrefix ++ "_VERSION = " ++ display (pkgVersion (package pd)),
                 -- TODO: move inside withLibLBI
-                variablePrefix ++ "_COMPONENT_ID = " ++ display (localCompatPackageKey lbi),
+                variablePrefix ++ "_COMPONENT_ID = " ++ localCompatPackageKey lbi,
                 variablePrefix ++ "_MODULES = " ++ unwords mods,
                 variablePrefix ++ "_HIDDEN_MODULES = " ++ unwords otherMods,
-                variablePrefix ++ "_SYNOPSIS =" ++ synopsis pd,
+                variablePrefix ++ "_SYNOPSIS =" ++ (unwords $ lines $ synopsis pd),
                 variablePrefix ++ "_HS_SRC_DIRS = " ++ unwords (hsSourceDirs bi),
                 variablePrefix ++ "_DEPS = " ++ unwords deps,
                 variablePrefix ++ "_DEP_IPIDS = " ++ unwords dep_ipids,
                 variablePrefix ++ "_DEP_NAMES = " ++ unwords depNames,
                 variablePrefix ++ "_DEP_COMPONENT_IDS = " ++ unwords depLibNames,
+                variablePrefix ++ "_TRANSITIVE_DEP_NAMES = " ++ unwords transitiveDepNames,
                 variablePrefix ++ "_TRANSITIVE_DEP_COMPONENT_IDS = " ++ unwords transitiveDepLibNames,
                 variablePrefix ++ "_INCLUDE_DIRS = " ++ unwords (includeDirs bi),
                 variablePrefix ++ "_INCLUDES = " ++ unwords (includes bi),

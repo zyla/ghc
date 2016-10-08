@@ -31,7 +31,7 @@ module CoreSyn (
 
         -- ** Simple 'Expr' access functions and predicates
         bindersOf, bindersOfBinds, rhssOfBind, rhssOfAlts,
-        collectBinders, collectTyAndValBinders,
+        collectBinders, collectTyBinders, collectTyAndValBinders,
         collectArgs, collectArgsTicks, flattenBinds,
 
         exprToType, exprToCoercion_maybe,
@@ -49,7 +49,7 @@ module CoreSyn (
         Unfolding(..),  UnfoldingGuidance(..), UnfoldingSource(..),
 
         -- ** Constructing 'Unfolding's
-        noUnfolding, evaldUnfolding, mkOtherCon,
+        noUnfolding, bootUnfolding, evaldUnfolding, mkOtherCon,
         unSaturatedOk, needSaturated, boringCxtOk, boringCxtNotOk,
 
         -- ** Predicates and deconstruction on 'Unfolding'
@@ -59,6 +59,7 @@ module CoreSyn (
         isExpandableUnfolding, isConLikeUnfolding, isCompulsoryUnfolding,
         isStableUnfolding, hasStableCoreUnfolding_maybe,
         isClosedUnfolding, hasSomeUnfolding,
+        isBootUnfolding,
         canUnfold, neverUnfoldGuidance, isStableSource,
 
         -- * Annotated expression data types
@@ -95,6 +96,7 @@ import Var
 import Type
 import Coercion
 import Name
+import NameSet
 import NameEnv( NameEnv, emptyNameEnv )
 import Literal
 import DataCon
@@ -102,9 +104,9 @@ import Module
 import TyCon
 import BasicTypes
 import DynFlags
-import FastString
 import Outputable
 import Util
+import UniqFM
 import SrcLoc     ( RealSrcSpan, containsSpan )
 import Binary
 
@@ -264,7 +266,7 @@ data Expr b
   | Tick  (Tickish Id) (Expr b)
   | Type  Type
   | Coercion Coercion
-  deriving (Data, Typeable)
+  deriving Data
 
 -- | Type synonym for expressions that occur in function argument positions.
 -- Only 'Arg' should contain a 'Type' at top level, general 'Expr' should not
@@ -291,7 +293,7 @@ data AltCon
                       -- See Note [Literal alternatives]
 
   | DEFAULT           -- ^ Trivial alternative: @case e of { _ -> ... }@
-   deriving (Eq, Ord, Data, Typeable)
+   deriving (Eq, Data)
 
 -- | Binding, used for top level bindings in a module and local bindings in a @let@.
 
@@ -299,7 +301,7 @@ data AltCon
 -- See Note [GHC Formalism] in coreSyn/CoreLint.hs
 data Bind b = NonRec b (Expr b)
             | Rec [(b, (Expr b))]
-  deriving (Data, Typeable)
+  deriving Data
 
 {-
 Note [Shadowing]
@@ -391,31 +393,32 @@ See #type_let#
 
 Note [Empty case alternatives]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The alternatives of a case expression should be exhaustive.
+The alternatives of a case expression should be exhaustive.  But
+this exhaustive list can be empty!
 
-A case expression can have empty alternatives if (and only if) the
-scrutinee is bound to raise an exception or diverge. When do we know
-this?  See Note [Bottoming expressions] in CoreUtils.
+* A case expression can have empty alternatives if (and only if) the
+  scrutinee is bound to raise an exception or diverge. When do we know
+  this?  See Note [Bottoming expressions] in CoreUtils.
 
-The possiblity of empty alternatives is one reason we need a type on
-the case expression: if the alternatives are empty we can't get the
-type from the alternatives!
+* The possiblity of empty alternatives is one reason we need a type on
+  the case expression: if the alternatives are empty we can't get the
+  type from the alternatives!
 
-In the case of empty types (see Note [Bottoming expressions]), say
-  data T
-we do NOT want to replace
-   case (x::T) of Bool {}   -->   error Bool "Inaccessible case"
-because x might raise an exception, and *that*'s what we want to see!
-(Trac #6067 is an example.) To preserve semantics we'd have to say
-   x `seq` error Bool "Inaccessible case"
- but the 'seq' is just a case, so we are back to square 1.  Or I suppose
-we could say
-   x |> UnsafeCoerce T Bool
-but that loses all trace of the fact that this originated with an empty
-set of alternatives.
+* In the case of empty types (see Note [Bottoming expressions]), say
+    data T
+  we do NOT want to replace
+    case (x::T) of Bool {}   -->   error Bool "Inaccessible case"
+  because x might raise an exception, and *that*'s what we want to see!
+  (Trac #6067 is an example.) To preserve semantics we'd have to say
+     x `seq` error Bool "Inaccessible case"
+  but the 'seq' is just a case, so we are back to square 1.  Or I suppose
+  we could say
+     x |> UnsafeCoerce T Bool
+  but that loses all trace of the fact that this originated with an empty
+  set of alternatives.
 
-We can use the empty-alternative construct to coerce error values from
-one type to another.  For example
+* We can use the empty-alternative construct to coerce error values from
+  one type to another.  For example
 
     f :: Int -> Int
     f n = error "urk"
@@ -423,14 +426,22 @@ one type to another.  For example
     g :: Int -> (# Char, Bool #)
     g x = case f x of { 0 -> ..., n -> ... }
 
-Then if we inline f in g's RHS we get
+  Then if we inline f in g's RHS we get
     case (error Int "urk") of (# Char, Bool #) { ... }
-and we can discard the alternatives since the scrutinee is bottom to give
+  and we can discard the alternatives since the scrutinee is bottom to give
     case (error Int "urk") of (# Char, Bool #) {}
 
-This is nicer than using an unsafe coerce between Int ~ (# Char,Bool #),
-if for no other reason that we don't need to instantiate the (~) at an
-unboxed type.
+  This is nicer than using an unsafe coerce between Int ~ (# Char,Bool #),
+  if for no other reason that we don't need to instantiate the (~) at an
+  unboxed type.
+
+* We treat a case expression with empty alternatives as trivial iff
+  its scrutinee is (see CoreUtils.exprIsTrivial).  This is actually
+  important; see Note [Empty case is trivial] in CoreUtils
+
+* An empty case is replaced by its scrutinee during the CoreToStg
+  conversion; remember STG is un-typed, so there is no need for
+  the empty case to do the type conversion.
 
 
 ************************************************************************
@@ -500,7 +511,7 @@ data Tickish id =
                                 --   (uses same names as CCs)
     }
 
-  deriving (Eq, Ord, Data, Typeable)
+  deriving (Eq, Ord, Data)
 
 -- | A "counting tick" (where tickishCounts is True) is one that
 -- counts evaluations in some way.  We cannot discard a counting tick,
@@ -721,7 +732,7 @@ data IsOrphan
   | NotOrphan OccName -- The OccName 'n' witnesses the instance's non-orphanhood
                       -- In that case, the instance is fingerprinted as part
                       -- of the definition of 'n's definition
-    deriving (Data, Typeable)
+    deriving Data
 
 -- | Returns true if 'IsOrphan' is orphan.
 isOrphan :: IsOrphan -> Bool
@@ -733,7 +744,7 @@ notOrphan :: IsOrphan -> Bool
 notOrphan NotOrphan{} = True
 notOrphan _ = False
 
-chooseOrphanAnchor :: [Name] -> IsOrphan
+chooseOrphanAnchor :: NameSet -> IsOrphan
 -- Something (rule, instance) is relate to all the Names in this
 -- list. Choose one of them to be an "anchor" for the orphan.  We make
 -- the choice deterministic to avoid gratuitious changes in the ABI
@@ -743,10 +754,11 @@ chooseOrphanAnchor :: [Name] -> IsOrphan
 -- NB: 'minimum' use Ord, and (Ord OccName) works lexicographically
 --
 chooseOrphanAnchor local_names
-  | null local_names = IsOrphan
-  | otherwise        = NotOrphan (minimum occs)
+  | isEmptyNameSet local_names = IsOrphan
+  | otherwise                  = NotOrphan (minimum occs)
   where
-    occs = map nameOccName local_names
+    occs = map nameOccName $ nonDetEltsUFM local_names
+    -- It's OK to use nonDetEltsUFM here, see comments above
 
 instance Binary IsOrphan where
     put_ bh IsOrphan = putByte bh 0
@@ -856,15 +868,16 @@ data CoreRule
                                         -- See Note [OccInfo in unfoldings and rules]
 
         -- Locality
-        ru_auto :: Bool,        -- ^ @True@  <=> this rule is auto-generated
-                                --   @False@ <=> generated at the users behest
-                                --   Main effect: reporting of orphan-hood
+        ru_auto :: Bool,   -- ^ @True@  <=> this rule is auto-generated
+                           --               (notably by Specialise or SpecConstr)
+                           --   @False@ <=> generated at the users behest
+                           -- See Note [Trimming auto-rules] in TidyPgm
+                           -- for the sole purpose of this field.
 
-        ru_origin :: !Module,    -- ^ 'Module' the rule was defined in, used
+        ru_origin :: !Module,   -- ^ 'Module' the rule was defined in, used
                                 -- to test if we should see an orphan rule.
 
-        ru_orphan :: !IsOrphan,
-                                -- ^ Whether or not the rule is an orphan.
+        ru_orphan :: !IsOrphan, -- ^ Whether or not the rule is an orphan.
 
         ru_local :: Bool        -- ^ @True@ iff the fn at the head of the rule is
                                 -- defined in the same module as the rule
@@ -963,7 +976,12 @@ The @Unfolding@ type is declared here to avoid numerous loops
 -- identifier would have if we substituted its definition in for the identifier.
 -- This type should be treated as abstract everywhere except in "CoreUnfold"
 data Unfolding
-  = NoUnfolding        -- ^ We have no information about the unfolding
+  = NoUnfolding        -- ^ We have no information about the unfolding.
+
+  | BootUnfolding      -- ^ We have no information about the unfolding, because
+                       -- this 'Id' came from an @hi-boot@ file.
+                       -- See Note [Inlining and hs-boot files] for what
+                       -- this is used for.
 
   | OtherCon [AltCon]  -- ^ It ain't one of these constructors.
                        -- @OtherCon xs@ also indicates that something has been evaluated
@@ -1148,6 +1166,11 @@ evaldUnfolding :: Unfolding
 noUnfolding    = NoUnfolding
 evaldUnfolding = OtherCon []
 
+-- | There is no known 'Unfolding', because this came from an
+-- hi-boot file.
+bootUnfolding :: Unfolding
+bootUnfolding = BootUnfolding
+
 mkOtherCon :: [AltCon] -> Unfolding
 mkOtherCon = OtherCon
 
@@ -1220,7 +1243,7 @@ expandUnfolding_maybe _                                                       = 
 
 hasStableCoreUnfolding_maybe :: Unfolding -> Maybe Bool
 -- Just True  <=> has stable inlining, very keen to inline (eg. INLINE pragma)
--- Just False <=> has stable inlining, open to inlining it (eg. INLINEABLE pragma)
+-- Just False <=> has stable inlining, open to inlining it (eg. INLINABLE pragma)
 -- Nothing    <=> not stable, or cannot inline it anyway
 hasStableCoreUnfolding_maybe (CoreUnfolding { uf_src = src, uf_guidance = guide })
    | isStableSource src
@@ -1248,8 +1271,13 @@ isClosedUnfolding _                  = True
 
 -- | Only returns False if there is no unfolding information available at all
 hasSomeUnfolding :: Unfolding -> Bool
-hasSomeUnfolding NoUnfolding = False
-hasSomeUnfolding _           = True
+hasSomeUnfolding NoUnfolding   = False
+hasSomeUnfolding BootUnfolding = False
+hasSomeUnfolding _             = True
+
+isBootUnfolding :: Unfolding -> Bool
+isBootUnfolding BootUnfolding = True
+isBootUnfolding _             = False
 
 neverUnfoldGuidance :: UnfoldingGuidance -> Bool
 neverUnfoldGuidance UnfNever = True
@@ -1318,7 +1346,7 @@ the occurrence info is wrong
 instance Outputable AltCon where
   ppr (DataAlt dc) = ppr dc
   ppr (LitAlt lit) = ppr lit
-  ppr DEFAULT      = ptext (sLit "__DEFAULT")
+  ppr DEFAULT      = text "__DEFAULT"
 
 cmpAlt :: (AltCon, a, b) -> (AltCon, a, b) -> Ordering
 cmpAlt (con1, _, _) (con2, _, _) = con1 `cmpAltCon` con2
@@ -1613,14 +1641,12 @@ flattenBinds (Rec prs1   : binds) = prs1 ++ flattenBinds binds
 flattenBinds []                   = []
 
 -- | We often want to strip off leading lambdas before getting down to
--- business. This function is your friend.
-collectBinders               :: Expr b -> ([b],         Expr b)
--- | Collect type and value binders from nested lambdas, stopping
--- right before any "forall"s within a non-forall. For example,
--- forall (a :: *) (b :: Foo ~ Bar) (c :: *). Baz -> forall (d :: *). Blob
--- will pull out the binders for a, b, c, and Baz, but not for d or anything
--- within Blob. This is to coordinate with tcSplitSigmaTy.
-collectTyAndValBinders       :: CoreExpr -> ([TyVar], [Id], CoreExpr)
+-- business. Variants are 'collectTyBinders', 'collectValBinders',
+-- and 'collectTyAndValBinders'
+collectBinders         :: Expr b   -> ([b],     Expr b)
+collectTyBinders       :: CoreExpr -> ([TyVar], CoreExpr)
+collectValBinders      :: CoreExpr -> ([Id],    CoreExpr)
+collectTyAndValBinders :: CoreExpr -> ([TyVar], [Id], CoreExpr)
 
 collectBinders expr
   = go [] expr
@@ -1628,16 +1654,23 @@ collectBinders expr
     go bs (Lam b e) = go (b:bs) e
     go bs e          = (reverse bs, e)
 
-collectTyAndValBinders expr
-  = go_forall [] [] expr
-  where go_forall tvs ids (Lam b e)
-          | isTyVar b       = go_forall (b:tvs) ids e
-          | isCoVar b       = go_forall tvs (b:ids) e
-        go_forall tvs ids e = go_fun tvs ids e
+collectTyBinders expr
+  = go [] expr
+  where
+    go tvs (Lam b e) | isTyVar b = go (b:tvs) e
+    go tvs e                     = (reverse tvs, e)
 
-        go_fun tvs ids (Lam b e)
-          | isId b          = go_fun tvs (b:ids) e
-        go_fun tvs ids e    = (reverse tvs, reverse ids, e)
+collectValBinders expr
+  = go [] expr
+  where
+    go ids (Lam b e) | isId b = go (b:ids) e
+    go ids body               = (reverse ids, body)
+
+collectTyAndValBinders expr
+  = (tvs, ids, body)
+  where
+    (tvs, body1) = collectTyBinders expr
+    (ids, body)  = collectValBinders body1
 
 -- | Takes a nested application expression and returns the the function
 -- being applied and the arguments to which it is applied

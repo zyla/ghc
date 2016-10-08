@@ -19,8 +19,8 @@ module StgCmmMonad (
 
         emit, emitDecl, emitProc,
         emitProcWithConvention, emitProcWithStackFrame,
-        emitOutOfLine, emitAssign, emitStore, emitComment,
-        emitTick, emitUnwind,
+        emitOutOfLine, emitAssign, emitStore,
+        emitComment, emitTick, emitUnwind,
 
         getCmm, aGraphToGraph,
         getCodeR, getCode, getCodeScoped, getHeapUsage,
@@ -77,7 +77,6 @@ import UniqSupply
 import FastString
 import Outputable
 
-import qualified Control.Applicative as A
 import Control.Monad
 import Data.List
 import Prelude hiding( sequence, succ )
@@ -117,17 +116,22 @@ newtype FCode a = FCode (CgInfoDownwards -> CgState -> (# a, CgState #))
 instance Functor FCode where
   fmap f (FCode g) = FCode $ \i s -> case g i s of (# a, s' #) -> (# f a, s' #)
 
-instance A.Applicative FCode where
+instance Applicative FCode where
       pure = returnFC
       (<*>) = ap
 
 instance Monad FCode where
         (>>=) = thenFC
-        return = A.pure
 
 {-# INLINE thenC #-}
 {-# INLINE thenFC #-}
 {-# INLINE returnFC #-}
+
+instance MonadUnique FCode where
+  getUniqueSupplyM = cgs_uniqs <$> getState
+  getUniqueM = FCode $ \_ st ->
+    let (u, us') = takeUniqFromSupply (cgs_uniqs st)
+    in (# u, st { cgs_uniqs = us' } #)
 
 initC :: IO CgState
 initC  = do { uniqs <- mkSplitUniqSupply 'c'
@@ -210,12 +214,11 @@ data CgIdInfo
 
 instance Outputable CgIdInfo where
   ppr (CgIdInfo { cg_id = id, cg_loc = loc })
-    = ppr id <+> ptext (sLit "-->") <+> ppr loc
+    = ppr id <+> text "-->" <+> ppr loc
 
 -- Sequel tells what to do with the result of this expression
 data Sequel
-  = Return Bool         -- Return result(s) to continuation found on the stack.
-                        -- True <=> the continuation is update code (???)
+  = Return              -- Return result(s) to continuation found on the stack.
 
   | AssignTo
         [LocalReg]      -- Put result(s) in these regs and fall through
@@ -228,8 +231,8 @@ data Sequel
                         -- allocating primOp)
 
 instance Outputable Sequel where
-    ppr (Return b) = ptext (sLit "Return") <+> ppr b
-    ppr (AssignTo regs b) = ptext (sLit "AssignTo") <+> ppr regs <+> ppr b
+    ppr Return = text "Return"
+    ppr (AssignTo regs b) = text "AssignTo" <+> ppr regs <+> ppr b
 
 -- See Note [sharing continuations] below
 data ReturnKind
@@ -315,7 +318,7 @@ initCgInfoDown dflags mod
                  , cgd_tick_scope= GlobalScope }
 
 initSequel :: Sequel
-initSequel = Return False
+initSequel = Return
 
 initUpdFrameOff :: DynFlags -> UpdFrameOffset
 initUpdFrameOff dflags = widthInBytes (wordWidth dflags) -- space for the RA
@@ -854,8 +857,8 @@ mkCmmIfThen e tbranch = do
                       , mkLabel tid tscp, tbranch, mkLabel endif tscp ]
 
 
-mkCall :: CmmExpr -> (Convention, Convention) -> [CmmFormal] -> [CmmActual]
-       -> UpdFrameOffset -> [CmmActual] -> FCode CmmAGraph
+mkCall :: CmmExpr -> (Convention, Convention) -> [CmmFormal] -> [CmmExpr]
+       -> UpdFrameOffset -> [CmmExpr] -> FCode CmmAGraph
 mkCall f (callConv, retConv) results actuals updfr_off extra_stack = do
   dflags <- getDynFlags
   k      <- newLabelC
@@ -865,7 +868,7 @@ mkCall f (callConv, retConv) results actuals updfr_off extra_stack = do
       copyout = mkCallReturnsTo dflags f callConv actuals k off updfr_off extra_stack
   return $ catAGraphs [copyout, mkLabel k tscp, copyin]
 
-mkCmmCall :: CmmExpr -> [CmmFormal] -> [CmmActual] -> UpdFrameOffset
+mkCmmCall :: CmmExpr -> [CmmFormal] -> [CmmExpr] -> UpdFrameOffset
           -> FCode CmmAGraph
 mkCmmCall f results actuals updfr_off
    = mkCall f (NativeDirectCall, NativeReturn) results actuals updfr_off []

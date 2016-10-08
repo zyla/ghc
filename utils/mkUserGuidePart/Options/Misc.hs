@@ -6,7 +6,7 @@ miscOptions :: [Flag]
 miscOptions =
   [ flag { flagName = "-jN"
          , flagDescription =
-           "When compiling with ``--make``, compile ⟨N⟩ modules in parallel."
+           "When compiling with :ghc-flag:`--make`, compile ⟨N⟩ modules in parallel."
          , flagType = DynamicFlag
          }
   , flag { flagName = "-fno-hi-version-check"
@@ -35,5 +35,12 @@ miscOptions =
            "source code line numbers."
          , flagType = DynamicFlag
          , flagReverse = "-fno-reverse-errors"
+         }
+  , flag { flagName = "-flocal-ghci-history"
+         , flagDescription =
+           "Use current directory for the GHCi command history "++
+           "file ``.ghci-history``."
+         , flagType = DynamicFlag
+         , flagReverse = "-fno-local-ghci-history"
          }
   ]

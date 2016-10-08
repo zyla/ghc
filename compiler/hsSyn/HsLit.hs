@@ -18,12 +18,12 @@ module HsLit where
 
 #include "HsVersions.h"
 
-import {-# SOURCE #-} HsExpr( SyntaxExpr, pprExpr )
+import {-# SOURCE #-} HsExpr( HsExpr, pprExpr )
 import BasicTypes ( FractionalLit(..),SourceText )
 import Type       ( Type )
 import Outputable
 import FastString
-import PlaceHolder ( PostTc,PostRn,DataId )
+import PlaceHolder ( PostTc,PostRn,DataId,OutputableBndrId )
 
 import Data.ByteString (ByteString)
 import Data.Data hiding ( Fixity )
@@ -38,26 +38,40 @@ import Data.Data hiding ( Fixity )
 
 -- Note [Literal source text] in BasicTypes for SourceText fields in
 -- the following
+-- | Haskell Literal
 data HsLit
-  = HsChar          SourceText Char        -- Character
-  | HsCharPrim      SourceText Char        -- Unboxed character
-  | HsString        SourceText FastString  -- String
-  | HsStringPrim    SourceText ByteString  -- Packed bytes
-  | HsInt           SourceText Integer     -- Genuinely an Int; arises from
-                                       --     TcGenDeriv, and from TRANSLATION
-  | HsIntPrim       SourceText Integer     -- literal Int#
-  | HsWordPrim      SourceText Integer     -- literal Word#
-  | HsInt64Prim     SourceText Integer     -- literal Int64#
-  | HsWord64Prim    SourceText Integer     -- literal Word64#
-  | HsInteger       SourceText Integer Type -- Genuinely an integer; arises only
-                                          --   from TRANSLATION (overloaded
-                                          --   literals are done with HsOverLit)
-  | HsRat           FractionalLit Type -- Genuinely a rational; arises only from
-                                       --   TRANSLATION (overloaded literals are
-                                       --   done with HsOverLit)
-  | HsFloatPrim     FractionalLit      -- Unboxed Float
-  | HsDoublePrim    FractionalLit      -- Unboxed Double
-  deriving (Data, Typeable)
+  = HsChar          SourceText Char
+      -- ^ Character
+  | HsCharPrim      SourceText Char
+      -- ^ Unboxed character
+  | HsString        SourceText FastString
+      -- ^ String
+  | HsStringPrim    SourceText ByteString
+      -- ^ Packed bytes
+  | HsInt           SourceText Integer
+      -- ^ Genuinely an Int; arises from
+      -- @TcGenDeriv@, and from TRANSLATION
+  | HsIntPrim       SourceText Integer
+      -- ^ literal @Int#@
+  | HsWordPrim      SourceText Integer
+      -- ^ literal @Word#@
+  | HsInt64Prim     SourceText Integer
+      -- ^ literal @Int64#@
+  | HsWord64Prim    SourceText Integer
+      -- ^ literal @Word64#@
+  | HsInteger       SourceText Integer Type
+      -- ^ Genuinely an integer; arises only
+      -- from TRANSLATION (overloaded
+      -- literals are done with HsOverLit)
+  | HsRat           FractionalLit Type
+      -- ^ Genuinely a rational; arises only from
+      -- TRANSLATION (overloaded literals are
+      -- done with HsOverLit)
+  | HsFloatPrim     FractionalLit
+      -- ^ Unboxed Float
+  | HsDoublePrim    FractionalLit
+      -- ^ Unboxed Double
+  deriving Data
 
 instance Eq HsLit where
   (HsChar _ x1)       == (HsChar _ x2)       = x1==x2
@@ -75,22 +89,23 @@ instance Eq HsLit where
   (HsDoublePrim x1)   == (HsDoublePrim x2)   = x1==x2
   _                   == _                   = False
 
-data HsOverLit id       -- An overloaded literal
+-- | Haskell Overloaded Literal
+data HsOverLit id
   = OverLit {
         ol_val :: OverLitVal,
         ol_rebindable :: PostRn id Bool, -- Note [ol_rebindable]
-        ol_witness :: SyntaxExpr id,     -- Note [Overloaded literal witnesses]
+        ol_witness :: HsExpr id,     -- Note [Overloaded literal witnesses]
         ol_type :: PostTc id Type }
-  deriving (Typeable)
 deriving instance (DataId id) => Data (HsOverLit id)
 
 -- Note [Literal source text] in BasicTypes for SourceText fields in
 -- the following
+-- | Overloaded Literal Value
 data OverLitVal
-  = HsIntegral   !SourceText !Integer    -- Integer-looking literals;
-  | HsFractional !FractionalLit          -- Frac-looking literals
-  | HsIsString   !SourceText !FastString -- String-looking literals
-  deriving (Data, Typeable)
+  = HsIntegral   !SourceText !Integer    -- ^ Integer-looking literals;
+  | HsFractional !FractionalLit          -- ^ Frac-looking literals
+  | HsIsString   !SourceText !FastString -- ^ String-looking literals
+  deriving Data
 
 overLitType :: HsOverLit a -> PostTc a Type
 overLitType = ol_type
@@ -111,7 +126,7 @@ Equivalently it's True if
 
 Note [Overloaded literal witnesses]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-*Before* type checking, the SyntaxExpr in an HsOverLit is the
+*Before* type checking, the HsExpr in an HsOverLit is the
 name of the coercion function, 'fromInteger' or 'fromRational'.
 *After* type checking, it is a witness for the literal, such as
         (fromInteger 3) or lit_78
@@ -166,7 +181,7 @@ instance Outputable HsLit where
     ppr (HsWord64Prim _ w) = pprPrimWord64 w
 
 -- in debug mode, print the expression that it's resolved to, too
-instance OutputableBndr id => Outputable (HsOverLit id) where
+instance (OutputableBndrId id) => Outputable (HsOverLit id) where
   ppr (OverLit {ol_val=val, ol_witness=witness})
         = ppr val <+> (ifPprDebug (parens (pprExpr witness)))
 

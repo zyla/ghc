@@ -34,12 +34,11 @@ import VarEnv
 import Var
 import Demand           ( argOneShots, argsOneShots )
 import Maybes           ( orElse )
-import Digraph          ( SCC(..), stronglyConnCompFromEdgedVerticesR )
+import Digraph          ( SCC(..), stronglyConnCompFromEdgedVerticesUniqR )
 import Unique
 import UniqFM
 import Util
 import Outputable
-import FastString
 import Data.List
 import Control.Arrow    ( second )
 
@@ -87,6 +86,7 @@ occurAnalysePgm this_mod active_rule imp_rules vects vectVars binds
     imp_rule_edges = foldr (plusVarEnv_C unionVarSet) emptyVarEnv
                             [ mapVarEnv (const maps_to) (exprFreeIds arg `delVarSetList` ru_bndrs imp_rule)
                             | imp_rule <- imp_rules
+                            , not (isBuiltinRule imp_rule)  -- See Note [Plugin rules]
                             , let maps_to = exprFreeIds (ru_rhs imp_rule)
                                              `delVarSetList` ru_bndrs imp_rule
                             , arg <- ru_args imp_rule ]
@@ -114,6 +114,19 @@ occurAnalyseExpr' enable_binder_swap expr
     env = (initOccEnv all_active_rules) {occ_binder_swap = enable_binder_swap}
     -- To be conservative, we say that all inlines and rules are active
     all_active_rules = \_ -> True
+
+{- Note [Plugin rules]
+~~~~~~~~~~~~~~~~~~~~~~
+Conal Elliott (Trac #11651) built a GHC plugin that added some
+BuiltinRules (for imported Ids) to the mg_rules field of ModGuts, to
+do some domain-specific transformations that could not be expressed
+with an ordinary pattern-matching CoreRule.  But then we can't extract
+the dependencies (in imp_rule_edges) from ru_rhs etc, because a
+BuiltinRule doesn't have any of that stuff.
+
+So we simply assume that BuiltinRules have no dependencies, and filter
+them out from the imp_rule_edges comprehension.
+-}
 
 {-
 ************************************************************************
@@ -180,10 +193,12 @@ occAnalRecBind env imp_rule_edges pairs body_usage
     bndr_set = mkVarSet (map fst pairs)
 
     sccs :: [SCC (Node Details)]
-    sccs = {-# SCC "occAnalBind.scc" #-} stronglyConnCompFromEdgedVerticesR nodes
+    sccs = {-# SCC "occAnalBind.scc" #-}
+      stronglyConnCompFromEdgedVerticesUniqR nodes
 
     nodes :: [Node Details]
-    nodes = {-# SCC "occAnalBind.assoc" #-} map (makeNode env imp_rule_edges bndr_set) pairs
+    nodes = {-# SCC "occAnalBind.assoc" #-}
+      map (makeNode env imp_rule_edges bndr_set) pairs
 
 {-
 Note [Dead code]
@@ -668,17 +683,20 @@ data Details
   }
 
 instance Outputable Details where
-   ppr nd = ptext (sLit "ND") <> braces
-             (sep [ ptext (sLit "bndr =") <+> ppr (nd_bndr nd)
-                  , ptext (sLit "uds =") <+> ppr (nd_uds nd)
-                  , ptext (sLit "inl =") <+> ppr (nd_inl nd)
-                  , ptext (sLit "weak =") <+> ppr (nd_weak nd)
-                  , ptext (sLit "rule =") <+> ppr (nd_active_rule_fvs nd)
+   ppr nd = text "ND" <> braces
+             (sep [ text "bndr =" <+> ppr (nd_bndr nd)
+                  , text "uds =" <+> ppr (nd_uds nd)
+                  , text "inl =" <+> ppr (nd_inl nd)
+                  , text "weak =" <+> ppr (nd_weak nd)
+                  , text "rule =" <+> ppr (nd_active_rule_fvs nd)
              ])
 
 makeNode :: OccEnv -> ImpRuleEdges -> VarSet -> (Var, CoreExpr) -> Node Details
 makeNode env imp_rule_edges bndr_set (bndr, rhs)
-  = (details, varUnique bndr, keysUFM node_fvs)
+  = (details, varUnique bndr, nonDetKeysUFM node_fvs)
+    -- It's OK to use nonDetKeysUFM here as stronglyConnCompFromEdgedVerticesR
+    -- is still deterministic with edges in nondeterministic order as
+    -- explained in Note [Deterministic SCC] in Digraph.
   where
     details = ND { nd_bndr = bndr
                  , nd_rhs  = rhs'
@@ -787,7 +805,11 @@ occAnalRec (CyclicSCC nodes) (body_uds, binds)
         -- See Note [Choosing loop breakers] for loop_breaker_edges
     loop_breaker_edges = map mk_node tagged_nodes
     mk_node (details@(ND { nd_inl = inl_fvs }), k, _)
-      = (details, k, keysUFM (extendFvs_ rule_fv_env inl_fvs))
+      = (details, k, nonDetKeysUFM (extendFvs_ rule_fv_env inl_fvs))
+        -- It's OK to use nonDetKeysUFM here as
+        -- stronglyConnCompFromEdgedVerticesR is still deterministic with edges
+        -- in nondeterministic order as explained in
+        -- Note [Deterministic SCC] in Digraph.
 
     ------------------------------------
     rule_fv_env :: IdEnv IdSet
@@ -843,7 +865,7 @@ loopBreakNodes :: Int
                -> [Binding]
 -- Return the bindings sorted into a plausible order, and marked with loop breakers.
 loopBreakNodes depth bndr_set weak_fvs nodes binds
-  = go (stronglyConnCompFromEdgedVerticesR nodes) binds
+  = go (stronglyConnCompFromEdgedVerticesUniqR nodes) binds
   where
     go []         binds = binds
     go (scc:sccs) binds = loop_break_scc scc (go sccs binds)
@@ -905,7 +927,7 @@ reOrderNodes depth bndr_set weak_fvs (node : nodes) binds
                               -- Note [DFuns should not be loop breakers]
 
         | Just be_very_keen <- hasStableCoreUnfolding_maybe (idUnfolding bndr)
-        = if be_very_keen then 6    -- Note [Loop breakers and INLINE/INLINEABLE pragmas]
+        = if be_very_keen then 6    -- Note [Loop breakers and INLINE/INLINABLE pragmas]
                           else 3
                -- Data structures are more important than INLINE pragmas
                -- so that dictionary/method recursion unravels
@@ -938,7 +960,7 @@ reOrderNodes depth bndr_set weak_fvs (node : nodes) binds
         | otherwise = 0
 
         -- Checking for a constructor application
-        -- Cheap and cheerful; the simplifer moves casts out of the way
+        -- Cheap and cheerful; the simplifier moves casts out of the way
         -- The lambda case is important to spot x = /\a. C (f a)
         -- which comes up when C is a dictionary constructor and
         -- f is a default method.
@@ -988,18 +1010,18 @@ The RULES stuff means that we can't choose $dm as a loop breaker
 opInt *and* opBool, and so on.  The number of loop breakders is
 linear in the number of instance declarations.
 
-Note [Loop breakers and INLINE/INLINEABLE pragmas]
+Note [Loop breakers and INLINE/INLINABLE pragmas]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Avoid choosing a function with an INLINE pramga as the loop breaker!
 If such a function is mutually-recursive with a non-INLINE thing,
 then the latter should be the loop-breaker.
 
-It's vital to distinguish between INLINE and INLINEABLE (the
+It's vital to distinguish between INLINE and INLINABLE (the
 Bool returned by hasStableCoreUnfolding_maybe).  If we start with
-   Rec { {-# INLINEABLE f #-}
+   Rec { {-# INLINABLE f #-}
          f x = ...f... }
 and then worker/wrapper it through strictness analysis, we'll get
-   Rec { {-# INLINEABLE $wf #-}
+   Rec { {-# INLINABLE $wf #-}
          $wf p q = let x = (p,q) in ...f...
 
          {-# INLINE f #-}
@@ -1091,12 +1113,13 @@ occAnalNonRecRhs :: OccEnv
 occAnalNonRecRhs env bndr rhs
   = occAnal rhs_env rhs
   where
-    -- See Note [Use one-shot info]
-    env1 = env { occ_one_shots = argOneShots OneShotLam dmd }
-
     -- See Note [Cascading inlines]
-    rhs_env | certainly_inline = env1
-            | otherwise        = rhsCtxt env1
+    env1 | certainly_inline = env
+         | otherwise        = rhsCtxt env
+
+    -- See Note [Use one-shot info]
+    rhs_env = env1 { occ_one_shots = argOneShots OneShotLam dmd }
+
 
     certainly_inline -- See Note [Cascading inlines]
       = case idOccInfo bndr of
@@ -1108,7 +1131,8 @@ occAnalNonRecRhs env bndr rhs
     not_stable = not (isStableUnfolding (idUnfolding bndr))
 
 addIdOccs :: UsageDetails -> VarSet -> UsageDetails
-addIdOccs usage id_set = foldVarSet addIdOcc usage id_set
+addIdOccs usage id_set = nonDetFoldUFM addIdOcc usage id_set
+  -- It's OK to use nonDetFoldUFM here because addIdOcc commutes
 
 addIdOcc :: Id -> UsageDetails -> UsageDetails
 addIdOcc v u | isId v    = addOneOcc u v NoOccInfo
@@ -1382,19 +1406,29 @@ markManyIf False uds = uds
 {-
 Note [Use one-shot information]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The occurrrence analyser propagates one-shot-lambda information in two situation
-  * Applications:  eg   build (\cn -> blah)
+The occurrrence analyser propagates one-shot-lambda information in two
+situations:
+
+  * Applications:  eg   build (\c n -> blah)
+
     Propagate one-shot info from the strictness signature of 'build' to
-    the \cn
+    the \c n.
+
+    This strictness signature can come from a module interface, in the case of
+    an imported function, or from a previous run of the demand analyser.
 
   * Let-bindings:  eg   let f = \c. let ... in \n -> blah
                         in (build f, build f)
+
     Propagate one-shot info from the demanand-info on 'f' to the
     lambdas in its RHS (which may not be syntactically at the top)
 
-Some of this is done by the demand analyser, but this way it happens
-much earlier, taking advantage of the strictness signature of
-imported functions.
+    This information must have come from a previous run of the demanand
+    analyser.
+
+Previously, the demand analyser would *also* set the one-shot information, but
+that code was buggy (see #11770), so doing it only in on place, namely here, is
+saner.
 
 Note [Binders in case alternatives]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1475,7 +1509,7 @@ type GlobalScruts = IdSet   -- See Note [Binder swap on GlobalId scrutinees]
 --      y = /\a -> (p a, q a)   -- Still don't inline p or q
 --      z = f (p,q)             -- Do inline p,q; it may make a rule fire
 -- So OccEncl tells enought about the context to know what to do when
--- we encounter a contructor application or PAP.
+-- we encounter a constructor application or PAP.
 
 data OccEncl
   = OccRhs              -- RHS of let(rec), albeit perhaps inside a type lambda
@@ -1484,8 +1518,8 @@ data OccEncl
                         -- Do inline into constructor args here
 
 instance Outputable OccEncl where
-  ppr OccRhs     = ptext (sLit "occRhs")
-  ppr OccVanilla = ptext (sLit "occVanilla")
+  ppr OccRhs     = text "occRhs"
+  ppr OccVanilla = text "occVanilla"
 
 type OneShots = [OneShotInfo]
         -- []           No info
@@ -1521,7 +1555,7 @@ oneShotGroup :: OccEnv -> [CoreBndr]
              -> ( OccEnv
                 , [CoreBndr] )
         -- The result binders have one-shot-ness set that they might not have had originally.
-        -- This happens in (build (\cn -> e)).  Here the occurrence analyser
+        -- This happens in (build (\c n -> e)).  Here the occurrence analyser
         -- linearity context knows that c,n are one-shot, and it records that fact in
         -- the binder. This is useful to guide subsequent float-in/float-out tranformations
 
@@ -1542,8 +1576,13 @@ oneShotGroup env@(OccEnv { occ_one_shots = ctxt }) bndrs
       = case ctxt of
           []                -> go []   bndrs (bndr : rev_bndrs)
           (one_shot : ctxt) -> go ctxt bndrs (bndr': rev_bndrs)
-                            where
-                               bndr' = updOneShotInfo bndr one_shot
+            where
+               bndr' = updOneShotInfo bndr one_shot
+               -- Use updOneShotInfo, not setOneShotInfo, as pre-existing
+               -- one-shot info might be better than what we can infer, e.g.
+               -- due to explicit use of the magic 'oneShot' function.
+               -- See Note [The oneShot function]
+
        | otherwise
       = go ctxt bndrs (bndr:rev_bndrs)
 
@@ -1558,7 +1597,9 @@ transClosureFV env
   | no_change = env
   | otherwise = transClosureFV (listToUFM new_fv_list)
   where
-    (no_change, new_fv_list) = mapAccumL bump True (ufmToList env)
+    (no_change, new_fv_list) = mapAccumL bump True (nonDetUFMToList env)
+      -- It's OK to use nonDetUFMToList here because we'll forget the
+      -- ordering by creating a new set with listToUFM
     bump no_change (b,fvs)
       | no_change_here = (no_change, (b,fvs))
       | otherwise      = (False,     (b,new_fvs))
@@ -1579,7 +1620,8 @@ extendFvs env s
   = (s `unionVarSet` extras, extras `subVarSet` s)
   where
     extras :: VarSet    -- env(s)
-    extras = foldUFM unionVarSet emptyVarSet $
+    extras = nonDetFoldUFM unionVarSet emptyVarSet $
+      -- It's OK to use nonDetFoldUFM here because unionVarSet commutes
              intersectUFM_C (\x _ -> x) env s
 
 {-

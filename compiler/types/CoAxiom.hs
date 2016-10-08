@@ -29,7 +29,7 @@ module CoAxiom (
        BuiltInSynFamily(..), trivialBuiltInFamily
        ) where
 
-import {-# SOURCE #-} TyCoRep ( Type )
+import {-# SOURCE #-} TyCoRep ( Type, pprType )
 import {-# SOURCE #-} TyCon ( TyCon )
 import Outputable
 import FastString
@@ -124,16 +124,13 @@ type BranchIndex = Int  -- The index of the branch in the list of branches
 -- promoted data type
 data BranchFlag = Branched | Unbranched
 type Branched = 'Branched
-deriving instance Typeable 'Branched
 type Unbranched = 'Unbranched
-deriving instance Typeable 'Unbranched
 -- By using type synonyms for the promoted constructors, we avoid needing
 -- DataKinds and the promotion quote in client modules. This also means that
 -- we don't need to export the term-level constructors, which should never be used.
 
 newtype Branches (br :: BranchFlag)
   = MkBranches { unMkBranches :: Array BranchIndex CoAxBranch }
-  deriving Typeable
 type role Branches nominal
 
 manyBranches :: [CoAxBranch] -> Branches Branched
@@ -206,16 +203,16 @@ of the branches.
 -- See Note [GHC Formalism] in coreSyn/CoreLint.hs
 data CoAxiom br
   = CoAxiom                   -- Type equality axiom.
-    { co_ax_unique   :: Unique        -- unique identifier
-    , co_ax_name     :: Name          -- name for pretty-printing
-    , co_ax_role     :: Role          -- role of the axiom's equality
-    , co_ax_tc       :: TyCon         -- the head of the LHS patterns
-    , co_ax_branches :: Branches br   -- the branches that form this axiom
+    { co_ax_unique   :: Unique        -- Unique identifier
+    , co_ax_name     :: Name          -- Name for pretty-printing
+    , co_ax_role     :: Role          -- Role of the axiom's equality
+    , co_ax_tc       :: TyCon         -- The head of the LHS patterns
+                                      -- e.g.  the newtype or family tycon
+    , co_ax_branches :: Branches br   -- The branches that form this axiom
     , co_ax_implicit :: Bool          -- True <=> the axiom is "implicit"
                                       -- See Note [Implicit axioms]
          -- INVARIANT: co_ax_implicit == True implies length co_ax_branches == 1.
     }
-  deriving Typeable
 
 data CoAxBranch
   = CoAxBranch
@@ -229,11 +226,12 @@ data CoAxBranch
                                     -- in TcTyClsDecls
     , cab_roles    :: [Role]        -- See Note [CoAxBranch roles]
     , cab_lhs      :: [Type]        -- Type patterns to match against
+                                    -- See Note [CoAxiom saturation]
     , cab_rhs      :: Type          -- Right-hand side of the equality
     , cab_incomps  :: [CoAxBranch]  -- The previous incompatible branches
                                     -- See Note [Storing compatibility]
     }
-  deriving ( Data.Data, Data.Typeable )
+  deriving Data.Data
 
 toBranchedAxiom :: CoAxiom br -> CoAxiom Branched
 toBranchedAxiom (CoAxiom unique name role tc branches implicit)
@@ -307,7 +305,10 @@ coAxBranchIncomps = cab_incomps
 placeHolderIncomps :: [CoAxBranch]
 placeHolderIncomps = panic "placeHolderIncomps"
 
-{-
+{- Note [CoAxiom saturation]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+* When co
+
 Note [CoAxBranch type variables]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In the case of a CoAxBranch of an associated type-family instance,
@@ -380,15 +381,8 @@ See also Note [Implicit TyThings] in HscTypes
 -}
 
 instance Eq (CoAxiom br) where
-    a == b = case (a `compare` b) of { EQ -> True;   _ -> False }
-    a /= b = case (a `compare` b) of { EQ -> False;  _ -> True  }
-
-instance Ord (CoAxiom br) where
-    a <= b = case (a `compare` b) of { LT -> True;  EQ -> True;  GT -> False }
-    a <  b = case (a `compare` b) of { LT -> True;  EQ -> False; GT -> False }
-    a >= b = case (a `compare` b) of { LT -> False; EQ -> True;  GT -> True  }
-    a >  b = case (a `compare` b) of { LT -> False; EQ -> False; GT -> True  }
-    compare a b = getUnique a `compare` getUnique b
+    a == b = getUnique a == getUnique b
+    a /= b = getUnique a /= getUnique b
 
 instance Uniquable (CoAxiom br) where
     getUnique = co_ax_unique
@@ -409,8 +403,9 @@ instance Outputable CoAxBranch where
   ppr (CoAxBranch { cab_loc = loc
                   , cab_lhs = lhs
                   , cab_rhs = rhs }) =
-    text "CoAxBranch" <+> parens (ppr loc) <> colon <+> ppr lhs <+>
-    text "=>" <+> ppr rhs
+    text "CoAxBranch" <+> parens (ppr loc) <> colon
+      <+> brackets (fsep (punctuate comma (map pprType lhs)))
+      <+> text "=>" <+> pprType rhs
 
 {-
 ************************************************************************
@@ -425,7 +420,7 @@ Roles are defined here to avoid circular dependencies.
 -- See Note [Roles] in Coercion
 -- defined here to avoid cyclic dependency with Coercion
 data Role = Nominal | Representational | Phantom
-  deriving (Eq, Ord, Data.Data, Data.Typeable)
+  deriving (Eq, Ord, Data.Data)
 
 -- These names are slurped into the parser code. Changing these strings
 -- will change the **surface syntax** that GHC accepts! If you want to
@@ -481,7 +476,7 @@ data CoAxiomRule = CoAxiomRule
         -- the supplied arguments.  When this happens in a coercion
         -- that means that the coercion is ill-formed, and Core Lint
         -- checks for that.
-  } deriving Typeable
+  }
 
 instance Data.Data CoAxiomRule where
   -- don't traverse?

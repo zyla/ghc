@@ -70,7 +70,7 @@ isAlive(StgClosure *p)
         return NULL;
     }
 
-    // check the mark bit for compacted steps
+    // check the mark bit for compacted generations
     if ((bd->flags & BF_MARKED) && is_marked((P_)q,bd)) {
         return p;
     }
@@ -88,7 +88,6 @@ isAlive(StgClosure *p)
 
     case IND:
     case IND_STATIC:
-    case IND_PERM:
       // follow indirections
       p = ((StgInd *)q)->indirectee;
       continue;

@@ -23,10 +23,12 @@ test('derefnull',
       # Apparently the output can be different on different
       # Linux setups, so just ignore it. As long as we get
       # the right exit code we're OK.
-      when(opsys('linux'), ignore_output),
+      when(opsys('linux'), ignore_stderr),
       # SIGBUS on OX X (PPC and x86 only; amd64 gives SEGV)
-      when(platform('i386-apple-darwin'), exit_code(138)),
-      when(platform('powerpc-apple-darwin'), exit_code(138)),
+      # The output under OS X is too unstable to readily compare
+      when(platform('i386-apple-darwin'), [ignore_stderr, exit_code(139)]),
+      when(platform('x86_64-apple-darwin'), [ignore_stderr, exit_code(139)]),
+      when(platform('powerpc-apple-darwin'), [ignore_stderr, exit_code(139)]),
       when(opsys('mingw32'), exit_code(1)),
       # since these test are supposed to crash the
       # profile report will be empty always.
@@ -39,7 +41,7 @@ test('divbyzero',
       # Apparently the output can be different on different
       # Linux setups, so just ignore it. As long as we get
       # the right exit code we're OK.
-      when(opsys('linux'), ignore_output),
+      when(opsys('linux'), ignore_stderr),
       # PowerPC 64 bit and most likely PowerPC 32 bit processors
       # do not generate an exception (interrupt) for integer
       # division by zero but the result is undefined.
@@ -47,6 +49,10 @@ test('divbyzero',
       when(platform('powerpc64-unknown-linux'), exit_code(0)),
       when(platform('powerpc64le-unknown-linux'), exit_code(0)),
       when(opsys('mingw32'), exit_code(1)),
+      # The output under OS X is too unstable to readily compare
+      when(platform('i386-apple-darwin'), [ignore_stderr, exit_code(136)]),
+      when(platform('x86_64-apple-darwin'), [ignore_stderr, exit_code(136)]),
+      when(platform('powerpc-apple-darwin'), [ignore_stderr, exit_code(136)]),
       # since these test are supposed to crash the
       # profile report will be empty always.
       # so disable the check for profiling
@@ -55,10 +61,9 @@ test('divbyzero',
 
 test('outofmem', when(opsys('darwin'), skip),
                  run_command, ['$MAKE -s --no-print-directory outofmem'])
-test('outofmem2', extra_run_opts('+RTS -M5m -RTS'),
-                  run_command, ['$MAKE -s --no-print-directory outofmem2'])
+test('outofmem2', normal, run_command, ['$MAKE -s --no-print-directory outofmem2'])
 
-test('T2047', [ignore_output, extra_run_opts('+RTS -c -RTS')],
+test('T2047', [ignore_stdout, extra_run_opts('+RTS -c -RTS')],
               compile_and_run, ['-package containers'])
 
 # Blackhole-detection test.
@@ -70,7 +75,7 @@ test('T2783', [ omit_ways(['ghci']), exit_code(1) ], compile_and_run, [''])
 test('testwsdeque', [unless(in_tree_compiler(), skip),
                     req_smp, # needs atomic 'cas'
                     c_src, only_ways(['threaded1', 'threaded2'])],
-                    compile_and_run, ['-I../../../rts'])
+                    compile_and_run, [''])
 
 test('T3236', [c_src, only_ways(['normal','threaded1']), exit_code(1)], compile_and_run, [''])
 
@@ -84,6 +89,8 @@ test('stack003', [ omit_ways('ghci'), # uses unboxed tuples
                  compile_and_run, [''])
 
 test('atomicinc', [ c_src, only_ways(['normal','threaded1', 'threaded2']) ], compile_and_run, [''])
+test('atomicxchg', [ c_src, only_ways(['threaded1', 'threaded2']) ],
+compile_and_run, [''])
 
 test('T3424', # it's slow:
               [ when(fast(), skip), only_ways(['normal','threaded1','ghci']) ],
@@ -172,8 +179,12 @@ def checkDynAsm(actual_file, normaliser):
 # These should have extra_clean() arguments, but I need
 # to somehow extract out the name of DLLs to do that
 
-test('T5435_v_asm', normal, run_command, ['$MAKE -s --no-print-directory T5435_v_asm'])
-test('T5435_v_gcc', normal, run_command, ['$MAKE -s --no-print-directory T5435_v_gcc'])
+test('T5435_v_asm', when(arch('powerpc64') or arch('powerpc64le'),
+     expect_broken(11259)), 
+     run_command, ['$MAKE -s --no-print-directory T5435_v_asm'])
+test('T5435_v_gcc', when(arch('powerpc64') or arch('powerpc64le'),
+     expect_broken(11259)),
+     run_command, ['$MAKE -s --no-print-directory T5435_v_gcc'])
 test('T5435_dyn_asm', check_stdout(checkDynAsm), run_command, ['$MAKE -s --no-print-directory T5435_dyn_asm'])
 test('T5435_dyn_gcc', normal , run_command, ['$MAKE -s --no-print-directory T5435_dyn_gcc'])
 
@@ -218,26 +229,28 @@ test('T7815', [ multi_cpu_race,
                 req_smp,
                 only_ways(['threaded1', 'threaded2']) ], compile_and_run, [''] )
 
-# ignore_output because it contains a unique:
+# ignore_stderr because it contains a unique:
 #   ffishutdown: Main_dul: interrupted
-test('ffishutdown', [ ignore_output, only_ways(['threaded1','threaded2']) ], compile_and_run, [''])
+test('ffishutdown', [ignore_stderr, only_ways(['threaded1','threaded2'])],
+     compile_and_run, [''])
 
-test('T7919', [extra_clean(['T7919A.o','T7919A.hi',
-                            'T7919A.dyn_o','T7919A.dyn_hi']),
-               when(fast(),skip) ],
-             compile_and_run, [config.ghc_th_way_flags])
+test('T7919',
+     [extra_clean(['T7919A.o','T7919A.hi', 'T7919A.dyn_o','T7919A.dyn_hi']),
+      when(fast(), skip), omit_ways(prof_ways)],
+     compile_and_run, [config.ghc_th_way_flags])
 
 test('T8035', normal, compile_and_run, [''])
 
 test('linker_unload',
-     [ extra_clean(['Test.o','Test.hi', 'linker_unload']) ],
+     [ when(arch('powerpc64') or arch('powerpc64le'), expect_broken(11259)),
+       extra_clean(['Test.o','Test.hi', 'linker_unload']) ],
      run_command,
      ['$MAKE -s --no-print-directory linker_unload'])
 
-test('T8209', [ only_ways(threaded_ways), ignore_output ],
+test('T8209', [ only_ways(threaded_ways), ignore_stdout ],
               compile_and_run, [''])
 
-test('T8242', [ only_ways(threaded_ways), ignore_output ],
+test('T8242', [ only_ways(threaded_ways), ignore_stdout ],
               compile_and_run, [''])
 
 test('T8124', [ only_ways(threaded_ways), omit_ways(['ghci']),
@@ -253,12 +266,14 @@ test('T8124', [ only_ways(threaded_ways), omit_ways(['ghci']),
 # The ghci way gets confused by the RTS options
 test('T9045', [ omit_ways(['ghci']), extra_run_opts('10000 +RTS -A8k -RTS') ], compile_and_run, [''])
 
-# I couldn't reproduce 9078 with the -threaded runtime, but could easily
-# with the non-threaded one.
-test('T9078', [ omit_ways(threaded_ways) ], compile_and_run, ['-with-rtsopts="-DS" -debug'])
+# T9078 needs to be compiled with -debug, which threaded1 does for us.
+# Assert failure is reproducible with ghc-7.8.2.
+test('T9078', only_ways(['threaded1']), compile_and_run, [''])
 
 test('T10017', [ when(opsys('mingw32'), skip)
                , only_ways(threaded_ways), extra_run_opts('+RTS -N2 -RTS') ], compile_and_run, [''])
+
+test('T11108', normal, compile_and_run, [''])
 
 test('rdynamic', [ unless(opsys('linux') or opsys('mingw32'), skip)
                  # this needs runtime infrastructure to do in ghci:
@@ -267,15 +282,9 @@ test('rdynamic', [ unless(opsys('linux') or opsys('mingw32'), skip)
                  ],
      compile_and_run, ['-rdynamic -package ghc'])
 
-test('GcStaticPointers',
-     [ when(compiler_lt('ghc', '7.9'), skip)
-     , when(doing_ghci(), extra_hc_opts('-fobject-code'))
-     ],
+test('GcStaticPointers', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
      compile_and_run, [''])
-test('ListStaticPointers',
-     [ when(compiler_lt('ghc', '7.9'), skip)
-     , when(doing_ghci(), extra_hc_opts('-fobject-code'))
-     ],
+test('ListStaticPointers', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
      compile_and_run, [''])
 
 # 251 = RTS exit code for "out of memory"
@@ -284,55 +293,86 @@ test('overflow2', [ exit_code(251) ], compile_and_run, [''])
 test('overflow3', [ exit_code(251) ], compile_and_run, [''])
 
 test('linker_error1',
-     [ extra_clean(['linker_error1.o','linker_error1']), ignore_output ],
+     [ extra_clean(['linker_error1.o','linker_error1']), ignore_stderr ],
      run_command,
      ['$MAKE -s --no-print-directory linker_error1'])
 
 test('linker_error2',
      [ extra_clean(['linker_error2.o','linker_error2_c.o', 'linker_error2']),
-       ignore_output ],
+       ignore_stderr ],
      run_command,
      ['$MAKE -s --no-print-directory linker_error2'])
 
 test('linker_error3',
      [ extra_clean(['linker_error3.o','linker_error3_c.o', 'linker_error3']),
-       ignore_output ],
+       ignore_stderr ],
      run_command,
      ['$MAKE -s --no-print-directory linker_error3'])
 
-test('T9839_01', [ no_stdin, ignore_output],
-                run_command,
-                ['{compiler} -e 1 +RTS -T-s 2>&1 | \
-                  grep "flag -T given an argument when none was expected: -T-s"'])
+def grep_stderr(pattern):
+    def wrapper(cmd, pattern=pattern):
+        swap12 = '3>&1 1>&2 2>&3 3>&-' # Swap file descriptors 1 and 2.
+        return('{cmd} {swap12} | grep "{pattern}" {swap12}'.format(**locals()))
+    return cmd_wrapper(wrapper)
 
-test('T9839_02', [ only_ways(prof_ways), ignore_output, exit_code(1), extra_run_opts('+RTS -Pax')],
-                compile_and_run,
-                [''])
+# The ghci way gets confused by the RTS options
+test('T9839_01',
+     [omit_ways(['ghci']), extra_run_opts('+RTS -T-s'), no_check_hp,
+      grep_stderr('given an argument when none was expected')],
+     compile_and_run, [''])
 
-test('T9839_03', [ only_ways(prof_ways), ignore_output, exit_code(1), extra_run_opts('+RTS -Px')],
-                compile_and_run,
-                [''])
+test('T9839_02',
+     [only_ways(prof_ways), extra_run_opts('+RTS -Pax'), no_check_hp,
+      grep_stderr('given an argument when none was expected')],
+     compile_and_run, [''])
 
-test('T9839_04', [ only_ways(prof_ways), ignore_output, exit_code(0), extra_run_opts('+RTS -xc')],
-                compile_and_run,
-                [''])
+test('T9839_03',
+     [only_ways(prof_ways), extra_run_opts('+RTS -Px'), no_check_hp,
+      grep_stderr('given an argument when none was expected')],
+     compile_and_run, [''])
 
-test('T9839_05', [ only_ways(prof_ways), ignore_output, exit_code(1), extra_run_opts('+RTS -xcx')],
-                compile_and_run,
-                [''])
+test('T9839_04',
+     [only_ways(prof_ways), extra_run_opts('+RTS -xc')],
+     compile_and_run, [''])
 
-test('T9839_06', [ only_ways(prof_ways), ignore_output, exit_code(1), extra_run_opts('+RTS -xtx')],
-                compile_and_run,
-                [''])
+test('T9839_05',
+     [only_ways(prof_ways), extra_run_opts('+RTS -xcx'), no_check_hp,
+      grep_stderr('given an argument when none was expected')],
+     compile_and_run, [''])
 
-# ignore_output as RTS reports slightly different error messages
+test('T9839_06',
+     [only_ways(prof_ways), extra_run_opts('+RTS -xtx'), no_check_hp,
+      grep_stderr('given an argument when none was expected')],
+     compile_and_run, [''])
+
+# ignore_stderr as RTS reports slightly different error messages
 # in 'epoll' and 'select' backends on reading from EBADF
 # mingw32 skip as UNIX pipe and close(fd) is used to exercise the problem
-test('T10590', [ignore_output, when(opsys('mingw32'),skip)], compile_and_run, [''])
+test('T10590', [ignore_stderr, when(opsys('mingw32'), skip)], compile_and_run, [''])
 
 # 20000 was easily enough to trigger the bug with 7.10
 test('T10904', [ omit_ways(['ghci']), extra_run_opts('20000') ],
                compile_and_run, ['T10904lib.c'])
 
-test('T10728', [extra_run_opts('+RTS -maxN3 -RTS'), req_smp],
-           compile_and_run, ['-threaded'])
+test('T10728', [extra_run_opts('+RTS -maxN3 -RTS'), only_ways(['threaded2'])],
+               compile_and_run, [''])
+
+test('T9405', [extra_clean(['T9405.ticky'])],
+              run_command, ['$MAKE -s --no-print-directory T9405'])
+
+test('T11788', when(ghc_dynamic(), skip),
+              run_command, ['$MAKE -s --no-print-directory T11788'])
+
+test('T10296a', [extra_clean(['T10296a.o','T10296a_c.o','T10296a'])],
+                run_command,
+                ['$MAKE -s --no-print-directory T10296a'])
+
+test('T10296b', [only_ways('threaded2')], compile_and_run, [''])
+
+test('numa001', [ extra_run_opts('8'), extra_ways(['debug_numa']) ]
+                , compile_and_run, [''])
+                
+test('T12497', [ unless(opsys('mingw32'), skip)
+               ],
+               run_command, ['$MAKE -s --no-print-directory T12497'])
+

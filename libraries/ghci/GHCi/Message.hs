@@ -2,21 +2,33 @@
     GeneralizedNewtypeDeriving, ExistentialQuantification, RecordWildCards #-}
 {-# OPTIONS_GHC -fno-warn-name-shadowing -fno-warn-orphans #-}
 
+-- |
+-- Remote GHCi message types and serialization.
+--
+-- For details on Remote GHCi, see Note [Remote GHCi] in
+-- compiler/ghci/GHCi.hs.
+--
 module GHCi.Message
   ( Message(..), Msg(..)
-  , EvalStatus(..), EvalResult(..), EvalOpts(..), EvalExpr(..)
+  , THMessage(..), THMsg(..)
+  , QResult(..)
+  , EvalStatus_(..), EvalStatus, EvalResult(..), EvalOpts(..), EvalExpr(..)
   , SerializableException(..)
   , THResult(..), THResultType(..)
-  , getMessage, putMessage
-  , Pipe(..), remoteCall, readPipe, writePipe
+  , ResumeContext(..)
+  , QState(..)
+  , getMessage, putMessage, getTHMessage, putTHMessage
+  , Pipe(..), remoteCall, remoteTHCall, readPipe, writePipe
   ) where
 
 import GHCi.RemoteTypes
-import GHCi.ResolvedBCO
+import GHCi.InfoTable (StgInfoTable)
 import GHCi.FFI
 import GHCi.TH.Binary ()
+import GHCi.BreakArray
 
 import GHC.LanguageExtensions
+import Control.Concurrent
 import Control.Exception
 import Data.Binary
 import Data.Binary.Get
@@ -24,9 +36,11 @@ import Data.Binary.Put
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as LB
+import Data.Dynamic
 import Data.IORef
-import Data.Typeable
+import Data.Map (Map)
 import GHC.Generics
+import GHC.Stack.CCS
 import qualified Language.Haskell.TH        as TH
 import qualified Language.Haskell.TH.Syntax as TH
 import System.Exit
@@ -36,7 +50,8 @@ import System.IO.Error
 -- -----------------------------------------------------------------------------
 -- The RPC protocol between GHC and the interactive server
 
--- | A @Message a@ is a message that returns a value of type @a@
+-- | A @Message a@ is a message that returns a value of type @a@.
+-- These are requests sent from GHC to the server.
 data Message a where
   -- | Exit the iserv process
   Shutdown :: Message ()
@@ -45,41 +60,43 @@ data Message a where
 
   -- These all invoke the corresponding functions in the RTS Linker API.
   InitLinker :: Message ()
-  LookupSymbol :: String -> Message (Maybe RemotePtr)
+  LookupSymbol :: String -> Message (Maybe (RemotePtr ()))
   LookupClosure :: String -> Message (Maybe HValueRef)
   LoadDLL :: String -> Message (Maybe String)
   LoadArchive :: String -> Message () -- error?
   LoadObj :: String -> Message () -- error?
   UnloadObj :: String -> Message () -- error?
-  AddLibrarySearchPath :: String -> Message RemotePtr
-  RemoveLibrarySearchPath :: RemotePtr -> Message Bool
+  AddLibrarySearchPath :: String -> Message (RemotePtr ())
+  RemoveLibrarySearchPath :: RemotePtr () -> Message Bool
   ResolveObjs :: Message Bool
   FindSystemLibrary :: String -> Message (Maybe String)
 
   -- Interpreter -------------------------------------------
 
   -- | Create a set of BCO objects, and return HValueRefs to them
-  CreateBCOs :: [ResolvedBCO] -> Message [HValueRef]
+  CreateBCOs :: [LB.ByteString] -> Message [HValueRef]
 
   -- | Release 'HValueRef's
   FreeHValueRefs :: [HValueRef] -> Message ()
 
   -- | Malloc some data and return a 'RemotePtr' to it
-  MallocData :: ByteString -> Message RemotePtr
+  MallocData :: ByteString -> Message (RemotePtr ())
+  MallocStrings :: [ByteString] -> Message [RemotePtr ()]
 
   -- | Calls 'GHCi.FFI.prepareForeignCall'
-  PrepFFI :: FFIConv -> [FFIType] -> FFIType -> Message RemotePtr
+  PrepFFI :: FFIConv -> [FFIType] -> FFIType -> Message (RemotePtr C_ffi_cif)
 
   -- | Free data previously created by 'PrepFFI'
-  FreeFFI :: RemotePtr -> Message ()
+  FreeFFI :: RemotePtr C_ffi_cif -> Message ()
 
   -- | Create an info table for a constructor
   MkConInfoTable
    :: Int     -- ptr words
    -> Int     -- non-ptr words
    -> Int     -- constr tag
+   -> Int     -- pointer tag
    -> [Word8] -- constructor desccription
-   -> Message RemotePtr
+   -> Message (RemotePtr StgInfoTable)
 
   -- | Evaluate a statement
   EvalStmt
@@ -90,12 +107,12 @@ data Message a where
   -- | Resume evaluation of a statement after a breakpoint
   ResumeStmt
    :: EvalOpts
-   -> HValueRef {- ResumeContext -}
+   -> RemoteRef (ResumeContext [HValueRef])
    -> Message (EvalStatus [HValueRef])
 
   -- | Abandon evaluation of a statement after a breakpoint
   AbandonStmt
-   :: HValueRef {- ResumeContext -}
+   :: RemoteRef (ResumeContext [HValueRef])
    -> Message ()
 
   -- | Evaluate something of type @IO String@
@@ -114,25 +131,47 @@ data Message a where
    :: HValueRef {- IO a -}
    -> Message (EvalResult ())
 
-  -- | Create a CostCentre
-  MkCostCentre
-   :: RemotePtr    -- module, RemotePtr so it can be shared
-   -> String       -- name
-   -> String       -- SrcSpan
-   -> Message RemotePtr
+  -- | Create a set of CostCentres with the same module name
+  MkCostCentres
+   :: String     -- module, RemotePtr so it can be shared
+   -> [(String,String)] -- (name, SrcSpan)
+   -> Message [RemotePtr CostCentre]
 
   -- | Show a 'CostCentreStack' as a @[String]@
   CostCentreStackInfo
-   :: RemotePtr {- from EvalBreak -}
+   :: RemotePtr CostCentreStack
    -> Message [String]
 
+  -- | Create a new array of breakpoint flags
+  NewBreakArray
+   :: Int                               -- size
+   -> Message (RemoteRef BreakArray)
+
+  -- | Enable a breakpoint
+  EnableBreakpoint
+   :: RemoteRef BreakArray
+   -> Int                               -- index
+   -> Bool                              -- on or off
+   -> Message ()
+
+  -- | Query the status of a breakpoint (True <=> enabled)
+  BreakpointStatus
+   :: RemoteRef BreakArray
+   -> Int                               -- index
+   -> Message Bool                      -- True <=> enabled
+
+  -- | Get a reference to a free variable at a breakpoint
+  GetBreakpointVar
+   :: HValueRef                         -- the AP_STACK from EvalBreak
+   -> Int
+   -> Message (Maybe HValueRef)
+
   -- Template Haskell -------------------------------------------
+  -- For more details on how TH works with Remote GHCi, see
+  -- Note [Remote Template Haskell] in libraries/ghci/GHCi/TH.hs.
 
   -- | Start a new TH module, return a state token that should be
-  StartTH :: Message HValueRef {- GHCiQState -}
-
-  -- | Run TH module finalizers, and free the HValueRef
-  FinishTH :: HValueRef {- GHCiQState -} -> Message ()
+  StartTH :: Message (RemoteRef (IORef QState))
 
   -- | Evaluate a TH computation.
   --
@@ -142,39 +181,110 @@ data Message a where
   -- they did, we have to serialize the value anyway, so we might
   -- as well serialize it to force it.
   RunTH
-   :: HValueRef {- GHCiQState -}
+   :: RemoteRef (IORef QState)
    -> HValueRef {- e.g. TH.Q TH.Exp -}
    -> THResultType
    -> Maybe TH.Loc
-   -> Message ByteString {- e.g. TH.Exp -}
+   -> Message (QResult ByteString)
 
-  -- Template Haskell Quasi monad operations
-  NewName :: String -> Message (THResult TH.Name)
-  Report :: Bool -> String -> Message (THResult ())
-  LookupName :: Bool -> String -> Message (THResult (Maybe TH.Name))
-  Reify :: TH.Name -> Message (THResult TH.Info)
-  ReifyFixity :: TH.Name -> Message (THResult TH.Fixity)
-  ReifyInstances :: TH.Name -> [TH.Type] -> Message (THResult [TH.Dec])
-  ReifyRoles :: TH.Name -> Message (THResult [TH.Role])
-  ReifyAnnotations :: TH.AnnLookup -> TypeRep -> Message (THResult [ByteString])
-  ReifyModule :: TH.Module -> Message (THResult TH.ModuleInfo)
-  ReifyConStrictness :: TH.Name -> Message (THResult [TH.DecidedStrictness])
-
-  AddDependentFile :: FilePath -> Message (THResult ())
-  AddTopDecls :: [TH.Dec] -> Message (THResult ())
-  IsExtEnabled :: Extension -> Message (THResult Bool)
-  ExtsEnabled :: Message (THResult [Extension])
-
-  -- Template Haskell return values
-
-  -- | RunTH finished successfully; return value follows
-  QDone :: Message ()
-  -- | RunTH threw an exception
-  QException :: String -> Message ()
-  -- | RunTH called 'fail'
-  QFail :: String -> Message ()
+  -- | Run the given mod finalizers.
+  RunModFinalizers :: RemoteRef (IORef QState)
+                   -> [RemoteRef (TH.Q ())]
+                   -> Message (QResult ())
 
 deriving instance Show (Message a)
+
+
+-- | Template Haskell return values
+data QResult a
+  = QDone a
+    -- ^ RunTH finished successfully; return value follows
+  | QException String
+    -- ^ RunTH threw an exception
+  | QFail String
+    -- ^ RunTH called 'fail'
+  deriving (Generic, Show)
+
+instance Binary a => Binary (QResult a)
+
+
+-- | Messages sent back to GHC from GHCi.TH, to implement the methods
+-- of 'Quasi'.  For an overview of how TH works with Remote GHCi, see
+-- Note [Remote Template Haskell] in GHCi.TH.
+data THMessage a where
+  NewName :: String -> THMessage (THResult TH.Name)
+  Report :: Bool -> String -> THMessage (THResult ())
+  LookupName :: Bool -> String -> THMessage (THResult (Maybe TH.Name))
+  Reify :: TH.Name -> THMessage (THResult TH.Info)
+  ReifyFixity :: TH.Name -> THMessage (THResult (Maybe TH.Fixity))
+  ReifyInstances :: TH.Name -> [TH.Type] -> THMessage (THResult [TH.Dec])
+  ReifyRoles :: TH.Name -> THMessage (THResult [TH.Role])
+  ReifyAnnotations :: TH.AnnLookup -> TypeRep
+    -> THMessage (THResult [ByteString])
+  ReifyModule :: TH.Module -> THMessage (THResult TH.ModuleInfo)
+  ReifyConStrictness :: TH.Name -> THMessage (THResult [TH.DecidedStrictness])
+
+  AddDependentFile :: FilePath -> THMessage (THResult ())
+  AddModFinalizer :: RemoteRef (TH.Q ()) -> THMessage (THResult ())
+  AddTopDecls :: [TH.Dec] -> THMessage (THResult ())
+  IsExtEnabled :: Extension -> THMessage (THResult Bool)
+  ExtsEnabled :: THMessage (THResult [Extension])
+
+  StartRecover :: THMessage ()
+  EndRecover :: Bool -> THMessage ()
+
+  -- | Indicates that this RunTH is finished, and the next message
+  -- will be the result of RunTH (a QResult).
+  RunTHDone :: THMessage ()
+
+deriving instance Show (THMessage a)
+
+data THMsg = forall a . (Binary a, Show a) => THMsg (THMessage a)
+
+getTHMessage :: Get THMsg
+getTHMessage = do
+  b <- getWord8
+  case b of
+    0  -> THMsg <$> NewName <$> get
+    1  -> THMsg <$> (Report <$> get <*> get)
+    2  -> THMsg <$> (LookupName <$> get <*> get)
+    3  -> THMsg <$> Reify <$> get
+    4  -> THMsg <$> ReifyFixity <$> get
+    5  -> THMsg <$> (ReifyInstances <$> get <*> get)
+    6  -> THMsg <$> ReifyRoles <$> get
+    7  -> THMsg <$> (ReifyAnnotations <$> get <*> get)
+    8  -> THMsg <$> ReifyModule <$> get
+    9  -> THMsg <$> ReifyConStrictness <$> get
+    10 -> THMsg <$> AddDependentFile <$> get
+    11 -> THMsg <$> AddTopDecls <$> get
+    12 -> THMsg <$> (IsExtEnabled <$> get)
+    13 -> THMsg <$> return ExtsEnabled
+    14 -> THMsg <$> return StartRecover
+    15 -> THMsg <$> EndRecover <$> get
+    16 -> return (THMsg RunTHDone)
+    _  -> THMsg <$> AddModFinalizer <$> get
+
+putTHMessage :: THMessage a -> Put
+putTHMessage m = case m of
+  NewName a                   -> putWord8 0  >> put a
+  Report a b                  -> putWord8 1  >> put a >> put b
+  LookupName a b              -> putWord8 2  >> put a >> put b
+  Reify a                     -> putWord8 3  >> put a
+  ReifyFixity a               -> putWord8 4  >> put a
+  ReifyInstances a b          -> putWord8 5  >> put a >> put b
+  ReifyRoles a                -> putWord8 6  >> put a
+  ReifyAnnotations a b        -> putWord8 7  >> put a >> put b
+  ReifyModule a               -> putWord8 8  >> put a
+  ReifyConStrictness a        -> putWord8 9  >> put a
+  AddDependentFile a          -> putWord8 10 >> put a
+  AddTopDecls a               -> putWord8 11 >> put a
+  IsExtEnabled a              -> putWord8 12 >> put a
+  ExtsEnabled                 -> putWord8 13
+  StartRecover                -> putWord8 14
+  EndRecover a                -> putWord8 15 >> put a
+  RunTHDone                   -> putWord8 16
+  AddModFinalizer a           -> putWord8 17 >> put a
+
 
 data EvalOpts = EvalOpts
   { useSandboxThread :: Bool
@@ -185,6 +295,12 @@ data EvalOpts = EvalOpts
   deriving (Generic, Show)
 
 instance Binary EvalOpts
+
+data ResumeContext a = ResumeContext
+  { resumeBreakMVar :: MVar ()
+  , resumeStatusMVar :: MVar (EvalStatus a)
+  , resumeThreadId :: ThreadId
+  }
 
 -- | We can pass simple expressions to EvalStmt, consisting of values
 -- and application.  This allows us to wrap the statement to be
@@ -198,16 +314,19 @@ data EvalExpr a
 
 instance Binary a => Binary (EvalExpr a)
 
-data EvalStatus a
+type EvalStatus a = EvalStatus_ a a
+
+data EvalStatus_ a b
   = EvalComplete Word64 (EvalResult a)
   | EvalBreak Bool
        HValueRef{- AP_STACK -}
-       HValueRef{- BreakInfo -}
-       HValueRef{- ResumeContext -}
-       RemotePtr -- Cost centre stack
+       Int {- break index -}
+       Int {- uniq of ModuleName -}
+       (RemoteRef (ResumeContext b))
+       (RemotePtr CostCentreStack) -- Cost centre stack
   deriving (Generic, Show)
 
-instance Binary a => Binary (EvalStatus a)
+instance Binary a => Binary (EvalStatus_ a b)
 
 data EvalResult a
   = EvalException SerializableException
@@ -248,6 +367,19 @@ data THResultType = THExp | THPat | THType | THDec | THAnnWrapper
 
 instance Binary THResultType
 
+-- | The server-side Template Haskell state.  This is created by the
+-- StartTH message.  A new one is created per module that GHC
+-- typechecks.
+data QState = QState
+  { qsMap        :: Map TypeRep Dynamic
+       -- ^ persistent data between splices in a module
+  , qsLocation   :: Maybe TH.Loc
+       -- ^ location for current splice, if any
+  , qsPipe :: Pipe
+       -- ^ pipe to communicate with GHC
+  }
+instance Show QState where show _ = "<QState>"
+
 data Msg = forall a . (Binary a, Show a) => Msg (Message a)
 
 getMessage :: Get Msg
@@ -269,37 +401,25 @@ getMessage = do
       12 -> Msg <$> CreateBCOs <$> get
       13 -> Msg <$> FreeHValueRefs <$> get
       14 -> Msg <$> MallocData <$> get
-      15 -> Msg <$> (PrepFFI <$> get <*> get <*> get)
-      16 -> Msg <$> FreeFFI <$> get
-      17 -> Msg <$> (MkConInfoTable <$> get <*> get <*> get <*> get)
-      18 -> Msg <$> (EvalStmt <$> get <*> get)
-      19 -> Msg <$> (ResumeStmt <$> get <*> get)
-      20 -> Msg <$> (AbandonStmt <$> get)
-      21 -> Msg <$> (EvalString <$> get)
-      22 -> Msg <$> (EvalStringToString <$> get <*> get)
-      23 -> Msg <$> (EvalIO <$> get)
-      24 -> Msg <$> (MkCostCentre <$> get <*> get <*> get)
-      25 -> Msg <$> (CostCentreStackInfo <$> get)
-      26 -> Msg <$> return StartTH
-      27 -> Msg <$> FinishTH <$> get
-      28 -> Msg <$> (RunTH <$> get <*> get <*> get <*> get)
-      29 -> Msg <$> NewName <$> get
-      30 -> Msg <$> (Report <$> get <*> get)
-      31 -> Msg <$> (LookupName <$> get <*> get)
-      32 -> Msg <$> Reify <$> get
-      33 -> Msg <$> ReifyFixity <$> get
-      34 -> Msg <$> (ReifyInstances <$> get <*> get)
-      35 -> Msg <$> ReifyRoles <$> get
-      36 -> Msg <$> (ReifyAnnotations <$> get <*> get)
-      37 -> Msg <$> ReifyModule <$> get
-      38 -> Msg <$> ReifyConStrictness <$> get
-      39 -> Msg <$> AddDependentFile <$> get
-      40 -> Msg <$> AddTopDecls <$> get
-      41 -> Msg <$> (IsExtEnabled <$> get)
-      42 -> Msg <$> return ExtsEnabled
-      43 -> Msg <$> return QDone
-      44 -> Msg <$> QException <$> get
-      _  -> Msg <$> QFail <$> get
+      15 -> Msg <$> MallocStrings <$> get
+      16 -> Msg <$> (PrepFFI <$> get <*> get <*> get)
+      17 -> Msg <$> FreeFFI <$> get
+      18 -> Msg <$> (MkConInfoTable <$> get <*> get <*> get <*> get <*> get)
+      19 -> Msg <$> (EvalStmt <$> get <*> get)
+      20 -> Msg <$> (ResumeStmt <$> get <*> get)
+      21 -> Msg <$> (AbandonStmt <$> get)
+      22 -> Msg <$> (EvalString <$> get)
+      23 -> Msg <$> (EvalStringToString <$> get <*> get)
+      24 -> Msg <$> (EvalIO <$> get)
+      25 -> Msg <$> (MkCostCentres <$> get <*> get)
+      26 -> Msg <$> (CostCentreStackInfo <$> get)
+      27 -> Msg <$> (NewBreakArray <$> get)
+      28 -> Msg <$> (EnableBreakpoint <$> get <*> get <*> get)
+      29 -> Msg <$> (BreakpointStatus <$> get <*> get)
+      30 -> Msg <$> (GetBreakpointVar <$> get <*> get)
+      31 -> Msg <$> return StartTH
+      32 -> Msg <$> (RunModFinalizers <$> get <*> get)
+      _  -> Msg <$> (RunTH <$> get <*> get <*> get <*> get)
 
 putMessage :: Message a -> Put
 putMessage m = case m of
@@ -318,37 +438,25 @@ putMessage m = case m of
   CreateBCOs bco              -> putWord8 12 >> put bco
   FreeHValueRefs val          -> putWord8 13 >> put val
   MallocData bs               -> putWord8 14 >> put bs
-  PrepFFI conv args res       -> putWord8 15 >> put conv >> put args >> put res
-  FreeFFI p                   -> putWord8 16 >> put p
-  MkConInfoTable p n t d      -> putWord8 17 >> put p >> put n >> put t >> put d
-  EvalStmt opts val           -> putWord8 18 >> put opts >> put val
-  ResumeStmt opts val         -> putWord8 19 >> put opts >> put val
-  AbandonStmt val             -> putWord8 20 >> put val
-  EvalString val              -> putWord8 21 >> put val
-  EvalStringToString str val  -> putWord8 22 >> put str >> put val
-  EvalIO val                  -> putWord8 23 >> put val
-  MkCostCentre name mod src   -> putWord8 24 >> put name >> put mod >> put src
-  CostCentreStackInfo ptr     -> putWord8 25 >> put ptr
-  StartTH                     -> putWord8 26
-  FinishTH val                -> putWord8 27 >> put val
-  RunTH st q loc ty           -> putWord8 28 >> put st >> put q >> put loc >> put ty
-  NewName a                   -> putWord8 29 >> put a
-  Report a b                  -> putWord8 30 >> put a >> put b
-  LookupName a b              -> putWord8 31 >> put a >> put b
-  Reify a                     -> putWord8 32 >> put a
-  ReifyFixity a               -> putWord8 33 >> put a
-  ReifyInstances a b          -> putWord8 34 >> put a >> put b
-  ReifyRoles a                -> putWord8 35 >> put a
-  ReifyAnnotations a b        -> putWord8 36 >> put a >> put b
-  ReifyModule a               -> putWord8 37 >> put a
-  ReifyConStrictness a        -> putWord8 38 >> put a
-  AddDependentFile a          -> putWord8 39 >> put a
-  AddTopDecls a               -> putWord8 40 >> put a
-  IsExtEnabled a              -> putWord8 41 >> put a
-  ExtsEnabled                 -> putWord8 42
-  QDone                       -> putWord8 43
-  QException a                -> putWord8 44 >> put a
-  QFail a                     -> putWord8 45 >> put a
+  MallocStrings bss           -> putWord8 15 >> put bss
+  PrepFFI conv args res       -> putWord8 16 >> put conv >> put args >> put res
+  FreeFFI p                   -> putWord8 17 >> put p
+  MkConInfoTable p n t pt d   -> putWord8 18 >> put p >> put n >> put t >> put pt >> put d
+  EvalStmt opts val           -> putWord8 19 >> put opts >> put val
+  ResumeStmt opts val         -> putWord8 20 >> put opts >> put val
+  AbandonStmt val             -> putWord8 21 >> put val
+  EvalString val              -> putWord8 22 >> put val
+  EvalStringToString str val  -> putWord8 23 >> put str >> put val
+  EvalIO val                  -> putWord8 24 >> put val
+  MkCostCentres mod ccs       -> putWord8 25 >> put mod >> put ccs
+  CostCentreStackInfo ptr     -> putWord8 26 >> put ptr
+  NewBreakArray sz            -> putWord8 27 >> put sz
+  EnableBreakpoint arr ix b   -> putWord8 28 >> put arr >> put ix >> put b
+  BreakpointStatus arr ix     -> putWord8 29 >> put arr >> put ix
+  GetBreakpointVar a b        -> putWord8 30 >> put a >> put b
+  StartTH                     -> putWord8 31
+  RunModFinalizers a b        -> putWord8 32 >> put a >> put b
+  RunTH st q loc ty           -> putWord8 33 >> put st >> put q >> put loc >> put ty
 
 -- -----------------------------------------------------------------------------
 -- Reading/writing messages
@@ -362,6 +470,11 @@ data Pipe = Pipe
 remoteCall :: Binary a => Pipe -> Message a -> IO a
 remoteCall pipe msg = do
   writePipe pipe (putMessage msg)
+  readPipe pipe get
+
+remoteTHCall :: Binary a => Pipe -> THMessage a -> IO a
+remoteTHCall pipe msg = do
+  writePipe pipe (putTHMessage msg)
   readPipe pipe get
 
 writePipe :: Pipe -> Put -> IO ()

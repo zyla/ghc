@@ -5,7 +5,7 @@
 -- CmmLint: checking the correctness of Cmm statements and expressions
 --
 -----------------------------------------------------------------------------
-{-# LANGUAGE GADTs, CPP #-}
+{-# LANGUAGE GADTs #-}
 module CmmLint (
     cmmLint, cmmLintGraph
   ) where
@@ -17,14 +17,10 @@ import CmmLive
 import CmmSwitch (switchTargetsToList)
 import PprCmm ()
 import BlockId
-import FastString
 import Outputable
 import DynFlags
 
 import Control.Monad (liftM, ap)
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative(..))
-#endif
 
 -- Things to check:
 --     - invariant on CmmBlock in CmmExpr (see comment there)
@@ -44,9 +40,9 @@ cmmLintGraph dflags g = runCmmLint dflags (lintCmmGraph dflags) g
 runCmmLint :: Outputable a => DynFlags -> (a -> CmmLint b) -> a -> Maybe SDoc
 runCmmLint dflags l p =
    case unCL (l p) dflags of
-     Left err -> Just (vcat [ptext $ sLit ("Cmm lint error:"),
+     Left err -> Just (vcat [text "Cmm lint error:",
                              nest 2 err,
-                             ptext $ sLit ("Program was:"),
+                             text "Program was:",
                              nest 2 (ppr p)])
      Right _  -> Nothing
 
@@ -225,7 +221,6 @@ instance Monad CmmLint where
                                 case m dflags of
                                 Left e -> Left e
                                 Right a -> unCL (k a) dflags
-  return = pure
 
 instance HasDynFlags CmmLint where
     getDynFlags = CmmLint (\dflags -> Right dflags)

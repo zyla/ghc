@@ -1,5 +1,5 @@
 test('ghcilink001',
-     [when(ghci_dynamic(), expect_fail), # dynamic ghci can't load '.a's
+     [when(ghc_dynamic(), expect_fail), # dynamic ghci can't load '.a's
       unless(doing_ghci, skip),
       extra_clean(['dir001/*','dir001'])],
      run_command,
@@ -20,6 +20,7 @@ test('ghcilink003',
 
 test('ghcilink004',
      [unless(doing_ghci, skip),
+      when(arch('powerpc64') or arch('powerpc64le'), expect_broken(11259)),
       extra_clean(['dir004/local.package.conf/*', 'dir004/*', 'dir004'])
      ],
      run_command,
@@ -43,7 +44,7 @@ test('ghcilink006',
 test('T3333',
      [extra_clean(['T3333.o']),
      unless(doing_ghci, skip),
-     unless(opsys('linux') or opsys('darwin') or ghci_dynamic(), expect_broken(3333))],
+     unless(opsys('linux') or opsys('darwin') or ghc_dynamic(), expect_broken(3333))],
      run_command,
      ['$MAKE -s --no-print-directory T3333'])
 

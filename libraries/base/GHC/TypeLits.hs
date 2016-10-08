@@ -117,15 +117,19 @@ someSymbolVal n   = withSSymbol SomeSymbol (SSymbol n) Proxy
 
 
 
+-- | @since 4.7.0.0
 instance Eq SomeNat where
   SomeNat x == SomeNat y = natVal x == natVal y
 
+-- | @since 4.7.0.0
 instance Ord SomeNat where
   compare (SomeNat x) (SomeNat y) = compare (natVal x) (natVal y)
 
+-- | @since 4.7.0.0
 instance Show SomeNat where
   showsPrec p (SomeNat x) = showsPrec p (natVal x)
 
+-- | @since 4.7.0.0
 instance Read SomeNat where
   readsPrec p xs = do (a,ys) <- readsPrec p xs
                       case someNatVal a of
@@ -133,26 +137,30 @@ instance Read SomeNat where
                         Just n  -> [(n,ys)]
 
 
+-- | @since 4.7.0.0
 instance Eq SomeSymbol where
   SomeSymbol x == SomeSymbol y = symbolVal x == symbolVal y
 
+-- | @since 4.7.0.0
 instance Ord SomeSymbol where
   compare (SomeSymbol x) (SomeSymbol y) = compare (symbolVal x) (symbolVal y)
 
+-- | @since 4.7.0.0
 instance Show SomeSymbol where
   showsPrec p (SomeSymbol x) = showsPrec p (symbolVal x)
 
+-- | @since 4.7.0.0
 instance Read SomeSymbol where
   readsPrec p xs = [ (someSymbolVal a, ys) | (a,ys) <- readsPrec p xs ]
 
 type family EqNat (a :: Nat) (b :: Nat) where
-  EqNat _a _a = 'True
-  EqNat _a _b = 'False
+  EqNat a a = 'True
+  EqNat a b = 'False
 type instance a == b = EqNat a b
 
 type family EqSymbol (a :: Symbol) (b :: Symbol) where
-  EqSymbol _a _a = 'True
-  EqSymbol _a _b = 'False
+  EqSymbol a a = 'True
+  EqSymbol a b = 'False
 type instance a == b = EqSymbol a b
 
 --------------------------------------------------------------------------------
@@ -221,24 +229,24 @@ infixl 6 :<>:
 -- For instance, it can be used as a constraint, e.g. to provide a better error
 -- message for a non-existant instance,
 --
--- @@
+-- @
 -- -- in a context
 -- instance TypeError (Text "Cannot 'Show' functions." :$$:
 --                     Text "Perhaps there is a missing argument?")
 --       => Show (a -> b) where
 --     showsPrec = error "unreachable"
--- @@
+-- @
 --
 -- It can also be placed on the right-hand side of a type-level function
 -- to provide an error for an invalid case,
 --
--- @@
+-- @
 -- type family ByteSize x where
 --    ByteSize Word16   = 2
 --    ByteSize Word8    = 1
 --    ByteSize a        = TypeError (Text "The type " :<>: ShowType a :<>:
 --                                   Text " is not exportable.")
--- @@
+-- @
 --
 -- @since 4.9.0.0
 type family TypeError (a :: ErrorMessage) :: b where

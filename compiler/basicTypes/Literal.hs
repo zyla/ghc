@@ -21,7 +21,6 @@ module Literal
 
         -- ** Operations on Literals
         , literalType
-        , hashLiteral
         , absentLiteralOf
         , pprLiteral
 
@@ -58,10 +57,9 @@ import Util
 
 import Data.ByteString (ByteString)
 import Data.Int
-import Data.Ratio
 import Data.Word
 import Data.Char
-import Data.Data ( Data, Typeable )
+import Data.Data ( Data )
 import Numeric ( fromRat )
 
 {-
@@ -116,7 +114,7 @@ data Literal
 
   | LitInteger Integer Type --  ^ Integer literals
                             -- See Note [Integer literals]
-  deriving (Data, Typeable)
+  deriving Data
 
 {-
 Note [Integer literals]
@@ -446,7 +444,7 @@ litTag (LitInteger  {})    = 11
 pprLiteral :: (SDoc -> SDoc) -> Literal -> SDoc
 pprLiteral _       (MachChar c)     = pprPrimChar c
 pprLiteral _       (MachStr s)      = pprHsBytes s
-pprLiteral _       (MachNullAddr)   = ptext (sLit "__NULL")
+pprLiteral _       (MachNullAddr)   = text "__NULL"
 pprLiteral _       (MachInt i)      = pprPrimInt i
 pprLiteral _       (MachInt64 i)    = pprPrimInt64 i
 pprLiteral _       (MachWord w)     = pprPrimWord w
@@ -454,7 +452,7 @@ pprLiteral _       (MachWord64 w)   = pprPrimWord64 w
 pprLiteral _       (MachFloat f)    = float (fromRat f) <> primFloatSuffix
 pprLiteral _       (MachDouble d)   = double (fromRat d) <> primDoubleSuffix
 pprLiteral add_par (LitInteger i _) = pprIntegerVal add_par i
-pprLiteral add_par (MachLabel l mb fod) = add_par (ptext (sLit "__label") <+> b <+> ppr fod)
+pprLiteral add_par (MachLabel l mb fod) = add_par (text "__label" <+> b <+> ppr fod)
     where b = case mb of
               Nothing -> pprHsString l
               Just x  -> doubleQuotes (text (unpackFS l ++ '@':show x))
@@ -500,38 +498,3 @@ MachDouble      -1.0##
 LitInteger      -1                 (-1)
 MachLabel       "__label" ...      ("__label" ...)
 -}
-
-{-
-************************************************************************
-*                                                                      *
-\subsection{Hashing}
-*                                                                      *
-************************************************************************
-
-Hash values should be zero or a positive integer.  No negatives please.
-(They mess up the UniqFM for some reason.)
--}
-
-hashLiteral :: Literal -> Int
-hashLiteral (MachChar c)        = ord c + 1000  -- Keep it out of range of common ints
-hashLiteral (MachStr s)         = hashByteString s
-hashLiteral (MachNullAddr)      = 0
-hashLiteral (MachInt i)         = hashInteger i
-hashLiteral (MachInt64 i)       = hashInteger i
-hashLiteral (MachWord i)        = hashInteger i
-hashLiteral (MachWord64 i)      = hashInteger i
-hashLiteral (MachFloat r)       = hashRational r
-hashLiteral (MachDouble r)      = hashRational r
-hashLiteral (MachLabel s _ _)     = hashFS s
-hashLiteral (LitInteger i _)    = hashInteger i
-
-hashRational :: Rational -> Int
-hashRational r = hashInteger (numerator r)
-
-hashInteger :: Integer -> Int
-hashInteger i = 1 + abs (fromInteger (i `rem` 10000))
-                -- The 1+ is to avoid zero, which is a Bad Number
-                -- since we use * to combine hash values
-
-hashFS :: FastString -> Int
-hashFS s = uniqueOfFS s

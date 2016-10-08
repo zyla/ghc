@@ -1,6 +1,21 @@
 # Changelog for [`template-haskell` package](http://hackage.haskell.org/package/template-haskell)
 
-## 2.11.0.0  *TBA*
+## next *TBA*
+  * Bundled with GHC *TBA*
+
+  * Add support for pattern synonyms. This introduces one new constructor to
+    `Info` (`PatSynI`), two new constructors to `Dec` (`PatSynD` and
+    `PatSynSigD`), and two new data types (`PatSynDir` and `PatSynArgs`),
+    among other changes. (#8761)
+
+  * Add support for unboxed sums. (#12478)
+
+  * Add support for visible type applications. (#12530)
+
+  * Add support for attaching deriving strategies to `deriving` statements
+    (#10598)
+
+## 2.11.0.0  *May 2016*
 
   * Bundled with GHC 8.0.1
 
@@ -30,14 +45,21 @@
     in Haskell source code (`SourceUnpackedness` and `SourceStrictness`, as
     well as `Bang`), and one for strictness information after a constructor is
     compiled (`DecidedStrictness`). `Strict`, `StrictType` and `VarStrictType`
-    have been deprecated in favor of `Bang`, `BangType` and `VarBangType`, and
-    three functions (`isStrict`, `isLazy`, and `unpack`) were removed because
-    they no longer serve any use in this new design. (#10697)
+    have been deprecated in favor of `Bang`, `BangType` and `VarBangType`.
+    (#10697)
 
   * Add `reifyConStrictness` to query a data constructor's `DecidedStrictness`
     values for its fields (#10697)
 
-  * TODO: document API changes and important bugfixes
+  * The `ClassOpI`, `DataConI`, and `VarI` constructors no longer have a
+    `Fixity` field. Instead, all `Fixity` information for a given `Name` is
+    now determined through the `reifyFixity` function, which returns `Just` the
+    fixity if there is an explicit fixity declaration for that `Name`, and
+    `Nothing` otherwise (#10704 and #11345)
+
+  * Add `MonadFail Q` instance for GHC 8.0 and later (#11661)
+
+  * Add support for OVERLAP(S/PED/PING) pragmas on instances
 
 
 ## 2.10.0.0  *Mar 2015*

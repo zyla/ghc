@@ -1,5 +1,6 @@
 {-# LANGUAGE MagicHash, NoImplicitPrelude, TypeFamilies, UnboxedTuples,
-             MultiParamTypeClasses, RoleAnnotations, CPP, TypeOperators #-}
+             MultiParamTypeClasses, RoleAnnotations, CPP, TypeOperators,
+             PolyKinds #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.Types
@@ -29,11 +30,13 @@ module GHC.Types (
         isTrue#,
         SPEC(..),
         Nat, Symbol,
+        Any,
         type (~~), Coercible,
-        TYPE, Levity(..), Type, type (*), type (★), Constraint,
+        TYPE, RuntimeRep(..), Type, type (*), type (★), Constraint,
           -- The historical type * should ideally be written as
           -- `type *`, without the parentheses. But that's a true
           -- pain to parse, and for little gain.
+        VecCount(..), VecElem(..),
 
         -- * Runtime type representation
         Module(..), TrName(..), TyCon(..)
@@ -42,6 +45,10 @@ module GHC.Types (
 import GHC.Prim
 
 infixr 5 :
+
+-- Take note: All types defined here must have associated type representations
+-- defined in Data.Typeable.Internal.
+-- See Note [Representation of types defined in GHC.Types] below.
 
 {- *********************************************************************
 *                                                                      *
@@ -53,13 +60,13 @@ infixr 5 :
 data Constraint
 
 -- | The kind of types with values. For example @Int :: Type@.
-type Type = TYPE 'Lifted
+type Type = TYPE 'PtrRepLifted
 
 -- | A backward-compatible (pre-GHC 8.0) synonym for 'Type'
-type * = TYPE 'Lifted
+type * = TYPE 'PtrRepLifted
 
 -- | A unicode backward-compatible (pre-GHC 8.0) synonym for 'Type'
-type ★ = TYPE 'Lifted
+type ★ = TYPE 'PtrRepLifted
 
 {- *********************************************************************
 *                                                                      *
@@ -73,6 +80,23 @@ data Nat
 -- | (Kind) This is the kind of type-level symbols.
 -- Declared here because class IP needs it
 data Symbol
+
+{- *********************************************************************
+*                                                                      *
+                  Any
+*                                                                      *
+********************************************************************* -}
+
+-- | The type constructor 'Any' is type to which you can unsafely coerce any
+-- lifted type, and back. More concretely, for a lifted type @t@ and
+-- value @x :: t@, -- @unsafeCoerce (unsafeCoerce x :: Any) :: t@ is equivalent
+-- to @x@.
+--
+type family Any :: k where { }
+-- See Note [Any types] in TysWiredIn. Also, for a bit of history on Any see
+-- #10886. Note that this must be a *closed* type family: we need to ensure
+-- that this can't reduce to a `data` type for the results discussed in
+-- Note [Any types].
 
 {- *********************************************************************
 *                                                                      *
@@ -188,7 +212,11 @@ inside GHC, to change the kind and type.
 
 -- | Lifted, heterogeneous equality. By lifted, we mean that it
 -- can be bogus (deferred type error). By heterogeneous, the two
--- types @a@ and @b@ might have different kinds.
+-- types @a@ and @b@ might have different kinds. Because @~~@ can
+-- appear unexpectedly in error messages to users who do not care
+-- about the difference between heterogeneous equality @~~@ and
+-- homogeneous equality @~@, this is printed as @~@ unless
+-- @-fprint-equality-relations@ is set.
 class a ~~ b
   -- See also Note [The equality types story] in TysPrim
 
@@ -201,7 +229,7 @@ class a ~~ b
 --      Nevertheless one can pretend that the following three kinds of instances
 --      exist. First, as a trivial base-case:
 --
---      @instance a a@
+--      @instance Coercible a a@
 --
 --      Furthermore, for every type constructor there is
 --      an instance that allows to coerce under the type constructor. For
@@ -326,21 +354,64 @@ you're reading this in 2023 then things went wrong). See #8326.
 -- loops should be aggressively specialized.
 data SPEC = SPEC | SPEC2
 
--- | GHC divides all proper types (that is, types that can perhaps be
--- inhabited, as distinct from type constructors or type-level data)
--- into two worlds: lifted types and unlifted types. For example,
--- @Int@ is lifted while @Int#@ is unlifted. Certain operations need
--- to be polymorphic in this distinction. A classic example is 'unsafeCoerce#',
--- which needs to be able to coerce between lifted and unlifted types.
--- To achieve this, we use kind polymorphism: lifted types have kind
--- @TYPE Lifted@ and unlifted ones have kind @TYPE Unlifted@. 'Levity'
--- is the kind of 'Lifted' and 'Unlifted'. @*@ is a synonym for @TYPE Lifted@
--- and @#@ is a synonym for @TYPE Unlifted@.
-data Levity = Lifted | Unlifted
 
 {- *********************************************************************
 *                                                                      *
-             Runtime represntation of TyCon
+                    RuntimeRep
+*                                                                      *
+********************************************************************* -}
+
+
+-- | GHC maintains a property that the kind of all inhabited types
+-- (as distinct from type constructors or type-level data) tells us
+-- the runtime representation of values of that type. This datatype
+-- encodes the choice of runtime value.
+-- Note that 'TYPE' is parameterised by 'RuntimeRep'; this is precisely
+-- what we mean by the fact that a type's kind encodes the runtime
+-- representation.
+--
+-- For boxed values (that is, values that are represented by a pointer),
+-- a further distinction is made, between lifted types (that contain ⊥),
+-- and unlifted ones (that don't).
+data RuntimeRep = VecRep VecCount VecElem   -- ^ a SIMD vector type
+                | PtrRepLifted    -- ^ lifted; represented by a pointer
+                | PtrRepUnlifted  -- ^ unlifted; represented by a pointer
+                | VoidRep         -- ^ erased entirely
+                | IntRep          -- ^ signed, word-sized value
+                | WordRep         -- ^ unsigned, word-sized value
+                | Int64Rep        -- ^ signed, 64-bit value (on 32-bit only)
+                | Word64Rep       -- ^ unsigned, 64-bit value (on 32-bit only)
+                | AddrRep         -- ^ A pointer, but /not/ to a Haskell value
+                | FloatRep        -- ^ a 32-bit floating point number
+                | DoubleRep       -- ^ a 64-bit floating point number
+                | UnboxedTupleRep -- ^ An unboxed tuple; this doesn't specify a concrete rep
+                | UnboxedSumRep   -- ^ An unboxed sum; this doesn't specify a concrete rep
+
+-- See also Note [Wiring in RuntimeRep] in TysWiredIn
+
+-- | Length of a SIMD vector type
+data VecCount = Vec2
+              | Vec4
+              | Vec8
+              | Vec16
+              | Vec32
+              | Vec64
+
+-- | Element of a SIMD vector type
+data VecElem = Int8ElemRep
+             | Int16ElemRep
+             | Int32ElemRep
+             | Int64ElemRep
+             | Word8ElemRep
+             | Word16ElemRep
+             | Word32ElemRep
+             | Word64ElemRep
+             | FloatElemRep
+             | DoubleElemRep
+
+{- *********************************************************************
+*                                                                      *
+             Runtime representation of TyCon
 *                                                                      *
 ********************************************************************* -}
 
@@ -354,19 +425,11 @@ data type T.  Things to think about
   - We do this for every module (except this module GHC.Types), so we can't
     depend on anything else (eg string unpacking code)
 
-That's why we have these terribly low-level repesentations.  The TrName
+That's why we have these terribly low-level representations.  The TrName
 type lets us use the TrNameS constructor when allocating static data;
 but we also need TrNameD for the case where we are deserialising a TyCon
 or Module (for example when deserialising a TypeRep), in which case we
 can't conveniently come up with an Addr#.
-
-
-Note [Representations of types defined in GHC.Types]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The representations for the types defined in GHC.Types are
-defined in GHC.Typeable.Internal.
-
 -}
 
 #include "MachDeps.h"

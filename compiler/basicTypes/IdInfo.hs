@@ -24,7 +24,7 @@ module IdInfo (
 
         -- ** Zapping various forms of Info
         zapLamInfo, zapFragileInfo,
-        zapDemandInfo, zapUsageInfo,
+        zapDemandInfo, zapUsageInfo, zapUsageEnvInfo, zapUsedOnceInfo,
 
         -- ** The ArityInfo type
         ArityInfo,
@@ -38,7 +38,7 @@ module IdInfo (
         demandInfo, setDemandInfo, pprStrictness,
 
         -- ** Unfolding Info
-        unfoldingInfo, setUnfoldingInfo, setUnfoldingInfoLazily,
+        unfoldingInfo, setUnfoldingInfo,
 
         -- ** The InlinePragInfo type
         InlinePragInfo,
@@ -77,11 +77,10 @@ import VarSet
 import BasicTypes
 import DataCon
 import TyCon
-import {-# SOURCE #-} PatSyn
+import PatSyn
 import ForeignCall
 import Outputable
 import Module
-import FastString
 import Demand
 
 -- infixl so you can say (id `set` a `set` b)
@@ -103,7 +102,9 @@ infixl  1 `setRuleInfo`,
 ************************************************************************
 -}
 
--- | The 'IdDetails' of an 'Id' give stable, and necessary,
+-- | Identifier Details
+--
+-- The 'IdDetails' of an 'Id' give stable, and necessary,
 -- information about the Id.
 data IdDetails
   = VanillaId
@@ -135,19 +136,11 @@ data IdDetails
        --                  implemented with a newtype, so it might be bad
        --                  to be strict on this dictionary
 
-  | CoVarId                    -- ^ A coercion variable
+  | CoVarId    -- ^ A coercion variable
+               -- This only covers /un-lifted/ coercions, of type
+               -- (t1 ~# t2) or (t1 ~R# t2), not their lifted variants
 
-  -- The rest are distinguished only for debugging reasons
-  -- e.g. to suppress them in -ddump-types
-  -- Currently we don't persist these through interface file
-  -- (see MkIface.toIfaceIdDetails), but we easily could if it mattered
-
-  | ReflectionId                -- ^ A top-level Id to support runtime reflection
-                                -- e.g. $trModule, or $tcT
-
-  | PatSynId                    -- ^ A top-level Id to support pattern synonyms;
-                                -- the builder or matcher for the patern synonym
-
+-- | Recursive Selector Parent
 data RecSelParent = RecSelData TyCon | RecSelPatSyn PatSyn deriving Eq
   -- Either `TyCon` or `PatSyn` depending
   -- on the origin of the record selector.
@@ -177,19 +170,17 @@ pprIdDetails VanillaId = empty
 pprIdDetails other     = brackets (pp other)
  where
    pp VanillaId         = panic "pprIdDetails"
-   pp ReflectionId      = ptext (sLit "ReflectionId")
-   pp PatSynId          = ptext (sLit "PatSynId")
-   pp (DataConWorkId _) = ptext (sLit "DataCon")
-   pp (DataConWrapId _) = ptext (sLit "DataConWrapper")
-   pp (ClassOpId {})    = ptext (sLit "ClassOp")
-   pp (PrimOpId _)      = ptext (sLit "PrimOp")
-   pp (FCallId _)       = ptext (sLit "ForeignCall")
-   pp (TickBoxOpId _)   = ptext (sLit "TickBoxOp")
-   pp (DFunId nt)       = ptext (sLit "DFunId") <> ppWhen nt (ptext (sLit "(nt)"))
+   pp (DataConWorkId _) = text "DataCon"
+   pp (DataConWrapId _) = text "DataConWrapper"
+   pp (ClassOpId {})    = text "ClassOp"
+   pp (PrimOpId _)      = text "PrimOp"
+   pp (FCallId _)       = text "ForeignCall"
+   pp (TickBoxOpId _)   = text "TickBoxOp"
+   pp (DFunId nt)       = text "DFunId" <> ppWhen nt (text "(nt)")
    pp (RecSelId { sel_naughty = is_naughty })
-                         = brackets $ ptext (sLit "RecSel")
-                            <> ppWhen is_naughty (ptext (sLit "(naughty)"))
-   pp CoVarId           = ptext (sLit "CoVarId")
+                         = brackets $ text "RecSel"
+                            <> ppWhen is_naughty (text "(naughty)")
+   pp CoVarId           = text "CoVarId"
 
 {-
 ************************************************************************
@@ -199,7 +190,9 @@ pprIdDetails other     = brackets (pp other)
 ************************************************************************
 -}
 
--- | An 'IdInfo' gives /optional/ information about an 'Id'.  If
+-- | Identifier Information
+--
+-- An 'IdInfo' gives /optional/ information about an 'Id'.  If
 -- present it never lies, but it may not be present, in which case there
 -- is always a conservative assumption which can be made.
 --
@@ -210,6 +203,10 @@ pprIdDetails other     = brackets (pp other)
 -- Most of the 'IdInfo' gives information about the value, or definition, of
 -- the 'Id', independent of its usage. Exceptions to this
 -- are 'demandInfo', 'occInfo', 'oneShotInfo' and 'callArityInfo'.
+--
+-- Performance note: when we update 'IdInfo', we have to reallocate this
+-- entire record, so it is a good idea not to let this data structure get
+-- too big.
 data IdInfo
   = IdInfo {
         arityInfo       :: !ArityInfo,          -- ^ 'Id' arity
@@ -237,11 +234,6 @@ setInlinePragInfo info pr = pr `seq` info { inlinePragInfo = pr }
 setOccInfo :: IdInfo -> OccInfo -> IdInfo
 setOccInfo        info oc = oc `seq` info { occInfo = oc }
         -- Try to avoid spack leaks by seq'ing
-
-setUnfoldingInfoLazily :: IdInfo -> Unfolding -> IdInfo
-setUnfoldingInfoLazily info uf  -- Lazy variant to avoid looking at the
-  =                             -- unfolding of an imported Id unless necessary
-    info { unfoldingInfo = uf } -- (In this case the demand-zapping is redundant.)
 
 setUnfoldingInfo :: IdInfo -> Unfolding -> IdInfo
 setUnfoldingInfo info uf
@@ -300,7 +292,9 @@ of their arities; so it should not be asking...  (but other things
 besides the code-generator need arity info!)
 -}
 
--- | An 'ArityInfo' of @n@ tells us that partial application of this
+-- | Arity Information
+--
+-- An 'ArityInfo' of @n@ tells us that partial application of this
 -- 'Id' to up to @n-1@ value arguments does essentially no work.
 --
 -- That is not necessarily the same as saying that it has @n@ leading
@@ -312,11 +306,11 @@ type ArityInfo = Arity
 
 -- | It is always safe to assume that an 'Id' has an arity of 0
 unknownArity :: Arity
-unknownArity = 0 :: Arity
+unknownArity = 0
 
 ppArityInfo :: Int -> SDoc
 ppArityInfo 0 = empty
-ppArityInfo n = hsep [ptext (sLit "Arity"), int n]
+ppArityInfo n = hsep [text "Arity", int n]
 
 {-
 ************************************************************************
@@ -326,7 +320,9 @@ ppArityInfo n = hsep [ptext (sLit "Arity"), int n]
 ************************************************************************
 -}
 
--- | Tells when the inlining is active.
+-- | Inline Pragma Information
+--
+-- Tells when the inlining is active.
 -- When it is active the thing may be inlined, depending on how
 -- big it is.
 --
@@ -375,7 +371,9 @@ In TidyPgm, when the LocalId becomes a GlobalId, its RULES are stripped off
 and put in the global list.
 -}
 
--- | Records the specializations of this 'Id' that we know about
+-- | Rule Information
+--
+-- Records the specializations of this 'Id' that we know about
 -- in the form of rewrite 'CoreRule's that target them
 data RuleInfo
   = RuleInfo
@@ -415,7 +413,9 @@ setRuleInfoHead fn (RuleInfo rules fvs)
 
 -- CafInfo is used to build Static Reference Tables (see simplStg/SRT.hs).
 
--- | Records whether an 'Id' makes Constant Applicative Form references
+-- | Constant applicative form Information
+--
+-- Records whether an 'Id' makes Constant Applicative Form references
 data CafInfo
         = MayHaveCafRefs                -- ^ Indicates that the 'Id' is for either:
                                         --
@@ -440,7 +440,7 @@ instance Outputable CafInfo where
    ppr = ppCafInfo
 
 ppCafInfo :: CafInfo -> SDoc
-ppCafInfo NoCafRefs = ptext (sLit "NoCafRefs")
+ppCafInfo NoCafRefs = text "NoCafRefs"
 ppCafInfo MayHaveCafRefs = empty
 
 {-
@@ -482,6 +482,19 @@ zapDemandInfo info = Just (info {demandInfo = topDmd})
 zapUsageInfo :: IdInfo -> Maybe IdInfo
 zapUsageInfo info = Just (info {demandInfo = zapUsageDemand (demandInfo info)})
 
+-- | Remove usage environment info from the strictness signature on the 'IdInfo'
+zapUsageEnvInfo :: IdInfo -> Maybe IdInfo
+zapUsageEnvInfo info
+    | hasDemandEnvSig (strictnessInfo info)
+    = Just (info {strictnessInfo = zapUsageEnvSig (strictnessInfo info)})
+    | otherwise
+    = Nothing
+
+zapUsedOnceInfo :: IdInfo -> Maybe IdInfo
+zapUsedOnceInfo info
+    = Just $ info { strictnessInfo = zapUsedOnceSig    (strictnessInfo info)
+                  , demandInfo     = zapUsedOnceDemand (demandInfo     info) }
+
 zapFragileInfo :: IdInfo -> Maybe IdInfo
 -- ^ Zap info that depends on free variables
 zapFragileInfo info
@@ -506,4 +519,4 @@ data TickBoxOp
    = TickBox Module {-# UNPACK #-} !TickBoxId
 
 instance Outputable TickBoxOp where
-    ppr (TickBox mod n)         = ptext (sLit "tick") <+> ppr (mod,n)
+    ppr (TickBox mod n)         = text "tick" <+> ppr (mod,n)

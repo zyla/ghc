@@ -1,6 +1,10 @@
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, MagicHash, GeneralizedNewtypeDeriving,
-             StandaloneDeriving #-}
 {-# OPTIONS_GHC -Wno-unused-binds #-}
 -- XXX -Wno-unused-binds stops us warning about unused constructors,
 -- but really we should just remove them if we don't want them
@@ -10,7 +14,7 @@
 -- Module      :  Foreign.C.Types
 -- Copyright   :  (c) The FFI task force 2001
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  ffi@haskell.org
 -- Stability   :  provisional
 -- Portability :  portable
@@ -22,6 +26,12 @@
 module Foreign.C.Types
         ( -- * Representations of C types
           -- $ctypes
+
+          -- ** Platform differences
+          -- | This module contains platform specific information about types.
+          --   __/As such the types presented on this page reflect the platform
+          --   on which the documentation was generated and may not coincide with
+          --   the types on your platform./__
 
           -- ** Integral types
           -- | These types are represented as @newtype@s of
@@ -62,6 +72,10 @@ module Foreign.C.Types
         , CFloat(..),   CDouble(..)
         -- XXX GHC doesn't support CLDouble yet
         -- , CLDouble(..)
+
+          -- See Note [Exporting constructors of marshallable foreign types]
+          -- in Foreign.Ptr for why the constructors for these newtypes are
+          -- exported.
 
           -- ** Other types
 
@@ -184,6 +198,7 @@ ARITHMETIC_TYPE(CTime,HTYPE_TIME_T)
 -- | Haskell type representing the C @useconds_t@ type.
 --
 -- @since 4.4.0.0
+
 ARITHMETIC_TYPE(CUSeconds,HTYPE_USECONDS_T)
 -- | Haskell type representing the C @suseconds_t@ type.
 --

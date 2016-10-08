@@ -26,11 +26,10 @@ import MkIface ( tyThingToIfaceDecl )
 import Type ( tidyOpenType )
 import IfaceSyn ( pprIfaceDecl, ShowSub(..), ShowHowMuch(..) )
 import FamInstEnv( FamInst( .. ), FamFlavor(..) )
-import TcType
+import Type( Type, pprTypeApp, pprSigmaType )
 import Name
 import VarEnv( emptyTidyEnv )
 import Outputable
-import FastString
 
 -- -----------------------------------------------------------------------------
 -- Pretty-printing entities that we get from the GHC API
@@ -88,7 +87,7 @@ pprFamInst (FamInst { fi_flavor = DataFamilyInst rep_tc })
 pprFamInst (FamInst { fi_flavor = SynFamilyInst, fi_axiom = axiom
                     , fi_tys = lhs_tys, fi_rhs = rhs })
   = showWithLoc (pprDefinedAt (getName axiom)) $
-    hang (ptext (sLit "type instance") <+> pprTypeApp (coAxiomTyCon axiom) lhs_tys)
+    hang (text "type instance" <+> pprTypeApp (coAxiomTyCon axiom) lhs_tys)
        2 (equals <+> ppr rhs)
 
 ----------------------------
@@ -147,18 +146,10 @@ ppr_ty_thing hdr_only path ty_thing
                  -- Nothing is unexpected here; TyThings have External names
 
 pprTypeForUser :: Type -> SDoc
--- We do two things here.
--- a) We tidy the type, regardless
--- b) Swizzle the foralls to the top, so that without
---    -fprint-explicit-foralls we'll suppress all the foralls
--- Prime example: a class op might have type
---      forall a. C a => forall b. Ord b => stuff
--- Then we want to display
---      (C a, Ord b) => stuff
+-- The type is tidied
 pprTypeForUser ty
-  = pprSigmaType (mkInvSigmaTy tvs ctxt tau)
+  = pprSigmaType tidy_ty
   where
-    (tvs, ctxt, tau) = tcSplitSigmaTy tidy_ty
     (_, tidy_ty)     = tidyOpenType emptyTidyEnv ty
      -- Often the types/kinds we print in ghci are fully generalised
      -- and have no free variables, but it turns out that we sometimes
@@ -170,4 +161,4 @@ showWithLoc loc doc
     = hang doc 2 (char '\t' <> comment <+> loc)
                 -- The tab tries to make them line up a bit
   where
-    comment = ptext (sLit "--")
+    comment = text "--"

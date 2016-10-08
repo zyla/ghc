@@ -35,6 +35,7 @@
 #include "FileLock.h"
 #include "LinkerInternals.h"
 #include "LibdwPool.h"
+#include "sm/CNF.h"
 
 #if defined(PROFILING)
 # include "ProfHeap.h"
@@ -293,7 +294,7 @@ hs_add_root(void (*init_root)(void) STG_UNUSED)
 static void
 hs_exit_(rtsBool wait_foreign)
 {
-    nat g, i;
+    uint32_t g, i;
 
     if (hs_init_count <= 0) {
         errorBelch("warning: too many hs_exit()s");
@@ -340,7 +341,12 @@ hs_exit_(rtsBool wait_foreign)
 
     /* stop the ticker */
     stopTimer();
-    exitTimer(wait_foreign);
+    /*
+     * it is quite important that we wait here as some timer implementations
+     * (e.g. pthread) may fire even after we exit, which may segfault as we've
+     * already freed the capabilities.
+     */
+    exitTimer(rtsTrue);
 
     // set the terminal settings back to what they were
 #if !defined(mingw32_HOST_OS)
@@ -408,6 +414,9 @@ hs_exit_(rtsBool wait_foreign)
 
 #if defined(TICKY_TICKY)
     if (RtsFlags.TickyFlags.showTickyStats) PrintTickyInfo();
+
+    FILE *tf = RtsFlags.TickyFlags.tickyFile;
+    if (tf != NULL) fclose(tf);
 #endif
 
 #if defined(mingw32_HOST_OS) && !defined(THREADED_RTS)
@@ -425,6 +434,11 @@ hs_exit_(rtsBool wait_foreign)
 
     // Free the various argvs
     freeRtsArgs();
+
+#ifndef CMINUSMINUS
+    // Free threading resources
+    freeThreadingResources();
+#endif
 }
 
 // Flush stdout and stderr.  We do this during shutdown so that it
@@ -446,6 +460,14 @@ hs_exit(void)
     // be safe; this might be a DLL
 }
 
+void
+hs_exit_nowait(void)
+{
+    hs_exit_(rtsFalse);
+    // do not wait for outstanding foreign calls to return; if they return in
+    // the future, they will block indefinitely.
+}
+
 // Compatibility interfaces
 void
 shutdownHaskell(void)
@@ -457,10 +479,6 @@ void
 shutdownHaskellAndExit(int n, int fastExit)
 {
     if (!fastExit) {
-        // even if hs_init_count > 1, we still want to shut down the RTS
-        // and exit immediately (see #5402)
-        hs_init_count = 1;
-
         // we're about to exit(), no need to wait for foreign calls to return.
         hs_exit_(rtsFalse);
     }

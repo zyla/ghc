@@ -21,8 +21,10 @@ import SrcLoc
 import Distribution.Simple.GHC ( componentGhcOptions )
 import Distribution.Simple.Configure ( getPersistBuildConfig )
 import Distribution.Simple.Program.GHC ( renderGhcOptions )
-import Distribution.PackageDescription ( library, libBuildInfo )
+import Distribution.PackageDescription ( libBuildInfo )
 import Distribution.Simple.LocalBuildInfo
+import Distribution.Types.LocalBuildInfo ( componentNameTargets' )
+import Distribution.Types.TargetInfo
 import qualified Distribution.Verbosity as V
 
 import Control.Monad hiding (mapM)
@@ -179,17 +181,16 @@ flagsFromCabal :: FilePath -> IO [String]
 flagsFromCabal distPref = do
   lbi <- getPersistBuildConfig distPref
   let pd = localPkgDescr lbi
-      findLibraryConfig []                         = Nothing
-      findLibraryConfig ((CLibName, clbi, _) :  _) = Just clbi
-      findLibraryConfig (_                   : xs) = findLibraryConfig xs
-      mLibraryConfig = findLibraryConfig (componentsConfigs lbi)
-  case (library pd, mLibraryConfig) of
-    (Just lib, Just clbi) ->
-      let bi = libBuildInfo lib
+  case componentNameTargets' pd lbi CLibName of
+    [target] ->
+      let clbi = targetCLBI target
+          CLib lib = getComponent pd (componentLocalName clbi)
+          bi = libBuildInfo lib
           odir = buildDir lbi
           opts = componentGhcOptions V.normal lbi bi clbi odir
-      in return $ renderGhcOptions (compiler lbi) opts
-    _ -> error "no library"
+      in return $ renderGhcOptions (compiler lbi) (hostPlatform lbi) opts
+    [] -> error "no library"
+    _ -> error "more libraries than we know how to handle"
 
 ----------------------------------------------------------------
 --- LOADING HASKELL SOURCE
@@ -256,7 +257,8 @@ boundValues mod group =
                        , bind <- bagToList binds
                        , x <- boundThings mod bind ]
                _other -> error "boundValues"
-      tys = [ n | ns <- map (fst . hsLTyClDeclBinders) (tyClGroupConcat (hs_tyclds group))
+      tys = [ n | ns <- map (fst . hsLTyClDeclBinders)
+                            (hs_tyclds group >>= group_tyclds)
                 , n <- map found ns ]
       fors = concat $ map forBound (hs_fords group)
              where forBound lford = case unLoc lford of
@@ -279,7 +281,8 @@ boundThings modname lbinding =
     FunBind { fun_id = id } -> [thing id]
     PatBind { pat_lhs = lhs } -> patThings lhs []
     VarBind { var_id = id } -> [FoundThing modname (getOccString id) (startOfLocated lbinding)]
-    AbsBinds { } -> [] -- nothing interesting in a type abstraction
+    AbsBinds { }    -> [] -- nothing interesting in a type abstraction
+    AbsBindsSig { } -> []
     PatSynBind PSB{ psb_id = id } -> [thing id]
   where thing = foundOfLName modname
         patThings lpat tl =
@@ -298,8 +301,8 @@ boundThings modname lbinding =
                ConPatIn _ conargs -> conArgs conargs tl
                ConPatOut{ pat_args = conargs } -> conArgs conargs tl
                LitPat _ -> tl
-               NPat _ _ _ -> tl -- form of literal pattern?
-               NPlusKPat id _ _ _ -> thing id : tl
+               NPat {} -> tl -- form of literal pattern?
+               NPlusKPat id _ _ _ _ _ -> thing id : tl
                SigPatIn p _ -> patThings p tl
                SigPatOut p _ -> patThings p tl
                _ -> error "boundThings"

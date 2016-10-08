@@ -1,8 +1,15 @@
-{-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE RankNTypes, ScopedTypeVariables, PolyKinds, StandaloneDeriving,
-             TypeOperators, GADTs, FlexibleInstances #-}
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE TypeOperators #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -107,6 +114,7 @@ module Data.Data (
 
 ------------------------------------------------------------------------------
 
+import Data.Functor.Const
 import Data.Either
 import Data.Eq
 import Data.Maybe
@@ -114,7 +122,7 @@ import Data.Monoid
 import Data.Ord
 import Data.Typeable
 import Data.Version( Version(..) )
-import GHC.Base hiding (Any)
+import GHC.Base hiding (Any, IntRep, FloatRep)
 import GHC.List
 import GHC.Num
 import GHC.Read
@@ -122,6 +130,7 @@ import GHC.Show
 import Text.Read( reads )
 
 -- Imports for the instances
+import Data.Functor.Identity -- So we can give Data instance for Identity
 import Data.Int              -- So we can give Data instance for Int8, ...
 import Data.Type.Coercion
 import Data.Word             -- So we can give Data instance for Word8, ...
@@ -133,7 +142,9 @@ import GHC.ForeignPtr        -- So we can give Data instance for ForeignPtr
 --import GHC.ST                -- So we can give Data instance for ST
 --import GHC.Conc              -- So we can give Data instance for MVar & Co.
 import GHC.Arr               -- So we can give Data instance for Array
-
+import qualified GHC.Generics as Generics (Fixity(..))
+import GHC.Generics hiding (Fixity(..))
+                             -- So we can give Data instance for U1, V1, ...
 
 ------------------------------------------------------------------------------
 --
@@ -301,24 +312,24 @@ class Typeable a => Data a where
   -- isomorphism pair as injection and projection.
   gmapT :: (forall b. Data b => b -> b) -> a -> a
 
-  -- Use an identity datatype constructor ID (see below)
+  -- Use the Identity datatype constructor
   -- to instantiate the type constructor c in the type of gfoldl,
-  -- and perform injections ID and projections unID accordingly.
+  -- and perform injections Identity and projections runIdentity accordingly.
   --
-  gmapT f x0 = unID (gfoldl k ID x0)
+  gmapT f x0 = runIdentity (gfoldl k Identity x0)
     where
-      k :: Data d => ID (d->b) -> d -> ID b
-      k (ID c) x = ID (c (f x))
+      k :: Data d => Identity (d->b) -> d -> Identity b
+      k (Identity c) x = Identity (c (f x))
 
 
   -- | A generic query with a left-associative binary operator
   gmapQl :: forall r r'. (r -> r' -> r) -> r -> (forall d. Data d => d -> r') -> a -> r
-  gmapQl o r f = unCONST . gfoldl k z
+  gmapQl o r f = getConst . gfoldl k z
     where
-      k :: Data d => CONST r (d->b) -> d -> CONST r b
-      k c x = CONST $ (unCONST c) `o` f x
-      z :: g -> CONST r g
-      z _   = CONST r
+      k :: Data d => Const r (d->b) -> d -> Const r b
+      k c x = Const $ (getConst c) `o` f x
+      z :: g -> Const r g
+      z _   = Const r
 
   -- | A generic query with a right-associative binary operator
   gmapQr :: forall r r'. (r' -> r -> r) -> r -> (forall d. Data d => d -> r') -> a -> r
@@ -414,14 +425,6 @@ was transformed successfully.
              )
 
 
--- | The identity type constructor needed for the definition of gmapT
-newtype ID x = ID { unID :: x }
-
-
--- | The constant type constructor needed for the definition of gmapQl
-newtype CONST c a = CONST { unCONST :: c }
-
-
 -- | Type constructor for adding counters to queries
 data Qi q a = Qi Int (Maybe q)
 
@@ -452,13 +455,13 @@ fromConstrB :: Data a
             => (forall d. Data d => d)
             -> Constr
             -> a
-fromConstrB f = unID . gunfold k z
+fromConstrB f = runIdentity . gunfold k z
  where
-  k :: forall b r. Data b => ID (b -> r) -> ID r
-  k c = ID (unID c f)
+  k :: forall b r. Data b => Identity (b -> r) -> Identity r
+  k c = Identity (runIdentity c f)
 
-  z :: forall r. r -> ID r
-  z = ID
+  z :: forall r. r -> Identity r
+  z = Identity
 
 
 -- | Monadic variation on 'fromConstrB'
@@ -505,11 +508,14 @@ data Constr = Constr
                         , datatype  :: DataType
                         }
 
+-- | @since 4.0.0.0
 instance Show Constr where
  show = constring
 
 
 -- | Equality of constructors
+--
+-- @since 4.0.0.0
 instance Eq Constr where
   c == c' = constrRep c == constrRep c'
 
@@ -841,32 +847,15 @@ tyconModule x = let (a,b) = break ((==) '.') x
 --
 ------------------------------------------------------------------------------
 
-
-falseConstr :: Constr
-falseConstr  = mkConstr boolDataType "False" [] Prefix
-trueConstr :: Constr
-trueConstr   = mkConstr boolDataType "True"  [] Prefix
-
-boolDataType :: DataType
-boolDataType = mkDataType "Prelude.Bool" [falseConstr,trueConstr]
-
-instance Data Bool where
-  toConstr False = falseConstr
-  toConstr True  = trueConstr
-  gunfold _ z c  = case constrIndex c of
-                     1 -> z False
-                     2 -> z True
-                     _ -> errorWithoutStackTrace $ "Data.Data.gunfold: Constructor "
-                                  ++ show c
-                                  ++ " is not of type Bool."
-  dataTypeOf _ = boolDataType
-
+-- | @since 4.0.0.0
+deriving instance Data Bool
 
 ------------------------------------------------------------------------------
 
 charType :: DataType
 charType = mkCharType "Prelude.Char"
 
+-- | @since 4.0.0.0
 instance Data Char where
   toConstr x = mkCharConstr charType x
   gunfold _ z c = case constrRep c of
@@ -881,6 +870,7 @@ instance Data Char where
 floatType :: DataType
 floatType = mkFloatType "Prelude.Float"
 
+-- | @since 4.0.0.0
 instance Data Float where
   toConstr = mkRealConstr floatType
   gunfold _ z c = case constrRep c of
@@ -895,6 +885,7 @@ instance Data Float where
 doubleType :: DataType
 doubleType = mkFloatType "Prelude.Double"
 
+-- | @since 4.0.0.0
 instance Data Double where
   toConstr = mkRealConstr doubleType
   gunfold _ z c = case constrRep c of
@@ -909,6 +900,7 @@ instance Data Double where
 intType :: DataType
 intType = mkIntType "Prelude.Int"
 
+-- | @since 4.0.0.0
 instance Data Int where
   toConstr x = mkIntegralConstr intType x
   gunfold _ z c = case constrRep c of
@@ -923,6 +915,7 @@ instance Data Int where
 integerType :: DataType
 integerType = mkIntType "Prelude.Integer"
 
+-- | @since 4.0.0.0
 instance Data Integer where
   toConstr = mkIntegralConstr integerType
   gunfold _ z c = case constrRep c of
@@ -937,6 +930,7 @@ instance Data Integer where
 int8Type :: DataType
 int8Type = mkIntType "Data.Int.Int8"
 
+-- | @since 4.0.0.0
 instance Data Int8 where
   toConstr x = mkIntegralConstr int8Type x
   gunfold _ z c = case constrRep c of
@@ -951,6 +945,7 @@ instance Data Int8 where
 int16Type :: DataType
 int16Type = mkIntType "Data.Int.Int16"
 
+-- | @since 4.0.0.0
 instance Data Int16 where
   toConstr x = mkIntegralConstr int16Type x
   gunfold _ z c = case constrRep c of
@@ -965,6 +960,7 @@ instance Data Int16 where
 int32Type :: DataType
 int32Type = mkIntType "Data.Int.Int32"
 
+-- | @since 4.0.0.0
 instance Data Int32 where
   toConstr x = mkIntegralConstr int32Type x
   gunfold _ z c = case constrRep c of
@@ -979,6 +975,7 @@ instance Data Int32 where
 int64Type :: DataType
 int64Type = mkIntType "Data.Int.Int64"
 
+-- | @since 4.0.0.0
 instance Data Int64 where
   toConstr x = mkIntegralConstr int64Type x
   gunfold _ z c = case constrRep c of
@@ -993,6 +990,7 @@ instance Data Int64 where
 wordType :: DataType
 wordType = mkIntType "Data.Word.Word"
 
+-- | @since 4.0.0.0
 instance Data Word where
   toConstr x = mkIntegralConstr wordType x
   gunfold _ z c = case constrRep c of
@@ -1007,6 +1005,7 @@ instance Data Word where
 word8Type :: DataType
 word8Type = mkIntType "Data.Word.Word8"
 
+-- | @since 4.0.0.0
 instance Data Word8 where
   toConstr x = mkIntegralConstr word8Type x
   gunfold _ z c = case constrRep c of
@@ -1021,6 +1020,7 @@ instance Data Word8 where
 word16Type :: DataType
 word16Type = mkIntType "Data.Word.Word16"
 
+-- | @since 4.0.0.0
 instance Data Word16 where
   toConstr x = mkIntegralConstr word16Type x
   gunfold _ z c = case constrRep c of
@@ -1035,6 +1035,7 @@ instance Data Word16 where
 word32Type :: DataType
 word32Type = mkIntType "Data.Word.Word32"
 
+-- | @since 4.0.0.0
 instance Data Word32 where
   toConstr x = mkIntegralConstr word32Type x
   gunfold _ z c = case constrRep c of
@@ -1049,6 +1050,7 @@ instance Data Word32 where
 word64Type :: DataType
 word64Type = mkIntType "Data.Word.Word64"
 
+-- | @since 4.0.0.0
 instance Data Word64 where
   toConstr x = mkIntegralConstr word64Type x
   gunfold _ z c = case constrRep c of
@@ -1066,6 +1068,11 @@ ratioConstr = mkConstr ratioDataType ":%" [] Infix
 ratioDataType :: DataType
 ratioDataType = mkDataType "GHC.Real.Ratio" [ratioConstr]
 
+-- NB: This Data instance intentionally uses the (%) smart constructor instead
+-- of the internal (:%) constructor to preserve the invariant that a Ratio
+-- value is reduced to normal form. See Trac #10011.
+
+-- | @since 4.0.0.0
 instance (Data a, Integral a) => Data (Ratio a) where
   gfoldl k z (a :% b) = z (%) `k` a `k` b
   toConstr _ = ratioConstr
@@ -1084,6 +1091,7 @@ consConstr   = mkConstr listDataType "(:)" [] Infix
 listDataType :: DataType
 listDataType = mkDataType "Prelude.[]" [nilConstr,consConstr]
 
+-- | @since 4.0.0.0
 instance Data a => Data [a] where
   gfoldl _ z []     = z []
   gfoldl f z (x:xs) = z (:) `f` x `f` xs
@@ -1110,201 +1118,43 @@ instance Data a => Data [a] where
 
 ------------------------------------------------------------------------------
 
-nothingConstr :: Constr
-nothingConstr = mkConstr maybeDataType "Nothing" [] Prefix
-justConstr :: Constr
-justConstr    = mkConstr maybeDataType "Just"    [] Prefix
+-- | @since 4.0.0.0
+deriving instance Data a => Data (Maybe a)
 
-maybeDataType :: DataType
-maybeDataType = mkDataType "Prelude.Maybe" [nothingConstr,justConstr]
+-- | @since 4.0.0.0
+deriving instance Data Ordering
 
-instance Data a => Data (Maybe a) where
-  gfoldl _ z Nothing  = z Nothing
-  gfoldl f z (Just x) = z Just `f` x
-  toConstr Nothing  = nothingConstr
-  toConstr (Just _) = justConstr
-  gunfold k z c = case constrIndex c of
-                    1 -> z Nothing
-                    2 -> k (z Just)
-                    _ -> errorWithoutStackTrace "Data.Data.gunfold(Maybe)"
-  dataTypeOf _ = maybeDataType
-  dataCast1 f  = gcast1 f
+-- | @since 4.0.0.0
+deriving instance (Data a, Data b) => Data (Either a b)
 
+-- | @since 4.0.0.0
+deriving instance Data ()
 
-------------------------------------------------------------------------------
+-- | @since 4.0.0.0
+deriving instance (Data a, Data b) => Data (a,b)
 
-ltConstr :: Constr
-ltConstr         = mkConstr orderingDataType "LT" [] Prefix
-eqConstr :: Constr
-eqConstr         = mkConstr orderingDataType "EQ" [] Prefix
-gtConstr :: Constr
-gtConstr         = mkConstr orderingDataType "GT" [] Prefix
+-- | @since 4.0.0.0
+deriving instance (Data a, Data b, Data c) => Data (a,b,c)
 
-orderingDataType :: DataType
-orderingDataType = mkDataType "Prelude.Ordering" [ltConstr,eqConstr,gtConstr]
+-- | @since 4.0.0.0
+deriving instance (Data a, Data b, Data c, Data d)
+         => Data (a,b,c,d)
 
-instance Data Ordering where
-  gfoldl _ z LT  = z LT
-  gfoldl _ z EQ  = z EQ
-  gfoldl _ z GT  = z GT
-  toConstr LT  = ltConstr
-  toConstr EQ  = eqConstr
-  toConstr GT  = gtConstr
-  gunfold _ z c = case constrIndex c of
-                    1 -> z LT
-                    2 -> z EQ
-                    3 -> z GT
-                    _ -> errorWithoutStackTrace "Data.Data.gunfold(Ordering)"
-  dataTypeOf _ = orderingDataType
+-- | @since 4.0.0.0
+deriving instance (Data a, Data b, Data c, Data d, Data e)
+         => Data (a,b,c,d,e)
 
+-- | @since 4.0.0.0
+deriving instance (Data a, Data b, Data c, Data d, Data e, Data f)
+         => Data (a,b,c,d,e,f)
+
+-- | @since 4.0.0.0
+deriving instance (Data a, Data b, Data c, Data d, Data e, Data f, Data g)
+         => Data (a,b,c,d,e,f,g)
 
 ------------------------------------------------------------------------------
 
-leftConstr :: Constr
-leftConstr     = mkConstr eitherDataType "Left"  [] Prefix
-
-rightConstr :: Constr
-rightConstr    = mkConstr eitherDataType "Right" [] Prefix
-
-eitherDataType :: DataType
-eitherDataType = mkDataType "Prelude.Either" [leftConstr,rightConstr]
-
-instance (Data a, Data b) => Data (Either a b) where
-  gfoldl f z (Left a)   = z Left  `f` a
-  gfoldl f z (Right a)  = z Right `f` a
-  toConstr (Left _)  = leftConstr
-  toConstr (Right _) = rightConstr
-  gunfold k z c = case constrIndex c of
-                    1 -> k (z Left)
-                    2 -> k (z Right)
-                    _ -> errorWithoutStackTrace "Data.Data.gunfold(Either)"
-  dataTypeOf _ = eitherDataType
-  dataCast2 f  = gcast2 f
-
-
-------------------------------------------------------------------------------
-
-tuple0Constr :: Constr
-tuple0Constr = mkConstr tuple0DataType "()" [] Prefix
-
-tuple0DataType :: DataType
-tuple0DataType = mkDataType "Prelude.()" [tuple0Constr]
-
-instance Data () where
-  toConstr ()   = tuple0Constr
-  gunfold _ z c | constrIndex c == 1 = z ()
-  gunfold _ _ _ = errorWithoutStackTrace "Data.Data.gunfold(unit)"
-  dataTypeOf _  = tuple0DataType
-
-
-------------------------------------------------------------------------------
-
-tuple2Constr :: Constr
-tuple2Constr = mkConstr tuple2DataType "(,)" [] Infix
-
-tuple2DataType :: DataType
-tuple2DataType = mkDataType "Prelude.(,)" [tuple2Constr]
-
-instance (Data a, Data b) => Data (a,b) where
-  gfoldl f z (a,b) = z (,) `f` a `f` b
-  toConstr (_,_) = tuple2Constr
-  gunfold k z c | constrIndex c == 1 = k (k (z (,)))
-  gunfold _ _ _ = errorWithoutStackTrace "Data.Data.gunfold(tup2)"
-  dataTypeOf _  = tuple2DataType
-  dataCast2 f   = gcast2 f
-
-
-------------------------------------------------------------------------------
-
-tuple3Constr :: Constr
-tuple3Constr = mkConstr tuple3DataType "(,,)" [] Infix
-
-tuple3DataType :: DataType
-tuple3DataType = mkDataType "Prelude.(,,)" [tuple3Constr]
-
-instance (Data a, Data b, Data c) => Data (a,b,c) where
-  gfoldl f z (a,b,c) = z (,,) `f` a `f` b `f` c
-  toConstr (_,_,_) = tuple3Constr
-  gunfold k z c | constrIndex c == 1 = k (k (k (z (,,))))
-  gunfold _ _ _ = errorWithoutStackTrace "Data.Data.gunfold(tup3)"
-  dataTypeOf _  = tuple3DataType
-
-
-------------------------------------------------------------------------------
-
-tuple4Constr :: Constr
-tuple4Constr = mkConstr tuple4DataType "(,,,)" [] Infix
-
-tuple4DataType :: DataType
-tuple4DataType = mkDataType "Prelude.(,,,)" [tuple4Constr]
-
-instance (Data a, Data b, Data c, Data d)
-         => Data (a,b,c,d) where
-  gfoldl f z (a,b,c,d) = z (,,,) `f` a `f` b `f` c `f` d
-  toConstr (_,_,_,_) = tuple4Constr
-  gunfold k z c = case constrIndex c of
-                    1 -> k (k (k (k (z (,,,)))))
-                    _ -> errorWithoutStackTrace "Data.Data.gunfold(tup4)"
-  dataTypeOf _ = tuple4DataType
-
-
-------------------------------------------------------------------------------
-
-tuple5Constr :: Constr
-tuple5Constr = mkConstr tuple5DataType "(,,,,)" [] Infix
-
-tuple5DataType :: DataType
-tuple5DataType = mkDataType "Prelude.(,,,,)" [tuple5Constr]
-
-instance (Data a, Data b, Data c, Data d, Data e)
-         => Data (a,b,c,d,e) where
-  gfoldl f z (a,b,c,d,e) = z (,,,,) `f` a `f` b `f` c `f` d `f` e
-  toConstr (_,_,_,_,_) = tuple5Constr
-  gunfold k z c = case constrIndex c of
-                    1 -> k (k (k (k (k (z (,,,,))))))
-                    _ -> errorWithoutStackTrace "Data.Data.gunfold(tup5)"
-  dataTypeOf _ = tuple5DataType
-
-
-------------------------------------------------------------------------------
-
-tuple6Constr :: Constr
-tuple6Constr = mkConstr tuple6DataType "(,,,,,)" [] Infix
-
-tuple6DataType :: DataType
-tuple6DataType = mkDataType "Prelude.(,,,,,)" [tuple6Constr]
-
-instance (Data a, Data b, Data c, Data d, Data e, Data f)
-         => Data (a,b,c,d,e,f) where
-  gfoldl f z (a,b,c,d,e,f') = z (,,,,,) `f` a `f` b `f` c `f` d `f` e `f` f'
-  toConstr (_,_,_,_,_,_) = tuple6Constr
-  gunfold k z c = case constrIndex c of
-                    1 -> k (k (k (k (k (k (z (,,,,,)))))))
-                    _ -> errorWithoutStackTrace "Data.Data.gunfold(tup6)"
-  dataTypeOf _ = tuple6DataType
-
-
-------------------------------------------------------------------------------
-
-tuple7Constr :: Constr
-tuple7Constr = mkConstr tuple7DataType "(,,,,,,)" [] Infix
-
-tuple7DataType :: DataType
-tuple7DataType = mkDataType "Prelude.(,,,,,,)" [tuple7Constr]
-
-instance (Data a, Data b, Data c, Data d, Data e, Data f, Data g)
-         => Data (a,b,c,d,e,f,g) where
-  gfoldl f z (a,b,c,d,e,f',g) =
-    z (,,,,,,) `f` a `f` b `f` c `f` d `f` e `f` f' `f` g
-  toConstr  (_,_,_,_,_,_,_) = tuple7Constr
-  gunfold k z c = case constrIndex c of
-                    1 -> k (k (k (k (k (k (k (z (,,,,,,))))))))
-                    _ -> errorWithoutStackTrace "Data.Data.gunfold(tup7)"
-  dataTypeOf _ = tuple7DataType
-
-
-------------------------------------------------------------------------------
-
+-- | @since 4.8.0.0
 instance Data a => Data (Ptr a) where
   toConstr _   = errorWithoutStackTrace "Data.Data.toConstr(Ptr)"
   gunfold _ _  = errorWithoutStackTrace "Data.Data.gunfold(Ptr)"
@@ -1313,6 +1163,7 @@ instance Data a => Data (Ptr a) where
 
 ------------------------------------------------------------------------------
 
+-- | @since 4.8.0.0
 instance Data a => Data (ForeignPtr a) where
   toConstr _   = errorWithoutStackTrace "Data.Data.toConstr(ForeignPtr)"
   gunfold _ _  = errorWithoutStackTrace "Data.Data.gunfold(ForeignPtr)"
@@ -1322,6 +1173,7 @@ instance Data a => Data (ForeignPtr a) where
 ------------------------------------------------------------------------------
 -- The Data instance for Array preserves data abstraction at the cost of
 -- inefficiency. We omit reflection services for the sake of data abstraction.
+-- | @since 4.8.0.0
 instance (Data a, Data b, Ix a) => Data (Array a b)
  where
   gfoldl f z a = z (listArray (bounds a)) `f` (elems a)
@@ -1333,179 +1185,94 @@ instance (Data a, Data b, Ix a) => Data (Array a b)
 ----------------------------------------------------------------------------
 -- Data instance for Proxy
 
-proxyConstr :: Constr
-proxyConstr = mkConstr proxyDataType "Proxy" [] Prefix
+-- | @since 4.7.0.0
+deriving instance (Data t) => Data (Proxy t)
 
-proxyDataType :: DataType
-proxyDataType = mkDataType "Data.Proxy.Proxy" [proxyConstr]
+-- | @since 4.7.0.0
+deriving instance (a ~ b, Data a) => Data (a :~: b)
 
-instance (Data t) => Data (Proxy t) where
-  gfoldl _ z Proxy  = z Proxy
-  toConstr Proxy  = proxyConstr
-  gunfold _ z c = case constrIndex c of
-                    1 -> z Proxy
-                    _ -> errorWithoutStackTrace "Data.Data.gunfold(Proxy)"
-  dataTypeOf _ = proxyDataType
-  dataCast1 f  = gcast1 f
+-- | @since 4.7.0.0
+deriving instance (Coercible a b, Data a, Data b) => Data (Coercion a b)
 
------------------------------------------------------------------------
--- instance for (:~:)
+-- | @since 4.9.0.0
+deriving instance Data a => Data (Identity a)
 
-reflConstr :: Constr
-reflConstr = mkConstr equalityDataType "Refl" [] Prefix
+-- | @since 4.7.0.0
+deriving instance Data Version
 
-equalityDataType :: DataType
-equalityDataType = mkDataType "Data.Type.Equality.(:~:)" [reflConstr]
+----------------------------------------------------------------------------
+-- Data instances for Data.Monoid wrappers
 
-instance (a ~ b, Data a) => Data (a :~: b) where
-  gfoldl _ z Refl = z Refl
-  toConstr Refl   = reflConstr
-  gunfold _ z c   = case constrIndex c of
-                      1 -> z Refl
-                      _ -> errorWithoutStackTrace "Data.Data.gunfold(:~:)"
-  dataTypeOf _    = equalityDataType
-  dataCast2 f     = gcast2 f
+-- | @since 4.8.0.0
+deriving instance Data a => Data (Dual a)
 
------------------------------------------------------------------------
--- instance for Coercion
+-- | @since 4.8.0.0
+deriving instance Data All
 
-coercionConstr :: Constr
-coercionConstr = mkConstr equalityDataType "Coercion" [] Prefix
+-- | @since 4.8.0.0
+deriving instance Data Any
 
-coercionDataType :: DataType
-coercionDataType = mkDataType "Data.Type.Coercion.Coercion" [coercionConstr]
+-- | @since 4.8.0.0
+deriving instance Data a => Data (Sum a)
 
-instance (Coercible a b, Data a, Data b) => Data (Coercion a b) where
-  gfoldl _ z Coercion = z Coercion
-  toConstr Coercion = coercionConstr
-  gunfold _ z c   = case constrIndex c of
-                      1 -> z Coercion
-                      _ -> errorWithoutStackTrace "Data.Data.gunfold(Coercion)"
-  dataTypeOf _    = coercionDataType
-  dataCast2 f     = gcast2 f
+-- | @since 4.8.0.0
+deriving instance Data a => Data (Product a)
 
------------------------------------------------------------------------
--- instance for Data.Version
+-- | @since 4.8.0.0
+deriving instance Data a => Data (First a)
 
-versionConstr :: Constr
-versionConstr = mkConstr versionDataType "Version" ["versionBranch","versionTags"] Prefix
+-- | @since 4.8.0.0
+deriving instance Data a => Data (Last a)
 
-versionDataType :: DataType
-versionDataType = mkDataType "Data.Version.Version" [versionConstr]
+-- | @since 4.8.0.0
+deriving instance (Data (f a), Data a, Typeable f) => Data (Alt f a)
 
-instance Data Version where
-  gfoldl k z (Version bs ts) = z Version `k` bs `k` ts
-  toConstr (Version _ _) = versionConstr
-  gunfold k z c = case constrIndex c of
-                    1 -> k (k (z Version))
-                    _ -> errorWithoutStackTrace "Data.Data.gunfold(Version)"
-  dataTypeOf _  = versionDataType
+----------------------------------------------------------------------------
+-- Data instances for GHC.Generics representations
 
------------------------------------------------------------------------
--- instances for Data.Monoid wrappers
+-- | @since 4.9.0.0
+deriving instance Data p => Data (U1 p)
 
-dualConstr :: Constr
-dualConstr = mkConstr dualDataType "Dual" ["getDual"] Prefix
+-- | @since 4.9.0.0
+deriving instance Data p => Data (Par1 p)
 
-dualDataType :: DataType
-dualDataType = mkDataType "Data.Monoid.Dual" [dualConstr]
+-- | @since 4.9.0.0
+deriving instance (Data (f p), Typeable f, Data p) => Data (Rec1 f p)
 
-instance Data a => Data (Dual a) where
-  gfoldl f z (Dual x) = z Dual `f` x
-  gunfold k z _ = k (z Dual)
-  toConstr (Dual _) = dualConstr
-  dataTypeOf _ = dualDataType
-  dataCast1 f = gcast1 f
+-- | @since 4.9.0.0
+deriving instance (Typeable i, Data p, Data c) => Data (K1 i c p)
 
-allConstr :: Constr
-allConstr = mkConstr allDataType "All" ["getAll"] Prefix
+-- | @since 4.9.0.0
+deriving instance (Data p, Data (f p), Typeable c, Typeable i, Typeable f)
+    => Data (M1 i c f p)
 
-allDataType :: DataType
-allDataType = mkDataType "All" [allConstr]
+-- | @since 4.9.0.0
+deriving instance (Typeable f, Typeable g, Data p, Data (f p), Data (g p))
+    => Data ((f :+: g) p)
 
-instance Data All where
-  gfoldl f z (All x) = (z All `f` x)
-  gunfold k z _ = k (z All)
-  toConstr (All _) = allConstr
-  dataTypeOf _ = allDataType
+-- | @since 4.9.0.0
+deriving instance (Typeable (f :: * -> *), Typeable (g :: * -> *),
+          Data p, Data (f (g p)))
+    => Data ((f :.: g) p)
 
-anyConstr :: Constr
-anyConstr = mkConstr anyDataType "Any" ["getAny"] Prefix
+-- | @since 4.9.0.0
+deriving instance Data p => Data (V1 p)
 
-anyDataType :: DataType
-anyDataType = mkDataType "Any" [anyConstr]
+-- | @since 4.9.0.0
+deriving instance (Typeable f, Typeable g, Data p, Data (f p), Data (g p))
+    => Data ((f :*: g) p)
 
-instance Data Any where
-  gfoldl f z (Any x) = (z Any `f` x)
-  gunfold k z _ = k (z Any)
-  toConstr (Any _) = anyConstr
-  dataTypeOf _ = anyDataType
+-- | @since 4.9.0.0
+deriving instance Data Generics.Fixity
 
+-- | @since 4.9.0.0
+deriving instance Data Associativity
 
-sumConstr :: Constr
-sumConstr = mkConstr sumDataType "Sum" ["getSum"] Prefix
+-- | @since 4.9.0.0
+deriving instance Data SourceUnpackedness
 
-sumDataType :: DataType
-sumDataType = mkDataType "Data.Monoid.Sum" [sumConstr]
+-- | @since 4.9.0.0
+deriving instance Data SourceStrictness
 
-instance Data a => Data (Sum a) where
-  gfoldl f z (Sum x) = z Sum `f` x
-  gunfold k z _ = k (z Sum)
-  toConstr (Sum _) = sumConstr
-  dataTypeOf _ = sumDataType
-  dataCast1 f = gcast1 f
-
-
-productConstr :: Constr
-productConstr = mkConstr productDataType "Product" ["getProduct"] Prefix
-
-productDataType :: DataType
-productDataType = mkDataType "Data.Monoid.Product" [productConstr]
-
-instance Data a => Data (Product a) where
-  gfoldl f z (Product x) = z Product `f` x
-  gunfold k z _ = k (z Product)
-  toConstr (Product _) = productConstr
-  dataTypeOf _ = productDataType
-  dataCast1 f = gcast1 f
-
-
-firstConstr :: Constr
-firstConstr = mkConstr firstDataType "First" ["getFirst"] Prefix
-
-firstDataType :: DataType
-firstDataType = mkDataType "Data.Monoid.First" [firstConstr]
-
-instance Data a => Data (First a) where
-  gfoldl f z (First x) = (z First `f` x)
-  gunfold k z _ = k (z First)
-  toConstr (First _) = firstConstr
-  dataTypeOf _ = firstDataType
-  dataCast1 f = gcast1 f
-
-
-lastConstr :: Constr
-lastConstr = mkConstr lastDataType "Last" ["getLast"] Prefix
-
-lastDataType :: DataType
-lastDataType = mkDataType "Data.Monoid.Last" [lastConstr]
-
-instance Data a => Data (Last a) where
-  gfoldl f z (Last x) = (z Last `f` x)
-  gunfold k z _ = k (z Last)
-  toConstr (Last _) = lastConstr
-  dataTypeOf _ = lastDataType
-  dataCast1 f = gcast1 f
-
-
-altConstr :: Constr
-altConstr = mkConstr altDataType "Alt" ["getAlt"] Prefix
-
-altDataType :: DataType
-altDataType = mkDataType "Alt" [altConstr]
-
-instance (Data (f a), Data a, Typeable f) => Data (Alt f a) where
-  gfoldl f z (Alt x) = (z Alt `f` x)
-  gunfold k z _ = k (z Alt)
-  toConstr (Alt _) = altConstr
-  dataTypeOf _ = altDataType
+-- | @since 4.9.0.0
+deriving instance Data DecidedStrictness

@@ -186,7 +186,8 @@ getAndRemoveAnnotationComments (anns,canns) span =
 -- corresponding token, unless otherwise noted
 -- See note [Api annotations] above for details of the usage
 data AnnKeywordId
-    = AnnAs
+    = AnnAnyclass
+    | AnnAs
     | AnnAt
     | AnnBang  -- ^ '!'
     | AnnBackquote -- ^ '`'
@@ -256,6 +257,7 @@ data AnnKeywordId
     | AnnSemi -- ^ ';'
     | AnnSimpleQuote -- ^ '''
     | AnnStatic -- ^ 'static'
+    | AnnStock
     | AnnThen
     | AnnThIdSplice -- ^ '$'
     | AnnThIdTySplice -- ^ '$$'
@@ -278,7 +280,7 @@ data AnnKeywordId
     | AnnRarrowtail -- ^ '>>-'
     | AnnRarrowtailU -- ^ '>>-', unicode variant
     | AnnEofPos
-    deriving (Eq, Ord, Data, Typeable, Show)
+    deriving (Eq, Ord, Data, Show)
 
 instance Outputable AnnKeywordId where
   ppr x = text (show x)
@@ -292,10 +294,9 @@ data AnnotationComment =
   | AnnDocCommentNamed String     -- ^ something beginning '-- $'
   | AnnDocSection      Int String -- ^ a section heading
   | AnnDocOptions      String     -- ^ doc options (prune, ignore-exports, etc)
-  | AnnDocOptionsOld   String     -- ^ doc options declared "-- # ..."-style
   | AnnLineComment     String     -- ^ comment starting by "--"
   | AnnBlockComment    String     -- ^ comment in {- -}
-    deriving (Eq, Ord, Data, Typeable, Show)
+    deriving (Eq, Ord, Data, Show)
 -- Note: these are based on the Token versions, but the Token type is
 -- defined in Lexer.x and bringing it in here would create a loop
 
@@ -315,7 +316,7 @@ type LRdrName = Located RdrName
 -- original source representation can be reproduced in the corresponding
 -- 'ApiAnnotation'
 data IsUnicodeSyntax = UnicodeSyntax | NormalSyntax
-    deriving (Eq, Ord, Data, Typeable, Show)
+    deriving (Eq, Ord, Data, Show)
 
 -- | Convert a normal annotation into its unicode equivalent one
 unicodeAnn :: AnnKeywordId -> AnnKeywordId
@@ -324,7 +325,7 @@ unicodeAnn AnnDcolon     = AnnDcolonU
 unicodeAnn AnnLarrow     = AnnLarrowU
 unicodeAnn AnnRarrow     = AnnRarrowU
 unicodeAnn AnnDarrow     = AnnDarrowU
-unicodeAnn Annlarrowtail = AnnLarrowtailU
+unicodeAnn Annlarrowtail = AnnlarrowtailU
 unicodeAnn Annrarrowtail = AnnrarrowtailU
 unicodeAnn AnnLarrowtail = AnnLarrowtailU
 unicodeAnn AnnRarrowtail = AnnRarrowtailU
@@ -339,4 +340,4 @@ unicodeAnn ann           = ann
 --
 -- This type indicates whether the 'e' is present or not.
 data HasE = HasE | NoE
-     deriving (Eq, Ord, Data, Typeable, Show)
+     deriving (Eq, Ord, Data, Show)

@@ -50,7 +50,7 @@ GHC.Num         Class: Num, plus instances for Int
 GHC.Real        Classes: Real, Integral, Fractional, RealFrac
                          plus instances for Int, Integer
                 Types:  Ratio, Rational
-                        plus intances for classes so far
+                        plus instances for classes so far
 
                 Rational is needed here because it is mentioned in the signature
                 of 'toRational' in class Real
@@ -237,6 +237,7 @@ class Monoid a where
 
         mconcat = foldr mappend mempty
 
+-- | @since 2.01
 instance Monoid [a] where
         {-# INLINE mempty #-}
         mempty  = []
@@ -265,32 +266,38 @@ needed to make foldr/build forms efficient are turned off, we'll get reasonably
 efficient translations anyway.
 -}
 
+-- | @since 2.01
 instance Monoid b => Monoid (a -> b) where
         mempty _ = mempty
         mappend f g x = f x `mappend` g x
 
+-- | @since 2.01
 instance Monoid () where
         -- Should it be strict?
         mempty        = ()
         _ `mappend` _ = ()
         mconcat _     = ()
 
+-- | @since 2.01
 instance (Monoid a, Monoid b) => Monoid (a,b) where
         mempty = (mempty, mempty)
         (a1,b1) `mappend` (a2,b2) =
                 (a1 `mappend` a2, b1 `mappend` b2)
 
+-- | @since 2.01
 instance (Monoid a, Monoid b, Monoid c) => Monoid (a,b,c) where
         mempty = (mempty, mempty, mempty)
         (a1,b1,c1) `mappend` (a2,b2,c2) =
                 (a1 `mappend` a2, b1 `mappend` b2, c1 `mappend` c2)
 
+-- | @since 2.01
 instance (Monoid a, Monoid b, Monoid c, Monoid d) => Monoid (a,b,c,d) where
         mempty = (mempty, mempty, mempty, mempty)
         (a1,b1,c1,d1) `mappend` (a2,b2,c2,d2) =
                 (a1 `mappend` a2, b1 `mappend` b2,
                  c1 `mappend` c2, d1 `mappend` d2)
 
+-- | @since 2.01
 instance (Monoid a, Monoid b, Monoid c, Monoid d, Monoid e) =>
                 Monoid (a,b,c,d,e) where
         mempty = (mempty, mempty, mempty, mempty, mempty)
@@ -299,6 +306,7 @@ instance (Monoid a, Monoid b, Monoid c, Monoid d, Monoid e) =>
                  d1 `mappend` d2, e1 `mappend` e2)
 
 -- lexicographical ordering
+-- | @since 2.01
 instance Monoid Ordering where
         mempty         = EQ
         LT `mappend` _ = LT
@@ -311,19 +319,24 @@ instance Monoid Ordering where
 -- and defining @e*e = e@ and @e*s = s = s*e@ for all @s ∈ S@.\" Since
 -- there is no \"Semigroup\" typeclass providing just 'mappend', we
 -- use 'Monoid' instead.
+--
+-- @since 2.01
 instance Monoid a => Monoid (Maybe a) where
   mempty = Nothing
   Nothing `mappend` m = m
   m `mappend` Nothing = m
   Just m1 `mappend` Just m2 = Just (m1 `mappend` m2)
 
+-- | @since 2.01
 instance Monoid a => Applicative ((,) a) where
     pure x = (mempty, x)
     (u, f) <*> (v, x) = (u `mappend` v, f x)
 
+-- | @since 4.9.0.0
 instance Monoid a => Monad ((,) a) where
     (u, a) >>= k = case k a of (v, b) -> (u `mappend` v, b)
 
+-- | @since 4.9.0.0
 instance Monoid a => Monoid (IO a) where
     mempty = pure mempty
     mappend = liftA2 mappend
@@ -428,13 +441,13 @@ liftA3 :: Applicative f => (a -> b -> c -> d) -> f a -> f b -> f c -> f d
 liftA3 f a b c = fmap f a <*> b <*> c
 
 
-{-# INLINEABLE liftA #-}
+{-# INLINABLE liftA #-}
 {-# SPECIALISE liftA :: (a1->r) -> IO a1 -> IO r #-}
 {-# SPECIALISE liftA :: (a1->r) -> Maybe a1 -> Maybe r #-}
-{-# INLINEABLE liftA2 #-}
+{-# INLINABLE liftA2 #-}
 {-# SPECIALISE liftA2 :: (a1->a2->r) -> IO a1 -> IO a2 -> IO r #-}
 {-# SPECIALISE liftA2 :: (a1->a2->r) -> Maybe a1 -> Maybe a2 -> Maybe r #-}
-{-# INLINEABLE liftA3 #-}
+{-# INLINABLE liftA3 #-}
 {-# SPECIALISE liftA3 :: (a1->a2->a3->r) -> IO a1 -> IO a2 -> IO a3 -> IO r #-}
 {-# SPECIALISE liftA3 :: (a1->a2->a3->r) ->
                                 Maybe a1 -> Maybe a2 -> Maybe a3 -> Maybe r #-}
@@ -534,7 +547,7 @@ f =<< x         = x >>= f
 -- will output the string @Debugging@ if the Boolean value @debug@
 -- is 'True', and otherwise do nothing.
 when      :: (Applicative f) => Bool -> f () -> f ()
-{-# INLINEABLE when #-}
+{-# INLINABLE when #-}
 {-# SPECIALISE when :: Bool -> IO () -> IO () #-}
 {-# SPECIALISE when :: Bool -> Maybe () -> Maybe () #-}
 when p s  = if p then s else pure ()
@@ -598,19 +611,19 @@ liftM4 f m1 m2 m3 m4    = do { x1 <- m1; x2 <- m2; x3 <- m3; x4 <- m4; return (f
 liftM5  :: (Monad m) => (a1 -> a2 -> a3 -> a4 -> a5 -> r) -> m a1 -> m a2 -> m a3 -> m a4 -> m a5 -> m r
 liftM5 f m1 m2 m3 m4 m5 = do { x1 <- m1; x2 <- m2; x3 <- m3; x4 <- m4; x5 <- m5; return (f x1 x2 x3 x4 x5) }
 
-{-# INLINEABLE liftM #-}
+{-# INLINABLE liftM #-}
 {-# SPECIALISE liftM :: (a1->r) -> IO a1 -> IO r #-}
 {-# SPECIALISE liftM :: (a1->r) -> Maybe a1 -> Maybe r #-}
-{-# INLINEABLE liftM2 #-}
+{-# INLINABLE liftM2 #-}
 {-# SPECIALISE liftM2 :: (a1->a2->r) -> IO a1 -> IO a2 -> IO r #-}
 {-# SPECIALISE liftM2 :: (a1->a2->r) -> Maybe a1 -> Maybe a2 -> Maybe r #-}
-{-# INLINEABLE liftM3 #-}
+{-# INLINABLE liftM3 #-}
 {-# SPECIALISE liftM3 :: (a1->a2->a3->r) -> IO a1 -> IO a2 -> IO a3 -> IO r #-}
 {-# SPECIALISE liftM3 :: (a1->a2->a3->r) -> Maybe a1 -> Maybe a2 -> Maybe a3 -> Maybe r #-}
-{-# INLINEABLE liftM4 #-}
+{-# INLINABLE liftM4 #-}
 {-# SPECIALISE liftM4 :: (a1->a2->a3->a4->r) -> IO a1 -> IO a2 -> IO a3 -> IO a4 -> IO r #-}
 {-# SPECIALISE liftM4 :: (a1->a2->a3->a4->r) -> Maybe a1 -> Maybe a2 -> Maybe a3 -> Maybe a4 -> Maybe r #-}
-{-# INLINEABLE liftM5 #-}
+{-# INLINABLE liftM5 #-}
 {-# SPECIALISE liftM5 :: (a1->a2->a3->a4->a5->r) -> IO a1 -> IO a2 -> IO a3 -> IO a4 -> IO a5 -> IO r #-}
 {-# SPECIALISE liftM5 :: (a1->a2->a3->a4->a5->r) -> Maybe a1 -> Maybe a2 -> Maybe a3 -> Maybe a4 -> Maybe a5 -> Maybe r #-}
 
@@ -629,30 +642,35 @@ ap                :: (Monad m) => m (a -> b) -> m a -> m b
 ap m1 m2          = do { x1 <- m1; x2 <- m2; return (x1 x2) }
 -- Since many Applicative instances define (<*>) = ap, we
 -- cannot define ap = (<*>)
-{-# INLINEABLE ap #-}
+{-# INLINABLE ap #-}
 {-# SPECIALISE ap :: IO (a -> b) -> IO a -> IO b #-}
 {-# SPECIALISE ap :: Maybe (a -> b) -> Maybe a -> Maybe b #-}
 
 -- instances for Prelude types
 
+-- | @since 2.01
 instance Functor ((->) r) where
     fmap = (.)
 
+-- | @since 2.01
 instance Applicative ((->) a) where
     pure = const
     (<*>) f g x = f x (g x)
 
+-- | @since 2.01
 instance Monad ((->) r) where
     f >>= k = \ r -> k (f r) r
 
+-- | @since 2.01
 instance Functor ((,) a) where
     fmap f (x,y) = (x, f y)
 
-
+-- | @since 2.01
 instance  Functor Maybe  where
     fmap _ Nothing       = Nothing
     fmap f (Just a)      = Just (f a)
 
+-- | @since 2.01
 instance Applicative Maybe where
     pure = Just
 
@@ -662,6 +680,7 @@ instance Applicative Maybe where
     Just _m1 *> m2      = m2
     Nothing  *> _m2     = Nothing
 
+-- | @since 2.01
 instance  Monad Maybe  where
     (Just x) >>= k      = k x
     Nothing  >>= _      = Nothing
@@ -704,6 +723,7 @@ class Applicative f => Alternative f where
         some_v = (fmap (:) v) <*> many_v
 
 
+-- | @since 2.01
 instance Alternative Maybe where
     empty = Nothing
     Nothing <|> r = r
@@ -726,16 +746,19 @@ class (Alternative m, Monad m) => MonadPlus m where
    mplus :: m a -> m a -> m a
    mplus = (<|>)
 
+-- | @since 2.01
 instance MonadPlus Maybe
 
 ----------------------------------------------
 -- The list type
 
+-- | @since 2.01
 instance Functor [] where
     {-# INLINE fmap #-}
     fmap = map
 
 -- See Note: [List comprehensions and inlining]
+-- | @since 2.01
 instance Applicative [] where
     {-# INLINE pure #-}
     pure x    = [x]
@@ -745,6 +768,7 @@ instance Applicative [] where
     xs *> ys  = [y | _ <- xs, y <- ys]
 
 -- See Note: [List comprehensions and inlining]
+-- | @since 2.01
 instance Monad []  where
     {-# INLINE (>>=) #-}
     xs >>= f             = [y | x <- xs, y <- f x]
@@ -753,10 +777,12 @@ instance Monad []  where
     {-# INLINE fail #-}
     fail _              = []
 
+-- | @since 2.01
 instance Alternative [] where
     empty = []
     (<|>) = (++)
 
+-- | @since 2.01
 instance MonadPlus []
 
 {-
@@ -965,7 +991,7 @@ eqString _        _        = False
 
 {-# RULES "eqString" (==) = eqString #-}
 -- eqString also has a BuiltInRule in PrelRules.lhs:
---      eqString (unpackCString# (Lit s1)) (unpackCString# (Lit s2) = s1==s2
+--      eqString (unpackCString# (Lit s1)) (unpackCString# (Lit s2)) = s1==s2
 
 
 ----------------------------------------------
@@ -1022,8 +1048,12 @@ breakpointCond :: Bool -> a -> a
 breakpointCond _ r = r
 
 data Opaque = forall a. O a
-
--- | Constant function.
+-- | @const x@ is a unary function which evaluates to @x@ for all inputs.
+--
+-- For instance,
+--
+-- >>> map (const 42) [0..3]
+-- [42,42,42,42]
 const                   :: a -> b -> a
 const x _               =  x
 
@@ -1075,16 +1105,19 @@ asTypeOf                =  const
 -- Functor/Applicative/Monad instances for IO
 ----------------------------------------------
 
+-- | @since 2.01
 instance  Functor IO where
    fmap f x = x >>= (pure . f)
 
+-- | @since 2.01
 instance Applicative IO where
     {-# INLINE pure #-}
     {-# INLINE (*>) #-}
-    pure   = returnIO
-    m *> k = m >>= \ _ -> k
-    (<*>)  = ap
+    pure  = returnIO
+    (*>)  = thenIO
+    (<*>) = ap
 
+-- | @since 2.01
 instance  Monad IO  where
     {-# INLINE (>>)   #-}
     {-# INLINE (>>=)  #-}
@@ -1092,10 +1125,12 @@ instance  Monad IO  where
     (>>=)     = bindIO
     fail s    = failIO s
 
+-- | @since 4.9.0.0
 instance Alternative IO where
     empty = failIO "mzero"
     (<|>) = mplusIO
 
+-- | @since 4.9.0.0
 instance MonadPlus IO
 
 returnIO :: a -> IO a

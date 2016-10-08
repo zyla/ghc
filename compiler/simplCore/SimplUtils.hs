@@ -21,7 +21,7 @@ module SimplUtils (
         isSimplified,
         contIsDupable, contResultType, contHoleType,
         contIsTrivial, contArgs,
-        countValArgs, countArgs,
+        countArgs,
         mkBoringStop, mkRhsStop, mkLazyArgStop, contIsRhsOrArg,
         interestingCallContext,
 
@@ -59,7 +59,6 @@ import BasicTypes
 import Util
 import MonadUtils
 import Outputable
-import FastString
 import Pair
 
 import Control.Monad    ( when )
@@ -170,23 +169,23 @@ the following invariants hold
 -}
 
 instance Outputable DupFlag where
-  ppr OkToDup    = ptext (sLit "ok")
-  ppr NoDup      = ptext (sLit "nodup")
-  ppr Simplified = ptext (sLit "simpl")
+  ppr OkToDup    = text "ok"
+  ppr NoDup      = text "nodup"
+  ppr Simplified = text "simpl"
 
 instance Outputable SimplCont where
-  ppr (Stop ty interesting) = ptext (sLit "Stop") <> brackets (ppr interesting) <+> ppr ty
-  ppr (CastIt co cont  )    = (ptext (sLit "CastIt") <+> ppr co) $$ ppr cont
-  ppr (TickIt t cont)       = (ptext (sLit "TickIt") <+> ppr t) $$ ppr cont
+  ppr (Stop ty interesting) = text "Stop" <> brackets (ppr interesting) <+> ppr ty
+  ppr (CastIt co cont  )    = (text "CastIt" <+> ppr co) $$ ppr cont
+  ppr (TickIt t cont)       = (text "TickIt" <+> ppr t) $$ ppr cont
   ppr (ApplyToTy  { sc_arg_ty = ty, sc_cont = cont })
-    = (ptext (sLit "ApplyToTy") <+> pprParendType ty) $$ ppr cont
+    = (text "ApplyToTy" <+> pprParendType ty) $$ ppr cont
   ppr (ApplyToVal { sc_arg = arg, sc_dup = dup, sc_cont = cont })
-    = (ptext (sLit "ApplyToVal") <+> ppr dup <+> pprParendExpr arg)
+    = (text "ApplyToVal" <+> ppr dup <+> pprParendExpr arg)
                                         $$ ppr cont
-  ppr (StrictBind b _ _ _ cont)       = (ptext (sLit "StrictBind") <+> ppr b) $$ ppr cont
-  ppr (StrictArg ai _ cont)           = (ptext (sLit "StrictArg") <+> ppr (ai_fun ai)) $$ ppr cont
+  ppr (StrictBind b _ _ _ cont)       = (text "StrictBind" <+> ppr b) $$ ppr cont
+  ppr (StrictArg ai _ cont)           = (text "StrictArg" <+> ppr (ai_fun ai)) $$ ppr cont
   ppr (Select { sc_dup = dup, sc_bndr = bndr, sc_alts = alts, sc_env = se, sc_cont = cont })
-    = (ptext (sLit "Select") <+> ppr dup <+> ppr bndr) $$
+    = (text "Select" <+> ppr dup <+> ppr bndr) $$
        ifPprDebug (nest 2 $ vcat [ppr (seTvSubst se), ppr alts]) $$ ppr cont
 
 
@@ -241,9 +240,9 @@ data ArgSpec
   | CastBy OutCoercion                -- Cast by this; c.f. CastIt
 
 instance Outputable ArgSpec where
-  ppr (ValArg e)                 = ptext (sLit "ValArg") <+> ppr e
-  ppr (TyArg { as_arg_ty = ty }) = ptext (sLit "TyArg") <+> ppr ty
-  ppr (CastBy c)                 = ptext (sLit "CastBy") <+> ppr c
+  ppr (ValArg e)                 = text "ValArg" <+> ppr e
+  ppr (TyArg { as_arg_ty = ty }) = text "TyArg" <+> ppr ty
+  ppr (CastBy c)                 = text "CastBy" <+> ppr c
 
 addValArgTo :: ArgInfo -> OutExpr -> ArgInfo
 addValArgTo ai arg = ai { ai_args = ValArg arg : ai_args ai
@@ -360,13 +359,6 @@ contHoleType (Select { sc_dup = d, sc_bndr =  b, sc_env = se })
   = perhapsSubstTy d se (idType b)
 
 -------------------
-countValArgs :: SimplCont -> Int
--- Count value arguments excluding coercions
-countValArgs (ApplyToVal { sc_arg = arg, sc_cont = cont })
-  | Coercion {} <- arg = countValArgs cont
-  | otherwise          = 1 + countValArgs cont
-countValArgs _         = 0
-
 countArgs :: SimplCont -> Int
 -- Count all arguments, including types, coercions, and other values
 countArgs (ApplyToTy  { sc_cont = cont }) = 1 + countArgs cont
@@ -633,20 +625,23 @@ interestingArg env e = go env 0 e
            Just (DoneEx e)             -> go (zapSubstEnv env)             n e
            Just (ContEx tvs cvs ids e) -> go (setSubstEnv env tvs cvs ids) n e
 
-    go _   _ (Lit {})              = ValueArg
-    go _   _ (Type _)              = TrivArg
-    go _   _ (Coercion _)          = TrivArg
-    go env n (App fn (Type _))     = go env n fn
-    go env n (App fn (Coercion _)) = go env n fn
-    go env n (App fn _)            = go env (n+1) fn
-    go env n (Tick _ a)            = go env n a
-    go env n (Cast e _)            = go env n e
+    go _   _ (Lit {})          = ValueArg
+    go _   _ (Type _)          = TrivArg
+    go _   _ (Coercion _)      = TrivArg
+    go env n (App fn (Type _)) = go env n fn
+    go env n (App fn _)        = go env (n+1) fn
+    go env n (Tick _ a)        = go env n a
+    go env n (Cast e _)        = go env n e
     go env n (Lam v e)
-       | isTyVar v                 = go env n     e
-       | n>0                       = go env (n-1) e
-       | otherwise                 = ValueArg
-    go env n (Let _ e)             = case go env n e of { ValueArg -> ValueArg; _ -> NonTrivArg }
-    go _ _ (Case {})               = NonTrivArg
+       | isTyVar v             = go env n e
+       | n>0                   = NonTrivArg     -- (\x.b) e   is NonTriv
+       | otherwise             = ValueArg
+    go _ _ (Case {})           = NonTrivArg
+    go env n (Let b e)         = case go env' n e of
+                                   ValueArg -> ValueArg
+                                   _        -> NonTrivArg
+                               where
+                                 env' = env `addNewInScopeIds` bindersOf b
 
     go_var n v
        | isConLikeId v     = ValueArg   -- Experimenting with 'conlike' rather that
@@ -697,8 +692,8 @@ updModeForStableUnfoldings inline_rule_act current_mode
                  -- For sm_rules, just inherit; sm_rules might be "off"
                  -- because of -fno-enable-rewrite-rules
   where
-    phaseFromActivation (ActiveAfter n) = Phase n
-    phaseFromActivation _               = InitialPhase
+    phaseFromActivation (ActiveAfter _ n) = Phase n
+    phaseFromActivation _                 = InitialPhase
 
 updModeForRules :: SimplifierMode -> SimplifierMode
 -- See Note [Simplifying rules]
@@ -1020,7 +1015,7 @@ preInlineUnconditionally :: DynFlags -> SimplEnv -> TopLevelFlag -> InId -> InEx
 -- Precondition: rhs satisfies the let/app invariant
 -- See Note [CoreSyn let/app invariant] in CoreSyn
 -- Reason: we don't want to inline single uses, or discard dead bindings,
---         for unlifted, side-effect-full bindings
+--         for unlifted, side-effect-ful bindings
 preInlineUnconditionally dflags env top_lvl bndr rhs
   | not active                               = False
   | isStableUnfolding (idUnfolding bndr)     = False -- Note [Stable unfoldings and preInlineUnconditionally]
@@ -1133,7 +1128,7 @@ postInlineUnconditionally
 -- Precondition: rhs satisfies the let/app invariant
 -- See Note [CoreSyn let/app invariant] in CoreSyn
 -- Reason: we don't want to inline single uses, or discard dead bindings,
---         for unlifted, side-effect-full bindings
+--         for unlifted, side-effect-ful bindings
 postInlineUnconditionally dflags env top_lvl bndr occ_info rhs unfolding
   | not active                  = False
   | isWeakLoopBreaker occ_info  = False -- If it's a loop-breaker of any kind, don't inline
@@ -1374,7 +1369,7 @@ tryEtaExpandRhs env bndr rhs
        ; (new_arity, new_rhs) <- try_expand dflags
 
        ; WARN( new_arity < old_id_arity,
-               (ptext (sLit "Arity decrease:") <+> (ppr bndr <+> ppr old_id_arity
+               (text "Arity decrease:" <+> (ppr bndr <+> ppr old_id_arity
                 <+> ppr old_arity <+> ppr new_arity) $$ ppr new_rhs) )
                         -- Note [Arity decrease] in Simplify
          return (new_arity, new_rhs) }
@@ -1571,10 +1566,10 @@ abstractFloats main_tvs body_env body
         rhs' = CoreSubst.substExpr (text "abstract_floats2") subst rhs
 
         -- tvs_here: see Note [Which type variables to abstract over]
-        tvs_here = varSetElemsWellScoped       $
-                   intersectVarSet main_tv_set $
-                   closeOverKinds              $
-                   exprSomeFreeVars isTyVar rhs'
+        tvs_here = toposortTyVars $
+                   filter (`elemVarSet` main_tv_set) $
+                   closeOverKindsList $
+                   exprSomeFreeVarsList isTyVar rhs'
 
     abstract subst (Rec prs)
        = do { (poly_ids, poly_apps) <- mapAndUnzipM (mk_poly tvs_here) ids

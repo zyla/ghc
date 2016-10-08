@@ -19,7 +19,7 @@ types that
 module BasicTypes(
         Version, bumpVersion, initialVersion,
 
-        ConTag, fIRST_TAG,
+        ConTag, ConTagZ, fIRST_TAG,
 
         Arity, RepArity,
 
@@ -41,13 +41,17 @@ module BasicTypes(
 
         TopLevelFlag(..), isTopLevel, isNotTopLevel,
 
+        DerivStrategy(..),
+
         OverlapFlag(..), OverlapMode(..), setOverlapModeMaybe,
-        hasOverlappingFlag, hasOverlappableFlag,
+        hasOverlappingFlag, hasOverlappableFlag, hasIncoherentFlag,
 
         Boxity(..), isBoxed,
 
         TupleSort(..), tupleSortBoxity, boxityTupleSort,
         tupleParens,
+
+        sumParens, pprAlternative,
 
         -- ** The OneShotInfo type
         OneShotInfo(..),
@@ -110,9 +114,12 @@ import Data.Function (on)
 -- "real work". So:
 --  fib 100     has arity 0
 --  \x -> fib x has arity 1
+-- See also Note [Definition of arity] in CoreArity
 type Arity = Int
 
--- | The number of represented arguments that can be applied to a value before it does
+-- | Representation Arity
+--
+-- The number of represented arguments that can be applied to a value before it does
 -- "real work". So:
 --  fib 100                    has representation arity 0
 --  \x -> fib x                has representation arity 1
@@ -127,9 +134,14 @@ type RepArity = Int
 ************************************************************************
 -}
 
--- | Type of the tags associated with each constructor possibility
---   or superclass selector
+-- | Constructor Tag
+--
+-- Type of the tags associated with each constructor possibility or superclass
+-- selector
 type ConTag = Int
+
+-- | A *zero-indexed* constructor tag
+type ConTagZ = Int
 
 fIRST_TAG :: ConTag
 -- ^ Tags are allocated from here for real constructors
@@ -192,8 +204,8 @@ bestOneShot OneShotLam    _          = OneShotLam
 
 pprOneShotInfo :: OneShotInfo -> SDoc
 pprOneShotInfo NoOneShotInfo = empty
-pprOneShotInfo ProbOneShot   = ptext (sLit "ProbOneShot")
-pprOneShotInfo OneShotLam    = ptext (sLit "OneShot")
+pprOneShotInfo ProbOneShot   = text "ProbOneShot"
+pprOneShotInfo OneShotLam    = text "OneShot"
 
 instance Outputable OneShotInfo where
     ppr = pprOneShotInfo
@@ -211,8 +223,8 @@ data SwapFlag
   | IsSwapped   -- Args are: expected, actual
 
 instance Outputable SwapFlag where
-  ppr IsSwapped  = ptext (sLit "Is-swapped")
-  ppr NotSwapped = ptext (sLit "Not-swapped")
+  ppr IsSwapped  = text "Is-swapped"
+  ppr NotSwapped = text "Not-swapped"
 
 flipSwap :: SwapFlag -> SwapFlag
 flipSwap IsSwapped  = NotSwapped
@@ -235,7 +247,7 @@ unSwap IsSwapped  f a b = f b a
 -}
 
 data FunctionOrData = IsFunction | IsData
-    deriving (Eq, Ord, Data, Typeable)
+    deriving (Eq, Ord, Data)
 
 instance Outputable FunctionOrData where
     ppr IsFunction = text "(function)"
@@ -265,23 +277,25 @@ initialVersion = 1
 ************************************************************************
 -}
 
--- |A String Literal in the source, including its original raw format for use by
+-- | A String Literal in the source, including its original raw format for use by
 -- source to source manipulation tools.
 data StringLiteral = StringLiteral
                        { sl_st :: SourceText, -- literal raw source.
                                               -- See not [Literal source text]
                          sl_fs :: FastString  -- literal string value
-                       } deriving (Data, Typeable)
+                       } deriving Data
 
 instance Eq StringLiteral where
   (StringLiteral _ a) == (StringLiteral _ b) = a == b
 
+-- | Warning Text
+--
 -- reason/explanation from a WARNING or DEPRECATED pragma
 data WarningTxt = WarningTxt (Located SourceText)
                              [Located StringLiteral]
                 | DeprecatedTxt (Located SourceText)
                                 [Located StringLiteral]
-    deriving (Eq, Data, Typeable)
+    deriving (Eq, Data)
 
 instance Outputable WarningTxt where
     ppr (WarningTxt    _ ws)
@@ -312,23 +326,24 @@ pprRuleName rn = doubleQuotes (ftext rn)
 -}
 
 ------------------------
-data Fixity = Fixity Int FixityDirection
-  deriving (Data, Typeable)
+data Fixity = Fixity SourceText Int FixityDirection
+  -- Note [Pragma source text]
+  deriving Data
 
 instance Outputable Fixity where
-    ppr (Fixity prec dir) = hcat [ppr dir, space, int prec]
+    ppr (Fixity _ prec dir) = hcat [ppr dir, space, int prec]
 
 instance Eq Fixity where -- Used to determine if two fixities conflict
-  (Fixity p1 dir1) == (Fixity p2 dir2) = p1==p2 && dir1 == dir2
+  (Fixity _ p1 dir1) == (Fixity _ p2 dir2) = p1==p2 && dir1 == dir2
 
 ------------------------
 data FixityDirection = InfixL | InfixR | InfixN
-                     deriving (Eq, Data, Typeable)
+                     deriving (Eq, Data)
 
 instance Outputable FixityDirection where
-    ppr InfixL = ptext (sLit "infixl")
-    ppr InfixR = ptext (sLit "infixr")
-    ppr InfixN = ptext (sLit "infix")
+    ppr InfixL = text "infixl"
+    ppr InfixR = text "infixr"
+    ppr InfixN = text "infix"
 
 ------------------------
 maxPrecedence, minPrecedence :: Int
@@ -336,12 +351,12 @@ maxPrecedence = 9
 minPrecedence = 0
 
 defaultFixity :: Fixity
-defaultFixity = Fixity maxPrecedence InfixL
+defaultFixity = Fixity (show maxPrecedence) maxPrecedence InfixL
 
 negateFixity, funTyFixity :: Fixity
 -- Wired-in fixities
-negateFixity = Fixity 6 InfixL  -- Fixity of unary negate
-funTyFixity  = Fixity 0 InfixR  -- Fixity of '->'
+negateFixity = Fixity "6" 6 InfixL  -- Fixity of unary negate
+funTyFixity  = Fixity "0" 0 InfixR  -- Fixity of '->'
 
 {-
 Consider
@@ -356,7 +371,7 @@ whether there's an error.
 compareFixity :: Fixity -> Fixity
               -> (Bool,         -- Error please
                   Bool)         -- Associate to the right: a op1 (b op2 c)
-compareFixity (Fixity prec1 dir1) (Fixity prec2 dir2)
+compareFixity (Fixity _ prec1 dir1) (Fixity _ prec2 dir2)
   = case prec1 `compare` prec2 of
         GT -> left
         LT -> right
@@ -390,8 +405,8 @@ isTopLevel TopLevel     = True
 isTopLevel NotTopLevel  = False
 
 instance Outputable TopLevelFlag where
-  ppr TopLevel    = ptext (sLit "<TopLevel>")
-  ppr NotTopLevel = ptext (sLit "<NotTopLevel>")
+  ppr TopLevel    = text "<TopLevel>"
+  ppr NotTopLevel = text "<NotTopLevel>"
 
 {-
 ************************************************************************
@@ -404,7 +419,7 @@ instance Outputable TopLevelFlag where
 data Boxity
   = Boxed
   | Unboxed
-  deriving( Eq, Data, Typeable )
+  deriving( Eq, Data )
 
 isBoxed :: Boxity -> Bool
 isBoxed Boxed   = True
@@ -422,9 +437,10 @@ instance Outputable Boxity where
 ************************************************************************
 -}
 
+-- | Recursivity Flag
 data RecFlag = Recursive
              | NonRecursive
-             deriving( Eq, Data, Typeable )
+             deriving( Eq, Data )
 
 isRec :: RecFlag -> Bool
 isRec Recursive    = True
@@ -439,8 +455,8 @@ boolToRecFlag True  = Recursive
 boolToRecFlag False = NonRecursive
 
 instance Outputable RecFlag where
-  ppr Recursive    = ptext (sLit "Recursive")
-  ppr NonRecursive = ptext (sLit "NonRecursive")
+  ppr Recursive    = text "Recursive"
+  ppr NonRecursive = text "NonRecursive"
 
 {-
 ************************************************************************
@@ -452,15 +468,39 @@ instance Outputable RecFlag where
 
 data Origin = FromSource
             | Generated
-            deriving( Eq, Data, Typeable )
+            deriving( Eq, Data )
 
 isGenerated :: Origin -> Bool
 isGenerated Generated = True
 isGenerated FromSource = False
 
 instance Outputable Origin where
-  ppr FromSource  = ptext (sLit "FromSource")
-  ppr Generated   = ptext (sLit "Generated")
+  ppr FromSource  = text "FromSource"
+  ppr Generated   = text "Generated"
+
+{-
+************************************************************************
+*                                                                      *
+                Deriving strategies
+*                                                                      *
+************************************************************************
+-}
+
+-- | Which technique the user explicitly requested when deriving an instance.
+data DerivStrategy
+  -- See Note [Deriving strategies] in TcDeriv
+  = DerivStock    -- ^ GHC's \"standard\" strategy, which is to implement a
+                  --   custom instance for the data type. This only works for
+                  --   certain types that GHC knows about (e.g., 'Eq', 'Show',
+                  --   'Functor' when @-XDeriveFunctor@ is enabled, etc.)
+  | DerivAnyclass -- ^ @-XDeriveAnyClass@
+  | DerivNewtype  -- ^ @-XGeneralizedNewtypeDeriving@
+  deriving (Eq, Data)
+
+instance Outputable DerivStrategy where
+    ppr DerivStock    = text "stock"
+    ppr DerivAnyclass = text "anyclass"
+    ppr DerivNewtype  = text "newtype"
 
 {-
 ************************************************************************
@@ -485,11 +525,17 @@ instance Outputable Origin where
 data OverlapFlag = OverlapFlag
   { overlapMode   :: OverlapMode
   , isSafeOverlap :: Bool
-  } deriving (Eq, Data, Typeable)
+  } deriving (Eq, Data)
 
 setOverlapModeMaybe :: OverlapFlag -> Maybe OverlapMode -> OverlapFlag
 setOverlapModeMaybe f Nothing  = f
 setOverlapModeMaybe f (Just m) = f { overlapMode = m }
+
+hasIncoherentFlag :: OverlapMode -> Bool
+hasIncoherentFlag mode =
+  case mode of
+    Incoherent   _ -> True
+    _              -> False
 
 hasOverlappableFlag :: OverlapMode -> Bool
 hasOverlappableFlag mode =
@@ -561,7 +607,7 @@ data OverlapMode  -- See Note [Rules for instance lookup] in InstEnv
     -- instantiating 'b' would change which instance
     -- was chosen. See also note [Incoherent instances] in InstEnv
 
-  deriving (Eq, Data, Typeable)
+  deriving (Eq, Data)
 
 
 instance Outputable OverlapFlag where
@@ -569,13 +615,13 @@ instance Outputable OverlapFlag where
 
 instance Outputable OverlapMode where
    ppr (NoOverlap    _) = empty
-   ppr (Overlappable _) = ptext (sLit "[overlappable]")
-   ppr (Overlapping  _) = ptext (sLit "[overlapping]")
-   ppr (Overlaps     _) = ptext (sLit "[overlap ok]")
-   ppr (Incoherent   _) = ptext (sLit "[incoherent]")
+   ppr (Overlappable _) = text "[overlappable]"
+   ppr (Overlapping  _) = text "[overlapping]"
+   ppr (Overlaps     _) = text "[overlap ok]"
+   ppr (Incoherent   _) = text "[incoherent]"
 
 pprSafeOverlap :: Bool -> SDoc
-pprSafeOverlap True  = ptext $ sLit "[safe]"
+pprSafeOverlap True  = text "[safe]"
 pprSafeOverlap False = empty
 
 {-
@@ -590,7 +636,7 @@ data TupleSort
   = BoxedTuple
   | UnboxedTuple
   | ConstraintTuple
-  deriving( Eq, Data, Typeable )
+  deriving( Eq, Data )
 
 tupleSortBoxity :: TupleSort -> Boxity
 tupleSortBoxity BoxedTuple      = Boxed
@@ -603,10 +649,31 @@ boxityTupleSort Unboxed = UnboxedTuple
 
 tupleParens :: TupleSort -> SDoc -> SDoc
 tupleParens BoxedTuple      p = parens p
-tupleParens UnboxedTuple    p = ptext (sLit "(#") <+> p <+> ptext (sLit "#)")
+tupleParens UnboxedTuple    p = text "(#" <+> p <+> ptext (sLit "#)")
 tupleParens ConstraintTuple p   -- In debug-style write (% Eq a, Ord b %)
-  | opt_PprStyle_Debug        = ptext (sLit "(%") <+> p <+> ptext (sLit "%)")
+  | opt_PprStyle_Debug        = text "(%" <+> p <+> ptext (sLit "%)")
   | otherwise                 = parens p
+
+{-
+************************************************************************
+*                                                                      *
+                Sums
+*                                                                      *
+************************************************************************
+-}
+
+sumParens :: SDoc -> SDoc
+sumParens p = ptext (sLit "(#") <+> p <+> ptext (sLit "#)")
+
+-- | Pretty print an alternative in an unboxed sum e.g. "| a | |".
+pprAlternative :: (a -> SDoc) -- ^ The pretty printing function to use
+               -> a           -- ^ The things to be pretty printed
+               -> ConTag      -- ^ Alternative (one-based)
+               -> Arity       -- ^ Arity
+               -> SDoc        -- ^ 'SDoc' where the alternative havs been pretty
+                              -- printed and finally packed into a paragraph.
+pprAlternative pp x alt arity =
+    fsep (replicate (alt - 1) vbar ++ [pp x] ++ replicate (arity - alt - 1) vbar)
 
 {-
 ************************************************************************
@@ -632,6 +699,7 @@ Tring is the 'representation' type.  (This just helps us remember
 whether to use 'from' or 'to'.
 -}
 
+-- | Embedding Projection pair
 data EP a = EP { fromEP :: a,   -- :: T -> Tring
                  toEP   :: a }  -- :: Tring -> T
 
@@ -658,7 +726,7 @@ the base of the module hierarchy.  So it seemed simpler to put the
 defn of OccInfo here, safely at the bottom
 -}
 
--- | Identifier occurrence information
+-- | identifier Occurrence Information
 data OccInfo
   = NoOccInfo           -- ^ There are many occurrences, or unknown occurrences
 
@@ -699,11 +767,13 @@ seqOccInfo :: OccInfo -> ()
 seqOccInfo occ = occ `seq` ()
 
 -----------------
+-- | Interesting Context
 type InterestingCxt = Bool      -- True <=> Function: is applied
                                 --          Data value: scrutinised by a case with
                                 --                      at least one non-DEFAULT branch
 
 -----------------
+-- | Inside Lambda
 type InsideLam = Bool   -- True <=> Occurs inside a non-linear lambda
                         -- Substituting a redex for this occurrence is
                         -- dangerous because it might duplicate work.
@@ -745,10 +815,10 @@ zapFragileOcc occ         = occ
 instance Outputable OccInfo where
   -- only used for debugging; never parsed.  KSW 1999-07
   ppr NoOccInfo            = empty
-  ppr (IAmALoopBreaker ro) = ptext (sLit "LoopBreaker") <> if ro then char '!' else empty
-  ppr IAmDead              = ptext (sLit "Dead")
+  ppr (IAmALoopBreaker ro) = text "LoopBreaker" <> if ro then char '!' else empty
+  ppr IAmDead              = text "Dead"
   ppr (OneOcc inside_lam one_branch int_cxt)
-        = ptext (sLit "Once") <> pp_lam <> pp_br <> pp_args
+        = text "Once" <> pp_lam <> pp_br <> pp_args
         where
           pp_lam | inside_lam = char 'L'
                  | otherwise  = empty
@@ -770,13 +840,14 @@ interface files; it is converted to Class.DefMethInfo before begin put in a
 Class object.
 -}
 
+-- | Default Method Specification
 data DefMethSpec ty
   = VanillaDM     -- Default method given with polymorphic code
   | GenericDM ty  -- Default method given with code of this type
 
 instance Outputable (DefMethSpec ty) where
-  ppr VanillaDM      = ptext (sLit "{- Has default method -}")
-  ppr (GenericDM {}) = ptext (sLit "{- Has generic default method -}")
+  ppr VanillaDM      = text "{- Has default method -}"
+  ppr (GenericDM {}) = text "{- Has generic default method -}"
 
 {-
 ************************************************************************
@@ -789,8 +860,8 @@ instance Outputable (DefMethSpec ty) where
 data SuccessFlag = Succeeded | Failed
 
 instance Outputable SuccessFlag where
-    ppr Succeeded = ptext (sLit "Succeeded")
-    ppr Failed    = ptext (sLit "Failed")
+    ppr Succeeded = text "Succeeded"
+    ppr Failed    = text "Failed"
 
 successIf :: Bool -> SuccessFlag
 successIf True  = Succeeded
@@ -877,6 +948,7 @@ type SourceText = String -- Note [Literal source text],[Pragma source text]
 When a rule or inlining is active
 -}
 
+-- | Phase Number
 type PhaseNum = Int  -- Compilation phase
                      -- Phases decrease towards zero
                      -- Zero is the last phase
@@ -887,17 +959,22 @@ data CompilerPhase
 
 instance Outputable CompilerPhase where
    ppr (Phase n)    = int n
-   ppr InitialPhase = ptext (sLit "InitialPhase")
+   ppr InitialPhase = text "InitialPhase"
 
+-- See note [Pragma source text]
 data Activation = NeverActive
                 | AlwaysActive
-                | ActiveBefore PhaseNum -- Active only *strictly before* this phase
-                | ActiveAfter PhaseNum  -- Active in this phase and later
-                deriving( Eq, Data, Typeable )  -- Eq used in comparing rules in HsDecls
+                | ActiveBefore SourceText PhaseNum
+                  -- Active only *strictly before* this phase
+                | ActiveAfter SourceText PhaseNum
+                  -- Active in this phase and later
+                deriving( Eq, Data )
+                  -- Eq used in comparing rules in HsDecls
 
+-- | Rule Match Information
 data RuleMatchInfo = ConLike                    -- See Note [CONLIKE pragma]
                    | FunLike
-                   deriving( Eq, Data, Typeable, Show )
+                   deriving( Eq, Data, Show )
         -- Show needed for Lexer.x
 
 data InlinePragma            -- Note [InlinePragma]
@@ -915,15 +992,16 @@ data InlinePragma            -- Note [InlinePragma]
       , inl_act    :: Activation     -- Says during which phases inlining is allowed
 
       , inl_rule   :: RuleMatchInfo  -- Should the function be treated like a constructor?
-    } deriving( Eq, Data, Typeable )
+    } deriving( Eq, Data )
 
+-- | Inline Specification
 data InlineSpec   -- What the user's INLINE pragma looked like
   = Inline
   | Inlinable
   | NoInline
   | EmptyInlineSpec  -- Used in a place-holder InlinePragma in SpecPrag or IdInfo,
                      -- where there isn't any real inline pragma at all
-  deriving( Eq, Data, Typeable, Show )
+  deriving( Eq, Data, Show )
         -- Show needed for Lexer.x
 
 {-
@@ -933,14 +1011,16 @@ This data type mirrors what you can write in an INLINE or NOINLINE pragma in
 the source program.
 
 If you write nothing at all, you get defaultInlinePragma:
-   inl_inline = False
+   inl_inline = EmptyInlineSpec
    inl_act    = AlwaysActive
    inl_rule   = FunLike
 
 It's not possible to get that combination by *writing* something, so
 if an Id has defaultInlinePragma it means the user didn't specify anything.
 
-If inl_inline = True, then the Id should have an InlineRule unfolding.
+If inl_inline = Inline or Inlineable, then the Id should have an InlineRule unfolding.
+
+If you want to know where InlinePragmas take effect: Look in DsBinds.makeCorePair
 
 Note [CONLIKE pragma]
 ~~~~~~~~~~~~~~~~~~~~~
@@ -981,11 +1061,11 @@ The main effects of CONLIKE are:
 
 isConLike :: RuleMatchInfo -> Bool
 isConLike ConLike = True
-isConLike _            = False
+isConLike _       = False
 
 isFunLike :: RuleMatchInfo -> Bool
 isFunLike FunLike = True
-isFunLike _            = False
+isFunLike _       = False
 
 isEmptyInlineSpec :: InlineSpec -> Bool
 isEmptyInlineSpec EmptyInlineSpec = True
@@ -1051,19 +1131,19 @@ setInlinePragmaRuleMatchInfo :: InlinePragma -> RuleMatchInfo -> InlinePragma
 setInlinePragmaRuleMatchInfo prag info = prag { inl_rule = info }
 
 instance Outputable Activation where
-   ppr AlwaysActive     = brackets (ptext (sLit "ALWAYS"))
-   ppr NeverActive      = brackets (ptext (sLit "NEVER"))
-   ppr (ActiveBefore n) = brackets (char '~' <> int n)
-   ppr (ActiveAfter n)  = brackets (int n)
+   ppr AlwaysActive       = brackets (text "ALWAYS")
+   ppr NeverActive        = brackets (text "NEVER")
+   ppr (ActiveBefore _ n) = brackets (char '~' <> int n)
+   ppr (ActiveAfter  _ n) = brackets (int n)
 
 instance Outputable RuleMatchInfo where
-   ppr ConLike = ptext (sLit "CONLIKE")
-   ppr FunLike = ptext (sLit "FUNLIKE")
+   ppr ConLike = text "CONLIKE"
+   ppr FunLike = text "FUNLIKE"
 
 instance Outputable InlineSpec where
-   ppr Inline          = ptext (sLit "INLINE")
-   ppr NoInline        = ptext (sLit "NOINLINE")
-   ppr Inlinable       = ptext (sLit "INLINABLE")
+   ppr Inline          = text "INLINE"
+   ppr NoInline        = text "NOINLINE"
+   ppr Inlinable       = text "INLINABLE"
    ppr EmptyInlineSpec = empty
 
 instance Outputable InlinePragma where
@@ -1075,7 +1155,7 @@ instance Outputable InlinePragma where
       pp_act NoInline NeverActive  = empty
       pp_act _        act          = ppr act
 
-      pp_sat | Just ar <- mb_arity = parens (ptext (sLit "sat-args=") <> int ar)
+      pp_sat | Just ar <- mb_arity = parens (text "sat-args=" <> int ar)
              | otherwise           = empty
       pp_info | isFunLike info = empty
               | otherwise      = ppr info
@@ -1087,10 +1167,10 @@ isActive InitialPhase _                 = False
 isActive (Phase p)    act               = isActiveIn p act
 
 isActiveIn :: PhaseNum -> Activation -> Bool
-isActiveIn _ NeverActive      = False
-isActiveIn _ AlwaysActive     = True
-isActiveIn p (ActiveAfter n)  = p <= n
-isActiveIn p (ActiveBefore n) = p >  n
+isActiveIn _ NeverActive        = False
+isActiveIn _ AlwaysActive       = True
+isActiveIn p (ActiveAfter _ n)  = p <= n
+isActiveIn p (ActiveBefore _ n) = p >  n
 
 competesWith :: Activation -> Activation -> Bool
 -- See Note [Activation competition]
@@ -1098,13 +1178,13 @@ competesWith NeverActive       _                = False
 competesWith _                 NeverActive      = False
 competesWith AlwaysActive      _                = True
 
-competesWith (ActiveBefore {}) AlwaysActive      = True
-competesWith (ActiveBefore {}) (ActiveBefore {}) = True
-competesWith (ActiveBefore a)  (ActiveAfter b)   = a < b
+competesWith (ActiveBefore {})  AlwaysActive      = True
+competesWith (ActiveBefore {})  (ActiveBefore {}) = True
+competesWith (ActiveBefore _ a) (ActiveAfter _ b) = a < b
 
 competesWith (ActiveAfter {})  AlwaysActive      = False
 competesWith (ActiveAfter {})  (ActiveBefore {}) = False
-competesWith (ActiveAfter a)   (ActiveAfter b)   = a >= b
+competesWith (ActiveAfter _ a) (ActiveAfter _ b) = a >= b
 
 {- Note [Competing activations]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1132,6 +1212,8 @@ isEarlyActive AlwaysActive      = True
 isEarlyActive (ActiveBefore {}) = True
 isEarlyActive _                 = False
 
+-- | Fractional Literal
+--
 -- Used (instead of Rational) to represent exactly the floating point literal that we
 -- encountered in the user's source program. This allows us to pretty-print exactly what
 -- the user wrote, which is important e.g. for floating point numbers that can't represented
@@ -1140,7 +1222,7 @@ data FractionalLit
   = FL { fl_text :: String         -- How the value was written in the source
        , fl_value :: Rational      -- Numeric value of the literal
        }
-  deriving (Data, Typeable, Show)
+  deriving (Data, Show)
   -- The Show instance is required for the derived Lexer.x:Token instance when DEBUG is on
 
 negateFractionalLit :: FractionalLit -> FractionalLit

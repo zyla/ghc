@@ -76,7 +76,8 @@ tcRule (HsRule name act hs_bndrs lhs fv_lhs rhs fv_rhs)
                tcExtendIdEnv    id_bndrs $
                do { -- See Note [Solve order for RULES]
                     ((lhs', rule_ty), lhs_wanted) <- captureConstraints (tcInferRho lhs)
-                  ; (rhs', rhs_wanted) <- captureConstraints (tcMonoExpr rhs rule_ty)
+                  ; (rhs', rhs_wanted) <- captureConstraints $
+                                          tcMonoExpr rhs (mkCheckExpType rule_ty)
                   ; return (lhs', lhs_wanted, rhs', rhs_wanted, rule_ty) }
 
        ; traceTc "tcRule 1" (vcat [ pprFullRuleName name
@@ -100,11 +101,11 @@ tcRule (HsRule name act hs_bndrs lhs fv_lhs rhs fv_rhs)
         -- during zonking (see TcHsSyn.zonkRule)
 
        ; let tpl_ids     = lhs_evs ++ id_bndrs
-             forall_tkvs = splitDepVarsOfTypes $
-                           rule_ty : map idType tpl_ids
+       ; forall_tkvs <- zonkTcTypesAndSplitDepVars $
+                        rule_ty : map idType tpl_ids
        ; gbls  <- tcGetGlobalTyCoVars -- Even though top level, there might be top-level
                                       -- monomorphic bindings from the MR; test tc111
-       ; qtkvs <- quantifyTyVars gbls forall_tkvs
+       ; qtkvs <- quantifyZonkedTyVars gbls forall_tkvs
        ; traceTc "tcRule" (vcat [ pprFullRuleName name
                                 , ppr forall_tkvs
                                 , ppr qtkvs
@@ -144,7 +145,7 @@ tcRuleBndrs (L _ (RuleBndrSig (L _ name) rn_ty) : rule_bndrs)
 --  The tyvar 'a' is brought into scope first, just as if you'd written
 --              a::*, x :: a->a
   = do  { let ctxt = RuleSigCtxt name
-        ; (id_ty, tvs, _) <- tcHsPatSigType ctxt rn_ty
+        ; (_ , tvs, id_ty) <- tcHsPatSigType ctxt rn_ty
         ; let id  = mkLocalIdOrCoVar name id_ty
                     -- See Note [Pattern signature binders] in TcHsType
 
@@ -154,7 +155,7 @@ tcRuleBndrs (L _ (RuleBndrSig (L _ name) rn_ty) : rule_bndrs)
         ; return (tvs ++ id : vars) }
 
 ruleCtxt :: FastString -> SDoc
-ruleCtxt name = ptext (sLit "When checking the transformation rule") <+>
+ruleCtxt name = text "When checking the transformation rule" <+>
                 doubleQuotes (ftext name)
 
 
@@ -325,7 +326,7 @@ simplifyRule name lhs_wanted rhs_wanted
                              bagToList zonked_lhs_simples
 
        ; traceTc "simplifyRule" $
-         vcat [ ptext (sLit "LHS of rule") <+> doubleQuotes (ftext name)
+         vcat [ text "LHS of rule" <+> doubleQuotes (ftext name)
               , text "lhs_wantd" <+> ppr lhs_wanted
               , text "rhs_wantd" <+> ppr rhs_wanted
               , text "zonked_lhs_simples" <+> ppr zonked_lhs_simples

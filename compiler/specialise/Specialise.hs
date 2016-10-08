@@ -10,10 +10,10 @@ module Specialise ( specProgram, specUnfolding ) where
 #include "HsVersions.h"
 
 import Id
-import TcType hiding( substTy, extendTCvSubstList )
-import Type   hiding( substTy, extendTCvSubstList )
-import Coercion( Coercion )
+import TcType hiding( substTy )
+import Type   hiding( substTy, extendTvSubstList )
 import Module( Module, HasModule(..) )
+import Coercion( Coercion )
 import CoreMonad
 import qualified CoreSubst
 import CoreUnfold
@@ -22,7 +22,7 @@ import VarEnv
 import CoreSyn
 import Rules
 import CoreUtils        ( exprIsTrivial, applyTypeToArgs, mkCast )
-import CoreFVs          ( exprFreeVars, exprsFreeVars, idFreeVars )
+import CoreFVs          ( exprFreeVars, exprsFreeVars, idFreeVars, exprsFreeIdsList )
 import UniqSupply
 import Name
 import MkId             ( voidArgId, voidPrimId )
@@ -35,17 +35,13 @@ import Util
 import Outputable
 import FastString
 import State
+import UniqDFM
+import TrieMap
 
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative(..))
-#endif
 import Control.Monad
 #if __GLASGOW_HASKELL__ > 710
 import qualified Control.Monad.Fail as MonadFail
 #endif
-import Data.Map (Map)
-import qualified Data.Map as Map
-import qualified FiniteMap as Map
 
 {-
 ************************************************************************
@@ -402,7 +398,7 @@ Seems quite reasonable.  Similar things could be done with instance decls:
 Ho hum.  Things are complex enough without this.  I pass.
 
 
-Requirements for the simplifer
+Requirements for the simplifier
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The simplifier has to be able to take advantage of the specialisation.
 
@@ -628,7 +624,7 @@ for instance, the 'specImports' call in 'specProgram'.
 
 Note [Disabling cross-module specialisation]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Since GHC 7.10 we have performed specialisation of INLINEABLE bindings living
+Since GHC 7.10 we have performed specialisation of INLINABLE bindings living
 in modules outside of the current module. This can sometimes uncover user code
 which explodes in size when aggressively optimized. The
 -fno-cross-module-specialise option was introduced to allow users to being
@@ -656,16 +652,16 @@ specImports dflags this_mod top_env done callers rule_base cds
     return ([], [])
 
   | otherwise =
-    do { let import_calls = varEnvElts cds
+    do { let import_calls = dVarEnvElts cds
        ; (rules, spec_binds) <- go rule_base import_calls
        ; return (rules, spec_binds) }
   where
     go :: RuleBase -> [CallInfoSet] -> CoreM ([CoreRule], [CoreBind])
     go _ [] = return ([], [])
-    go rb (CIS fn calls_for_fn : other_calls)
+    go rb (cis@(CIS fn _calls_for_fn) : other_calls)
       = do { (rules1, spec_binds1) <- specImport dflags this_mod top_env
                                                  done callers rb fn $
-                                      Map.toList calls_for_fn
+                                      ciSetToList cis
            ; (rules2, spec_binds2) <- go (extendRuleBaseList rb rules1) other_calls
            ; return (rules1 ++ rules2, spec_binds1 ++ spec_binds2) }
 
@@ -725,11 +721,11 @@ specImport dflags this_mod top_env done callers rb fn calls_for_fn
        ; return (rules2 ++ rules1, final_binds) }
 
   |  warnMissingSpecs dflags callers
-  = do { warnMsg (vcat [ hang (ptext (sLit "Could not specialise imported function") <+> quotes (ppr fn))
-                            2 (vcat [ ptext (sLit "when specialising") <+> quotes (ppr caller)
+  = do { warnMsg (vcat [ hang (text "Could not specialise imported function" <+> quotes (ppr fn))
+                            2 (vcat [ text "when specialising" <+> quotes (ppr caller)
                                     | caller <- callers])
-                      , ifPprDebug (ptext (sLit "calls:") <+> vcat (map (pprCallInfo fn) calls_for_fn))
-                      , ptext (sLit "Probable fix: add INLINEABLE pragma on") <+> quotes (ppr fn) ])
+                      , ifPprDebug (text "calls:" <+> vcat (map (pprCallInfo fn) calls_for_fn))
+                      , text "Probable fix: add INLINABLE pragma on" <+> quotes (ppr fn) ])
        ; return ([], []) }
 
   | otherwise
@@ -752,6 +748,7 @@ wantSpecImport :: DynFlags -> Unfolding -> Bool
 wantSpecImport dflags unf
  = case unf of
      NoUnfolding      -> False
+     BootUnfolding    -> False
      OtherCon {}      -> False
      DFunUnfolding {} -> True
      CoreUnfolding { uf_src = src, uf_guidance = _guidance }
@@ -760,17 +757,17 @@ wantSpecImport dflags unf
                -- Specialise even INLINE things; it hasn't inlined yet,
                -- so perhaps it never will.  Moreover it may have calls
                -- inside it that we want to specialise
-       | otherwise -> False    -- Stable, not INLINE, hence INLINEABLE
+       | otherwise -> False    -- Stable, not INLINE, hence INLINABLE
 
 {- Note [Warning about missed specialisations]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Suppose
- * In module Lib, you carefully mark a function 'foo' INLINEABLE
+ * In module Lib, you carefully mark a function 'foo' INLINABLE
  * Import Lib(foo) into another module M
  * Call 'foo' at some specialised type in M
 Then you jolly well expect it to be specialised in M.  But what if
-'foo' calls another fuction 'Lib.bar'.  Then you'd like 'bar' to be
-specialised too.  But if 'bar' is not marked INLINEABLE it may well
+'foo' calls another function 'Lib.bar'.  Then you'd like 'bar' to be
+specialised too.  But if 'bar' is not marked INLINABLE it may well
 not be specialised.  The warning Opt_WarnMissedSpecs warns about this.
 
 It's more noisy to warning about a missed specialisation opportunity
@@ -1172,7 +1169,7 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
 
   | otherwise   -- No calls or RHS doesn't fit our preconceptions
   = WARN( not (exprIsTrivial rhs) && notNull calls_for_me,
-          ptext (sLit "Missed specialisation opportunity for")
+          text "Missed specialisation opportunity for"
                                  <+> ppr fn $$ _trace_doc )
           -- Note [Specialisation shape]
     -- pprTrace "specDefn: none" (ppr fn <+> ppr calls_for_me) $
@@ -1223,7 +1220,7 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
               -> SpecM (Maybe ((Id,CoreExpr),     -- Specialised definition
                                UsageDetails,      -- Usage details from specialised body
                                CoreRule))         -- Info for the Id's SpecEnv
-    spec_call (CallKey call_ts, (call_ds, _))
+    spec_call _call_info@(CallKey call_ts, (call_ds, _))
       = ASSERT( call_ts `lengthIs` n_tyvars  && call_ds `lengthIs` n_dicts )
 
         -- Suppose f's defn is  f = /\ a b c -> \ d1 d2 -> rhs
@@ -1231,6 +1228,9 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
 
         -- Construct the new binding
         --      f1 = SUBST[a->t1,c->t3, d1->d1', d2->d2'] (/\ b -> rhs)
+        -- PLUS the rule
+        --      RULE "SPEC f" forall b d1' d2'. f b d1' d2' = f1 b
+        --      In the rule, d1' and d2' are just wildcards, not used in the RHS
         -- PLUS the usage-details
         --      { d1' = dx1; d2' = dx2 }
         -- where d1', d2' are cloned versions of d1,d2, with the type substitution
@@ -1244,7 +1244,7 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
                 -- spec_tyvars = [a,c]
                 -- ty_args     = [t1,b,t3]
                 spec_tv_binds = [(tv,ty) | (tv, Just ty) <- rhs_tyvars `zip` call_ts]
-                env1          = extendTCvSubstList env spec_tv_binds
+                env1          = extendTvSubstList env spec_tv_binds
                 (rhs_env, poly_tyvars) = substBndrs env1
                                             [tv | (tv, Nothing) <- rhs_tyvars `zip` call_ts]
 
@@ -1253,20 +1253,25 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
            ; let (rhs_env2, dx_binds, spec_dict_args)
                             = bindAuxiliaryDicts rhs_env rhs_dict_ids call_ds inst_dict_ids
                  ty_args    = mk_ty_args call_ts poly_tyvars
-                 rule_args  = ty_args ++ map Var inst_dict_ids
-                 rule_bndrs = poly_tyvars ++ inst_dict_ids
+                 ev_args    = map varToCoreExpr inst_dict_ids  -- ev_args, ev_bndrs:
+                 ev_bndrs   = exprsFreeIdsList ev_args         -- See Note [Evidence foralls]
+                 rule_args  = ty_args     ++ ev_args
+                 rule_bndrs = poly_tyvars ++ ev_bndrs
 
            ; dflags <- getDynFlags
            ; if already_covered dflags rule_args then
                 return Nothing
-             else do
+             else -- pprTrace "spec_call" (vcat [ ppr _call_info, ppr fn, ppr rhs_dict_ids
+                  --                           , text "rhs_env2" <+> ppr (se_subst rhs_env2)
+                  --                           , ppr dx_binds ]) $
+                  do
            {    -- Figure out the type of the specialised function
              let body_ty = applyTypeToArgs rhs fn_type rule_args
                  (lam_args, app_args)           -- Add a dummy argument if body_ty is unlifted
-                   | isUnLiftedType body_ty     -- C.f. WwLib.mkWorkerArgs
+                   | isUnliftedType body_ty     -- C.f. WwLib.mkWorkerArgs
                    = (poly_tyvars ++ [voidArgId], poly_tyvars ++ [voidPrimId])
                    | otherwise = (poly_tyvars, poly_tyvars)
-                 spec_id_ty = mkPiTypes lam_args body_ty
+                 spec_id_ty = mkLamTypes lam_args body_ty
 
            ; spec_f <- newSpecIdSM fn spec_id_ty
            ; (spec_rhs, rhs_uds) <- specExpr rhs_env2 (mkLams lam_args body)
@@ -1276,9 +1281,9 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
                 --      forall b, d1',d2'.  f t1 b t3 d1' d2' = f1 b
                 herald = case mb_mod of
                            Nothing        -- Specialising local fn
-                               -> ptext (sLit "SPEC")
+                               -> text "SPEC"
                            Just this_mod  -- Specialising imoprted fn
-                               -> ptext (sLit "SPEC/") <> ppr this_mod
+                               -> text "SPEC/" <> ppr this_mod
 
                 rule_name = mkFastString $ showSDocForUser dflags neverQualify $
                             herald <+> ppr fn <+> hsep (map ppr_call_key_ty call_ts)
@@ -1312,9 +1317,17 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
                   = (inl_prag { inl_inline = EmptyInlineSpec }, noUnfolding)
 
                   | otherwise
-                  = (inl_prag, specUnfolding dflags (se_subst env)
-                                             poly_tyvars (ty_args ++ spec_dict_args)
-                                             fn_unf)
+                  = (inl_prag, specUnfolding dflags spec_unf_subst poly_tyvars
+                                             spec_unf_args fn_unf)
+
+                spec_unf_args  = ty_args ++ spec_dict_args
+                spec_unf_subst = CoreSubst.setInScope (se_subst env)
+                                    (CoreSubst.substInScope (se_subst rhs_env2))
+                  -- Extend the in-scope set to satisfy the precondition of
+                  -- specUnfolding, namely that in-scope(unf_subst) includes
+                  -- the free vars of spec_unf_args.  The in-scope set of rhs_env2
+                  -- is just the ticket; but the actual substitution we want is
+                  -- the same old one from 'env'
 
                 --------------------------------------
                 -- Adding arity information just propagates it a bit faster
@@ -1327,10 +1340,29 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
 
            ; return (Just ((spec_f_w_arity, spec_rhs), final_uds, spec_env_rule)) } }
 
-{-
+{- Note [Evidence foralls]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose (Trac #12212) that we are specialising
+   f :: forall a b. (Num a, F a ~ F b) => blah
+with a=b=Int. Then the RULE will be something like
+   RULE forall (d:Num Int) (g :: F Int ~ F Int).
+        f Int Int d g = f_spec
+But both varToCoreExpr (when constructing the LHS args), and the
+simplifier (when simplifying the LHS args), will transform to
+   RULE forall (d:Num Int) (g :: F Int ~ F Int).
+        f Int Int d <F Int> = f_spec
+by replacing g with Refl.  So now 'g' is unbound, which results in a later
+crash. So we use Refl right off the bat, and do not forall-quantify 'g':
+ * varToCoreExpr generates a Refl
+ * exprsFreeIdsList returns the Ids bound by the args,
+   which won't include g
+
+You might wonder if this will match as often, but the simplifier replaces
+complicated Refl coercions with Refl pretty aggressively.
+
 Note [Orphans and auto-generated rules]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When we specialise an INLINEABLE function, or when we have
+When we specialise an INLINABLE function, or when we have
 -fspecialise-aggressively, we auto-generate RULES that are orphans.
 We don't want to warn about these, or we'd generate a lot of warnings.
 Thus, we only warn about user-specified orphan rules.
@@ -1360,9 +1392,12 @@ bindAuxiliaryDicts env@(SE { se_subst = subst, se_interesting = interesting })
   = (env', dx_binds, spec_dict_args)
   where
     (dx_binds, spec_dict_args) = go call_ds inst_dict_ids
-    env' = env { se_subst = CoreSubst.extendIdSubstList subst (orig_dict_ids `zip` spec_dict_args)
+    env' = env { se_subst = subst `CoreSubst.extendSubstList`
+                                     (orig_dict_ids `zip` spec_dict_args)
+                                  `CoreSubst.extendInScopeList` dx_ids
                , se_interesting = interesting `unionVarSet` interesting_dicts }
 
+    dx_ids = [dx_id | (NonRec dx_id _, _) <- dx_binds]
     interesting_dicts = mkVarSet [ dx_id | (NonRec dx_id dx, _) <- dx_binds
                                  , interestingDict env dx ]
                   -- See Note [Make the new dictionaries interesting]
@@ -1370,7 +1405,7 @@ bindAuxiliaryDicts env@(SE { se_subst = subst, se_interesting = interesting })
     go :: [CoreExpr] -> [CoreBndr] -> ([DictBind], [CoreExpr])
     go [] _  = ([], [])
     go (dx:dxs) (dx_id:dx_ids)
-      | exprIsTrivial dx = (dx_binds, dx:args)
+      | exprIsTrivial dx = (dx_binds,                          dx        : args)
       | otherwise        = (mkDB (NonRec dx_id dx) : dx_binds, Var dx_id : args)
       where
         (dx_binds, args) = go dxs dx_ids
@@ -1652,7 +1687,7 @@ all they should be inlined, right?  Two reasons:
    This particular example had a huge effect on the call to replicateM_
    in nofib/shootout/n-body.
 
-Why (b): discard INLINEABLE pragmas? See Trac #4874 for persuasive examples.
+Why (b): discard INLINABLE pragmas? See Trac #4874 for persuasive examples.
 Suppose we have
     {-# INLINABLE f #-}
     f :: Ord a => [a] -> Int
@@ -1667,7 +1702,7 @@ have the big, un-optimised of f (albeit specialised) captured in an
 INLINABLE pragma for f_spec, we won't get that optimisation.
 
 So we simply drop INLINABLE pragmas when specialising. It's not really
-a complete solution; ignoring specalisation for now, INLINABLE functions
+a complete solution; ignoring specialisation for now, INLINABLE functions
 don't get properly strictness analysed, for example. But it works well
 for examples involving specialisation, which is the dominant use of
 INLINABLE.  See Trac #4874.
@@ -1697,9 +1732,9 @@ data UsageDetails
 
 instance Outputable UsageDetails where
   ppr (MkUD { ud_binds = dbs, ud_calls = calls })
-        = ptext (sLit "MkUD") <+> braces (sep (punctuate comma
-                [ptext (sLit "binds") <+> equals <+> ppr dbs,
-                 ptext (sLit "calls") <+> equals <+> ppr calls]))
+        = text "MkUD" <+> braces (sep (punctuate comma
+                [text "binds" <+> equals <+> ppr dbs,
+                 text "calls" <+> equals <+> ppr calls]))
 
 -- | A 'DictBind' is a binding along with a cached set containing its free
 -- variables (both type variables and dictionaries)
@@ -1708,26 +1743,81 @@ type DictBind = (CoreBind, VarSet)
 type DictExpr = CoreExpr
 
 emptyUDs :: UsageDetails
-emptyUDs = MkUD { ud_binds = emptyBag, ud_calls = emptyVarEnv }
+emptyUDs = MkUD { ud_binds = emptyBag, ud_calls = emptyDVarEnv }
 
 ------------------------------------------------------------
-type CallDetails  = IdEnv CallInfoSet
-newtype CallKey   = CallKey [Maybe Type]                        -- Nothing => unconstrained type argument
+type CallDetails  = DIdEnv CallInfoSet
+  -- The order of specialized binds and rules depends on how we linearize
+  -- CallDetails, so to get determinism we must use a deterministic set here.
+  -- See Note [Deterministic UniqFM] in UniqDFM
+newtype CallKey   = CallKey [Maybe Type]
+  -- Nothing => unconstrained type argument
 
--- CallInfo uses a Map, thereby ensuring that
--- we record only one call instance for any key
---
--- The list of types and dictionaries is guaranteed to
--- match the type of f
-data CallInfoSet = CIS Id (Map CallKey ([DictExpr], VarSet))
-                        -- Range is dict args and the vars of the whole
-                        -- call (including tyvars)
-                        -- [*not* include the main id itself, of course]
+data CallInfoSet = CIS Id (Bag CallInfo)
+  -- The list of types and dictionaries is guaranteed to
+  -- match the type of f
+
+{-
+Note [CallInfoSet determinism]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+CallInfoSet holds a Bag of (CallKey, [DictExpr], VarSet) triplets for a given
+Id. They represent the types that the function is instantiated at along with
+the dictionaries and free variables.
+
+We use this information to generate specialized versions of a given function.
+CallInfoSet used to be defined as:
+
+  data CallInfoSet = CIS Id (Map CallKey ([DictExpr], VarSet))
+
+Unfortunately this was not deterministic. The Ord instance of CallKey was
+defined in terms of nonDetCmpType which is not deterministic.
+See Note [nonDetCmpType nondeterminism].
+The end result was that if the function had multiple specializations they would
+be generated in arbitrary order.
+
+We need a container that:
+a) when turned into a list has only one element per each CallKey and the list
+has deterministic order
+b) supports union
+c) supports singleton
+d) supports filter
+
+We can't use UniqDFM here because there's no one Unique that we can key on.
+
+The current approach is to implement the set as a Bag with duplicates.
+This makes b), c), d) trivial and pushes a) towards the end. The deduplication
+is done by using a TrieMap for membership tests on CallKey. This lets us delete
+the nondeterministic Ord CallKey instance.
+
+An alternative approach would be to augument the Map the same way that UniqDFM
+is augumented, by keeping track of insertion order and using it to order the
+resulting lists. It would mean keeping the nondeterministic Ord CallKey
+instance making it easy to reintroduce nondeterminism in the future.
+-}
+
+ciSetToList :: CallInfoSet -> [CallInfo]
+ciSetToList (CIS _ b) = snd $ foldrBag combine (emptyTM, []) b
+  where
+  -- This is where we eliminate duplicates, recording the CallKeys we've
+  -- already seen in the TrieMap. See Note [CallInfoSet determinism].
+  combine :: CallInfo -> (CallKeySet, [CallInfo]) -> (CallKeySet, [CallInfo])
+  combine ci@(CallKey key, _) (set, acc)
+    | Just _ <- lookupTM key set = (set, acc)
+    | otherwise = (insertTM key () set, ci:acc)
+
+type CallKeySet = ListMap (MaybeMap TypeMap) ()
+  -- We only use it in ciSetToList to check for membership
+
+ciSetFilter :: (CallInfo -> Bool) -> CallInfoSet -> CallInfoSet
+ciSetFilter p (CIS id a) = CIS id (filterBag p a)
 
 type CallInfo = (CallKey, ([DictExpr], VarSet))
+                    -- Range is dict args and the vars of the whole
+                    -- call (including tyvars)
+                    -- [*not* include the main id itself, of course]
 
 instance Outputable CallInfoSet where
-  ppr (CIS fn map) = hang (ptext (sLit "CIS") <+> ppr fn)
+  ppr (CIS fn map) = hang (text "CIS" <+> ppr fn)
                         2 (ppr map)
 
 pprCallInfo :: Id -> CallInfo -> SDoc
@@ -1742,37 +1832,29 @@ ppr_call_key_ty (Just ty) = char '@' <+> pprParendType ty
 instance Outputable CallKey where
   ppr (CallKey ts) = ppr ts
 
--- Type isn't an instance of Ord, so that we can control which
--- instance we use.  That's tiresome here.  Oh well
-instance Eq CallKey where
-  k1 == k2 = case k1 `compare` k2 of { EQ -> True; _ -> False }
-
-instance Ord CallKey where
-  compare (CallKey k1) (CallKey k2) = cmpList cmp k1 k2
-                where
-                  cmp Nothing   Nothing   = EQ
-                  cmp Nothing   (Just _)  = LT
-                  cmp (Just _)  Nothing   = GT
-                  cmp (Just t1) (Just t2) = cmpType t1 t2
-
 unionCalls :: CallDetails -> CallDetails -> CallDetails
-unionCalls c1 c2 = plusVarEnv_C unionCallInfoSet c1 c2
+unionCalls c1 c2 = plusDVarEnv_C unionCallInfoSet c1 c2
 
 unionCallInfoSet :: CallInfoSet -> CallInfoSet -> CallInfoSet
-unionCallInfoSet (CIS f calls1) (CIS _ calls2) = CIS f (calls1 `Map.union` calls2)
+unionCallInfoSet (CIS f calls1) (CIS _ calls2) =
+  CIS f (calls1 `unionBags` calls2)
 
 callDetailsFVs :: CallDetails -> VarSet
-callDetailsFVs calls = foldVarEnv (unionVarSet . callInfoFVs) emptyVarSet calls
+callDetailsFVs calls =
+  nonDetFoldUDFM (unionVarSet . callInfoFVs) emptyVarSet calls
+  -- It's OK to use nonDetFoldUDFM here because we forget the ordering
+  -- immediately by converting to a nondeterministic set.
 
 callInfoFVs :: CallInfoSet -> VarSet
-callInfoFVs (CIS _ call_info) = Map.foldRight (\(_,fv) vs -> unionVarSet fv vs) emptyVarSet call_info
+callInfoFVs (CIS _ call_info) =
+  foldrBag (\(_, (_,fv)) vs -> unionVarSet fv vs) emptyVarSet call_info
 
 ------------------------------------------------------------
 singleCall :: Id -> [Maybe Type] -> [DictExpr] -> UsageDetails
 singleCall id tys dicts
   = MkUD {ud_binds = emptyBag,
-          ud_calls = unitVarEnv id $ CIS id $
-                     Map.singleton (CallKey tys) (dicts, call_fvs) }
+          ud_calls = unitDVarEnv id $ CIS id $
+                     unitBag (CallKey tys, (dicts, call_fvs)) }
   where
     call_fvs = exprsFreeVars dicts `unionVarSet` tys_fvs
     tys_fvs  = tyCoVarsOfTypes (catMaybes tys)
@@ -1897,6 +1979,8 @@ whole it's only a small win: 2.2% improvement in allocation for ansi,
 
 interestingDict :: SpecEnv -> CoreExpr -> Bool
 -- A dictionary argument is interesting if it has *some* structure
+-- NB: "dictionary" arguments include constraints of all sorts,
+--     including equality constraints; hence the Coercion case
 interestingDict env (Var v) =  hasSomeUnfolding (idUnfolding v)
                             || isDataConWorkId v
                             || v `elemVarSet` se_interesting env
@@ -2019,10 +2103,11 @@ callsForMe fn (MkUD { ud_binds = orig_dbs, ud_calls = orig_calls })
     --                 text "Calls for me =" <+> ppr calls_for_me]) $
     (uds_without_me, calls_for_me)
   where
-    uds_without_me = MkUD { ud_binds = orig_dbs, ud_calls = delVarEnv orig_calls fn }
-    calls_for_me = case lookupVarEnv orig_calls fn of
+    uds_without_me = MkUD { ud_binds = orig_dbs
+                          , ud_calls = delDVarEnv orig_calls fn }
+    calls_for_me = case lookupDVarEnv orig_calls fn of
                         Nothing -> []
-                        Just (CIS _ calls) -> filter_dfuns (Map.toList calls)
+                        Just cis -> filter_dfuns (ciSetToList cis)
 
     dep_set = foldlBag go (unitVarSet fn) orig_dbs
     go dep_set (db,fvs) | fvs `intersectsVarSet` dep_set
@@ -2056,15 +2141,13 @@ splitDictBinds dbs bndr_set
 deleteCallsMentioning :: VarSet -> CallDetails -> CallDetails
 -- Remove calls *mentioning* bs
 deleteCallsMentioning bs calls
-  = mapVarEnv filter_calls calls
+  = mapDVarEnv (ciSetFilter keep_call) calls
   where
-    filter_calls :: CallInfoSet -> CallInfoSet
-    filter_calls (CIS f calls) = CIS f (Map.filter keep_call calls)
-    keep_call (_, fvs) = not (fvs `intersectsVarSet` bs)
+    keep_call (_, (_, fvs)) = not (fvs `intersectsVarSet` bs)
 
 deleteCallsFor :: [Id] -> CallDetails -> CallDetails
 -- Remove calls *for* bs
-deleteCallsFor bs calls = delVarEnvList calls bs
+deleteCallsFor bs calls = delDVarEnvList calls bs
 
 {-
 ************************************************************************
@@ -2094,7 +2177,6 @@ instance Monad SpecM where
                                case f y of
                                    SpecM z ->
                                        z
-    return = pure
     fail str = SpecM $ fail str
 
 #if __GLASGOW_HASKELL__ > 710
@@ -2137,9 +2219,9 @@ mapAndCombineSM f (x:xs) = do (y, uds1) <- f x
                               (ys, uds2) <- mapAndCombineSM f xs
                               return (y:ys, uds1 `plusUDs` uds2)
 
-extendTCvSubstList :: SpecEnv -> [(TyVar,Type)] -> SpecEnv
-extendTCvSubstList env tv_binds
-  = env { se_subst = CoreSubst.extendTCvSubstList (se_subst env) tv_binds }
+extendTvSubstList :: SpecEnv -> [(TyVar,Type)] -> SpecEnv
+extendTvSubstList env tv_binds
+  = env { se_subst = CoreSubst.extendTvSubstList (se_subst env) tv_binds }
 
 substTy :: SpecEnv -> Type -> Type
 substTy env ty = CoreSubst.substTy (se_subst env) ty
@@ -2226,12 +2308,12 @@ is used:
 
 Now give it to the simplifier and the _Lifting will be optimised away.
 
-The benfit is that we have given the specialised "unboxed" values a
-very simplep lifted semantics and then leave it up to the simplifier to
+The benefit is that we have given the specialised "unboxed" values a
+very simple lifted semantics and then leave it up to the simplifier to
 optimise it --- knowing that the overheads will be removed in nearly
 all cases.
 
-In particular, the value will only be evaluted in the branches of the
+In particular, the value will only be evaluated in the branches of the
 program which use it, rather than being forced at the point where the
 value is bound. For example:
 

@@ -47,11 +47,7 @@ import Platform
 import Util
 import Coercion     (mkUnbranchedAxInstCo,mkSymCo,Role(..))
 
-#if __GLASGOW_HASKELL__ >= 709
 import Control.Applicative ( Alternative(..) )
-#else
-import Control.Applicative ( Applicative(..), Alternative(..) )
-#endif
 
 import Control.Monad
 #if __GLASGOW_HASKELL__ > 710
@@ -138,7 +134,12 @@ primOpRules nm WordMulOp   = mkPrimOpRule nm 2 [ binaryLit (wordOp2 (*))
 primOpRules nm WordQuotOp  = mkPrimOpRule nm 2 [ nonZeroLit 1 >> binaryLit (wordOp2 quot)
                                                , rightIdentityDynFlags onew ]
 primOpRules nm WordRemOp   = mkPrimOpRule nm 2 [ nonZeroLit 1 >> binaryLit (wordOp2 rem)
-                                               , rightIdentityDynFlags onew ]
+                                               , leftZero zerow
+                                               , do l <- getLiteral 1
+                                                    dflags <- getDynFlags
+                                                    guard (l == onew dflags)
+                                                    retLit zerow
+                                               , equalArgs >> retLit zerow ]
 primOpRules nm AndOp       = mkPrimOpRule nm 2 [ binaryLit (wordOp2 (.&.))
                                                , idempotent
                                                , zeroElem zerow ]
@@ -649,7 +650,6 @@ instance Applicative RuleM where
     (<*>) = ap
 
 instance Monad RuleM where
-  return = pure
   RuleM f >>= g = RuleM $ \dflags iu e -> case f dflags iu e of
     Nothing -> Nothing
     Just r -> runRuleM (g r) dflags iu e
@@ -661,13 +661,11 @@ instance MonadFail.MonadFail RuleM where
 #endif
 
 instance Alternative RuleM where
-    empty = mzero
-    (<|>) = mplus
+  empty = RuleM $ \_ _ _ -> Nothing
+  RuleM f1 <|> RuleM f2 = RuleM $ \dflags iu args ->
+    f1 dflags iu args <|> f2 dflags iu args
 
-instance MonadPlus RuleM where
-  mzero = RuleM $ \_ _ _ -> Nothing
-  mplus (RuleM f1) (RuleM f2) = RuleM $ \dflags iu args ->
-    f1 dflags iu args `mplus` f2 dflags iu args
+instance MonadPlus RuleM
 
 instance HasDynFlags RuleM where
     getDynFlags = RuleM $ \dflags _ _ -> Just dflags
@@ -898,7 +896,7 @@ tagToEnumRule = do
       return $ mkTyApps (Var (dataConWorkId dc)) tc_args
 
     -- See Note [tagToEnum#]
-    _ -> WARN( True, ptext (sLit "tagToEnum# on non-enumeration type") <+> ppr ty )
+    _ -> WARN( True, text "tagToEnum# on non-enumeration type" <+> ppr ty )
          return $ mkRuntimeErrorApp rUNTIME_ERROR_ID ty "tagToEnum# on non-enumeration type"
 
 {-
@@ -990,7 +988,26 @@ builtinRules
      BuiltinRule { ru_name = fsLit "Inline", ru_fn = inlineIdName,
                    ru_nargs = 2, ru_try = \_ _ _ -> match_inline },
      BuiltinRule { ru_name = fsLit "MagicDict", ru_fn = idName magicDictId,
-                   ru_nargs = 4, ru_try = \_ _ _ -> match_magicDict }
+                   ru_nargs = 4, ru_try = \_ _ _ -> match_magicDict },
+     mkBasicRule divIntName 2 $ msum
+        [ nonZeroLit 1 >> binaryLit (intOp2 div)
+        , leftZero zeroi
+        , do
+          [arg, Lit (MachInt d)] <- getArgs
+          Just n <- return $ exactLog2 d
+          dflags <- getDynFlags
+          return $ Var (mkPrimOpId ISraOp) `App` arg `App` mkIntVal dflags n
+        ],
+     mkBasicRule modIntName 2 $ msum
+        [ nonZeroLit 1 >> binaryLit (intOp2 mod)
+        , leftZero zeroi
+        , do
+          [arg, Lit (MachInt d)] <- getArgs
+          Just _ <- return $ exactLog2 d
+          dflags <- getDynFlags
+          return $ Var (mkPrimOpId AndIOp)
+            `App` arg `App` mkIntVal dflags (d - 1)
+        ]
      ]
  ++ builtinIntegerRules
 

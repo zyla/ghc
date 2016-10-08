@@ -8,7 +8,7 @@
 -- Module      :  Data.Either
 -- Copyright   :  (c) The University of Glasgow 2001
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  experimental
 -- Portability :  portable
@@ -24,6 +24,8 @@ module Data.Either (
    rights,
    isLeft,
    isRight,
+   fromLeft,
+   fromRight,
    partitionEithers,
  ) where
 
@@ -124,15 +126,18 @@ Left "parse error"
 data  Either a b  =  Left a | Right b
   deriving (Eq, Ord, Read, Show)
 
+-- | @since 3.0
 instance Functor (Either a) where
     fmap _ (Left x) = Left x
     fmap f (Right y) = Right (f y)
 
+-- | @since 3.0
 instance Applicative (Either e) where
     pure          = Right
     Left  e <*> _ = Left e
     Right f <*> r = fmap f r
 
+-- | @since 4.4.0.0
 instance Monad (Either e) where
     Left  l >>= _ = Left l
     Right r >>= k = k r
@@ -277,11 +282,45 @@ isRight :: Either a b -> Bool
 isRight (Left  _) = False
 isRight (Right _) = True
 
+-- | Return the contents of a 'Left'-value or a default value otherwise.
+--
+-- @since 4.10.0.0
+--
+-- ==== __Examples__
+--
+-- Basic usage:
+--
+-- >>> fromLeft 1 (Left 3)
+-- 3
+-- >>> fromLeft 1 (Right "foo")
+-- 1
+--
+fromLeft :: a -> Either a b -> a
+fromLeft _ (Left a) = a
+fromLeft a _        = a
+
+-- | Return the contents of a 'Right'-value or a default value otherwise.
+--
+-- @since 4.10.0.0
+--
+-- ==== __Examples__
+--
+-- Basic usage:
+--
+-- >>> fromRight 1 (Right 3)
+-- 3
+-- >>> fromRight 1 (Left "foo")
+-- 1
+--
+fromRight :: b -> Either a b -> b
+fromRight _ (Right b) = b
+fromRight b _         = b
+
 -- instance for the == Boolean type-level equality operator
 type family EqEither a b where
   EqEither ('Left x)  ('Left y)  = x == y
   EqEither ('Right x) ('Right y) = x == y
-  EqEither _a         _b         = 'False
+  EqEither a          b          = 'False
 type instance a == b = EqEither a b
 
 {-

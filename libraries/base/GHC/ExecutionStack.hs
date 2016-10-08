@@ -22,11 +22,11 @@
 -- Your GHC must have been built with @libdw@ support for this to work.
 --
 -- @
--- $ ghc --info | grep libdw
+-- user@host:~$ ghc --info | grep libdw
 --  ,("RTS expects libdw","YES")
 -- @
 --
--- /Since: 4.11.0.0/
+-- @since 4.9.0.0
 -----------------------------------------------------------------------------
 
 module GHC.ExecutionStack (

@@ -1,6 +1,7 @@
+{-# LANGUAGE CPP                       #-}
+{-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE MagicHash                 #-}
 {-# LANGUAGE UnboxedTuples             #-}
-{-# LANGUAGE ExistentialQuantification #-}
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  GHC.StaticPtr
@@ -38,6 +39,7 @@ module GHC.StaticPtr
   , StaticPtrInfo(..)
   , staticPtrInfo
   , staticPtrKeys
+  , IsStatic(..)
   ) where
 
 import Foreign.C.Types     (CInt(..))
@@ -46,14 +48,24 @@ import Foreign.Ptr         (castPtr)
 import GHC.Exts            (addrToAny#)
 import GHC.Ptr             (Ptr(..), nullPtr)
 import GHC.Fingerprint     (Fingerprint(..))
+import GHC.Prim
+import GHC.Word            (Word64(..))
 
+
+#include "MachDeps.h"
 
 -- | A reference to a value of type 'a'.
-data StaticPtr a = StaticPtr StaticKey StaticPtrInfo a
-
+#if WORD_SIZE_IN_BITS < 64
+data StaticPtr a = StaticPtr Word64# Word64# -- The flattened Fingerprint is
+                                             -- convenient in the compiler.
+                             StaticPtrInfo a
+#else
+data StaticPtr a = StaticPtr Word# Word#
+                             StaticPtrInfo a
+#endif
 -- | Dereferences a static pointer.
 deRefStaticPtr :: StaticPtr a -> a
-deRefStaticPtr (StaticPtr _ _ v) = v
+deRefStaticPtr (StaticPtr _ _ _ v) = v
 
 -- | A key for `StaticPtrs` that can be serialized and used with
 -- 'unsafeLookupStaticPtr'.
@@ -61,7 +73,7 @@ type StaticKey = Fingerprint
 
 -- | The 'StaticKey' that can be used to look up the given 'StaticPtr'.
 staticKey :: StaticPtr a -> StaticKey
-staticKey (StaticPtr k _ _) = k
+staticKey (StaticPtr w0 w1 _ _) = Fingerprint (W64# w0) (W64# w1)
 
 -- | Looks up a 'StaticPtr' by its 'StaticKey'.
 --
@@ -80,15 +92,20 @@ unsafeLookupStaticPtr (Fingerprint w1 w2) = do
 
 foreign import ccall unsafe hs_spt_lookup :: Ptr () -> IO (Ptr a)
 
+-- | A class for things buildable from static pointers.
+class IsStatic p where
+    fromStaticPtr :: StaticPtr a -> p a
+
+-- | @since 4.9.0.0
+instance IsStatic StaticPtr where
+    fromStaticPtr = id
+
 -- | Miscelaneous information available for debugging purposes.
 data StaticPtrInfo = StaticPtrInfo
     { -- | Package key of the package where the static pointer is defined
       spInfoUnitId  :: String
       -- | Name of the module where the static pointer is defined
     , spInfoModuleName :: String
-      -- | An internal name that is distinct for every static pointer defined in
-      -- a given module.
-    , spInfoName       :: String
       -- | Source location of the definition of the static pointer as a
       -- @(Line, Column)@ pair.
     , spInfoSrcLoc     :: (Int, Int)
@@ -97,7 +114,7 @@ data StaticPtrInfo = StaticPtrInfo
 
 -- | 'StaticPtrInfo' of the given 'StaticPtr'.
 staticPtrInfo :: StaticPtr a -> StaticPtrInfo
-staticPtrInfo (StaticPtr _ n _) = n
+staticPtrInfo (StaticPtr _ _ n _) = n
 
 -- | A list of all known keys.
 staticPtrKeys :: IO [StaticKey]

@@ -16,9 +16,6 @@
 
 #include "BeginPrivate.h"
 
-void blockedThrowTo (Capability *cap,
-                     StgTSO *target, MessageThrowTo *msg);
-
 StgTSO* raiseAsync (Capability *cap,
                     StgTSO *tso,
                     StgClosure *exception,
@@ -47,7 +44,7 @@ MessageThrowTo *throwTo (Capability *cap,      // the Capability we hold
                          StgTSO *target,
                          StgClosure *exception); // the exception closure
 
-nat throwToMsg (Capability *cap,
+uint32_t throwToMsg (Capability *cap,
                 MessageThrowTo *msg);
 
 int  maybePerformBlockedException (Capability *cap, StgTSO *tso);

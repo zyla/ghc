@@ -21,14 +21,11 @@ import Maybes
 import Name             ( getSrcLoc )
 import ErrUtils         ( MsgDoc, Severity(..), mkLocMessage )
 import Type
+import RepType
 import TyCon
 import Util
 import SrcLoc
 import Outputable
-import FastString
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative ( Applicative(..) )
-#endif
 import Control.Monad
 import Data.Function
 
@@ -67,12 +64,12 @@ lintStgBindings whodunnit binds
     case (initL (lint_binds binds)) of
       Nothing  -> binds
       Just msg -> pprPanic "" (vcat [
-                        ptext (sLit "*** Stg Lint ErrMsgs: in") <+>
-                              text whodunnit <+> ptext (sLit "***"),
+                        text "*** Stg Lint ErrMsgs: in" <+>
+                              text whodunnit <+> text "***",
                         msg,
-                        ptext (sLit "*** Offending Program ***"),
+                        text "*** Offending Program ***",
                         pprStgBindings binds,
-                        ptext (sLit "*** End of Offense ***")])
+                        text "*** End of Offense ***"])
   where
     lint_binds :: [StgBinding] -> LintM ()
 
@@ -109,8 +106,8 @@ lint_binds_help (binder, rhs)
         _maybe_rhs_ty <- lintStgRhs rhs
 
         -- Check binder doesn't have unlifted type
-        checkL (not (isUnLiftedType binder_ty))
-               (mkUnLiftedTyMsg binder rhs)
+        checkL (not (isUnliftedType binder_ty))
+               (mkUnliftedTyMsg binder rhs)
 
         -- Check match to RHS type
         -- Actually we *can't* check the RHS type, because
@@ -128,18 +125,23 @@ lint_binds_help (binder, rhs)
 
 lintStgRhs :: StgRhs -> LintM (Maybe Type)   -- Just ty => type is exact
 
-lintStgRhs (StgRhsClosure _ _ _ _ _ [] expr)
+lintStgRhs (StgRhsClosure _ _ _ _ [] expr)
   = lintStgExpr expr
 
-lintStgRhs (StgRhsClosure _ _ _ _ _ binders expr)
+lintStgRhs (StgRhsClosure _ _ _ _ binders expr)
   = addLoc (LambdaBodyOf binders) $
       addInScopeVars binders $ runMaybeT $ do
         body_ty <- MaybeT $ lintStgExpr expr
         return (mkFunTys (map idType binders) body_ty)
 
-lintStgRhs (StgRhsCon _ con args) = runMaybeT $ do
-    arg_tys <- mapM (MaybeT . lintStgArg) args
-    MaybeT $ checkFunApp con_ty arg_tys (mkRhsConMsg con_ty arg_tys)
+lintStgRhs rhs@(StgRhsCon _ con args) = do
+    -- TODO: Check arg_tys
+    when (isUnboxedTupleCon con || isUnboxedSumCon con) $
+      addErrL (text "StgRhsCon is an unboxed tuple or sum application" $$
+               ppr rhs)
+    runMaybeT $ do
+      arg_tys <- mapM (MaybeT . lintStgArg) args
+      MaybeT $ checkFunApp con_ty arg_tys (mkRhsConMsg con_ty arg_tys)
   where
     con_ty = dataConRepType con
 
@@ -152,7 +154,8 @@ lintStgExpr e@(StgApp fun args) = runMaybeT $ do
     arg_tys <- mapM (MaybeT . lintStgArg) args
     MaybeT $ checkFunApp fun_ty arg_tys (mkFunAppMsg fun_ty arg_tys e)
 
-lintStgExpr e@(StgConApp con args) = runMaybeT $ do
+lintStgExpr e@(StgConApp con args _arg_tys) = runMaybeT $ do
+    -- TODO: Check arg_tys
     arg_tys <- mapM (MaybeT . lintStgArg) args
     MaybeT $ checkFunApp con_ty arg_tys (mkFunAppMsg con_ty arg_tys e)
   where
@@ -171,7 +174,7 @@ lintStgExpr (StgOpApp _ args res_ty) = runMaybeT $ do
     return res_ty
 
 lintStgExpr (StgLam bndrs _) = do
-    addErrL (ptext (sLit "Unexpected StgLam") <+> ppr bndrs)
+    addErrL (text "Unexpected StgLam" <+> ppr bndrs)
     return Nothing
 
 lintStgExpr (StgLet binds body) = do
@@ -180,7 +183,7 @@ lintStgExpr (StgLet binds body) = do
       addInScopeVars binders $
         lintStgExpr body
 
-lintStgExpr (StgLetNoEscape _ _ binds body) = do
+lintStgExpr (StgLetNoEscape binds body) = do
     binders <- lintStgBinds binds
     addLoc (BodyOfLetRec binders) $
       addInScopeVars binders $
@@ -188,21 +191,21 @@ lintStgExpr (StgLetNoEscape _ _ binds body) = do
 
 lintStgExpr (StgTick _ expr) = lintStgExpr expr
 
-lintStgExpr (StgCase scrut _ _ bndr _ alts_type alts) = runMaybeT $ do
+lintStgExpr (StgCase scrut bndr alts_type alts) = runMaybeT $ do
     _ <- MaybeT $ lintStgExpr scrut
 
     in_scope <- MaybeT $ liftM Just $
      case alts_type of
-        AlgAlt tc    -> check_bndr tc >> return True
-        PrimAlt tc   -> check_bndr tc >> return True
-        UbxTupAlt _  -> return False -- Binder is always dead in this case
-        PolyAlt      -> return True
+        AlgAlt tc     -> check_bndr tc >> return True
+        PrimAlt tc    -> check_bndr tc >> return True
+        MultiValAlt _ -> return False -- Binder is always dead in this case
+        PolyAlt       -> return True
 
     MaybeT $ addInScopeVars [bndr | in_scope] $
              lintStgAlts alts scrut_ty
   where
     scrut_ty          = idType bndr
-    UnaryRep scrut_rep = repType scrut_ty -- Not used if scrutinee is unboxed tuple
+    UnaryRep scrut_rep = repType scrut_ty -- Not used if scrutinee is unboxed tuple or sum
     check_bndr tc = case tyConAppTyCon_maybe scrut_rep of
                         Just bndr_tc -> checkL (tc == bndr_tc) bad_bndr
                         Nothing      -> addErrL bad_bndr
@@ -227,15 +230,15 @@ lintStgAlts alts scrut_ty = do
           -- We can't check that the alternatives have the
           -- same type, because they don't, with unsafeCoerce#
 
-lintAlt :: Type -> (AltCon, [Id], [Bool], StgExpr) -> LintM (Maybe Type)
-lintAlt _ (DEFAULT, _, _, rhs)
+lintAlt :: Type -> (AltCon, [Id], StgExpr) -> LintM (Maybe Type)
+lintAlt _ (DEFAULT, _, rhs)
  = lintStgExpr rhs
 
-lintAlt scrut_ty (LitAlt lit, _, _, rhs) = do
+lintAlt scrut_ty (LitAlt lit, _, rhs) = do
    checkTys (literalType lit) scrut_ty (mkAltMsg1 scrut_ty)
    lintStgExpr rhs
 
-lintAlt scrut_ty (DataAlt con, args, _, rhs) = do
+lintAlt scrut_ty (DataAlt con, args, rhs) = do
     case splitTyConApp_maybe scrut_ty of
       Just (tycon, tys_applied) | isAlgTyCon tycon &&
                                   not (isNewTyCon tycon) -> do
@@ -285,12 +288,12 @@ data LintLocInfo
 
 dumpLoc :: LintLocInfo -> (SrcSpan, SDoc)
 dumpLoc (RhsOf v) =
-  (srcLocSpan (getSrcLoc v), ptext (sLit " [RHS of ") <> pp_binders [v] <> char ']' )
+  (srcLocSpan (getSrcLoc v), text " [RHS of " <> pp_binders [v] <> char ']' )
 dumpLoc (LambdaBodyOf bs) =
-  (srcLocSpan (getSrcLoc (head bs)), ptext (sLit " [in body of lambda with binders ") <> pp_binders bs <> char ']' )
+  (srcLocSpan (getSrcLoc (head bs)), text " [in body of lambda with binders " <> pp_binders bs <> char ']' )
 
 dumpLoc (BodyOfLetRec bs) =
-  (srcLocSpan (getSrcLoc (head bs)), ptext (sLit " [in body of letrec with binders ") <> pp_binders bs <> char ']' )
+  (srcLocSpan (getSrcLoc (head bs)), text " [in body of letrec with binders " <> pp_binders bs <> char ']' )
 
 
 pp_binders :: [Id] -> SDoc
@@ -318,7 +321,6 @@ instance Applicative LintM where
       (*>)  = thenL_
 
 instance Monad LintM where
-    return = pure
     (>>=) = thenL
     (>>)  = (*>)
 
@@ -353,19 +355,9 @@ addLoc extra_loc m = LintM $ \loc scope errs
 
 addInScopeVars :: [Id] -> LintM a -> LintM a
 addInScopeVars ids m = LintM $ \loc scope errs
- -> -- We check if these "new" ids are already
-    -- in scope, i.e., we have *shadowing* going on.
-    -- For now, it's just a "trace"; we may make
-    -- a real error out of it...
-    let
+ -> let
         new_set = mkVarSet ids
-    in
---  After adding -fliberate-case, Simon decided he likes shadowed
---  names after all.  WDP 94/07
---  (if isEmptyVarSet shadowed
---  then id
---  else pprTrace "Shadowed vars:" (ppr (varSetElems shadowed))) $
-    unLintM m loc (scope `unionVarSet` new_set) errs
+    in unLintM m loc (scope `unionVarSet` new_set) errs
 
 {-
 Checking function applications: we only check that the type has the
@@ -377,7 +369,7 @@ have long since disappeared.
 
 checkFunApp :: Type                 -- The function type
             -> [Type]               -- The arg type(s)
-            -> MsgDoc              -- Error message
+            -> MsgDoc               -- Error message
             -> LintM (Maybe Type)   -- Just ty => result type is accurate
 
 checkFunApp fun_ty arg_tys msg
@@ -429,8 +421,8 @@ stgEqType orig_ty1 orig_ty2
   = gos (repType orig_ty1) (repType orig_ty2)
   where
     gos :: RepType -> RepType -> Bool
-    gos (UbxTupleRep tys1) (UbxTupleRep tys2)
-      = equalLength tys1 tys2 && and (zipWith go tys1 tys2)
+    gos (MultiRep slots1) (MultiRep slots2)
+      = slots1 == slots2
     gos (UnaryRep ty1) (UnaryRep ty2) = go ty1 ty2
     gos _ _ = False
 
@@ -455,7 +447,7 @@ stgEqType orig_ty1 orig_ty2
 checkInScope :: Id -> LintM ()
 checkInScope id = LintM $ \loc scope errs
  -> if isLocalId id && not (id `elemVarSet` scope) then
-        ((), addErr errs (hsep [ppr id, ptext (sLit "is out of scope")]) loc)
+        ((), addErr errs (hsep [ppr id, text "is out of scope"]) loc)
     else
         ((), errs)
 
@@ -472,21 +464,21 @@ _mkCaseAltMsg _alts
 
 mkDefltMsg :: Id -> TyCon -> MsgDoc
 mkDefltMsg bndr tc
-  = ($$) (ptext (sLit "Binder of a case expression doesn't match type of scrutinee:"))
+  = ($$) (text "Binder of a case expression doesn't match type of scrutinee:")
          (ppr bndr $$ ppr (idType bndr) $$ ppr tc)
 
 mkFunAppMsg :: Type -> [Type] -> StgExpr -> MsgDoc
 mkFunAppMsg fun_ty arg_tys expr
   = vcat [text "In a function application, function type doesn't match arg types:",
-              hang (ptext (sLit "Function type:")) 4 (ppr fun_ty),
-              hang (ptext (sLit "Arg types:")) 4 (vcat (map (ppr) arg_tys)),
-              hang (ptext (sLit "Expression:")) 4 (ppr expr)]
+              hang (text "Function type:") 4 (ppr fun_ty),
+              hang (text "Arg types:") 4 (vcat (map (ppr) arg_tys)),
+              hang (text "Expression:") 4 (ppr expr)]
 
 mkRhsConMsg :: Type -> [Type] -> MsgDoc
 mkRhsConMsg fun_ty arg_tys
   = vcat [text "In a RHS constructor application, con type doesn't match arg types:",
-              hang (ptext (sLit "Constructor type:")) 4 (ppr fun_ty),
-              hang (ptext (sLit "Arg types:")) 4 (vcat (map (ppr) arg_tys))]
+              hang (text "Constructor type:") 4 (ppr fun_ty),
+              hang (text "Arg types:") 4 (vcat (map (ppr) arg_tys))]
 
 mkAltMsg1 :: Type -> MsgDoc
 mkAltMsg1 ty
@@ -519,15 +511,15 @@ mkAlgAltMsg4 ty arg
 
 _mkRhsMsg :: Id -> Type -> MsgDoc
 _mkRhsMsg binder ty
-  = vcat [hsep [ptext (sLit "The type of this binder doesn't match the type of its RHS:"),
+  = vcat [hsep [text "The type of this binder doesn't match the type of its RHS:",
                      ppr binder],
-              hsep [ptext (sLit "Binder's type:"), ppr (idType binder)],
-              hsep [ptext (sLit "Rhs type:"), ppr ty]
+              hsep [text "Binder's type:", ppr (idType binder)],
+              hsep [text "Rhs type:", ppr ty]
              ]
 
-mkUnLiftedTyMsg :: Id -> StgRhs -> SDoc
-mkUnLiftedTyMsg binder rhs
-  = (ptext (sLit "Let(rec) binder") <+> quotes (ppr binder) <+>
-     ptext (sLit "has unlifted type") <+> quotes (ppr (idType binder)))
+mkUnliftedTyMsg :: Id -> StgRhs -> SDoc
+mkUnliftedTyMsg binder rhs
+  = (text "Let(rec) binder" <+> quotes (ppr binder) <+>
+     text "has unlifted type" <+> quotes (ppr (idType binder)))
     $$
-    (ptext (sLit "RHS:") <+> ppr rhs)
+    (text "RHS:" <+> ppr rhs)

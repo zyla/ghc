@@ -1,5 +1,5 @@
 name:                integer-gmp
-version:             1.0.0.0
+version:             1.0.0.1
 synopsis:            Integer library based on GMP
 license:             BSD3
 license-file:        LICENSE
@@ -48,7 +48,7 @@ library
     UnliftedFFITypes
   build-depends:       ghc-prim
   hs-source-dirs:      src/
-  ghc-options: -this-package-key integer-gmp -Wall
+  ghc-options: -this-unit-id integer-gmp -Wall
   cc-options: -std=c99 -Wall
 
   include-dirs: include

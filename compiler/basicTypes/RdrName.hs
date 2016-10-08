@@ -74,6 +74,7 @@ import FastString
 import FieldLabel
 import Outputable
 import Unique
+import UniqFM
 import Util
 import StaticFlags( opt_PprStyle_Debug )
 
@@ -88,7 +89,9 @@ import Data.List( sortBy )
 ************************************************************************
 -}
 
--- | Do not use the data constructors of RdrName directly: prefer the family
+-- | Reader Name
+--
+-- Do not use the data constructors of RdrName directly: prefer the family
 -- of functions that creates them, such as 'mkRdrUnqual'
 --
 -- - Note: A Located RdrName will only have API Annotations if it is a
@@ -108,11 +111,15 @@ import Data.List( sortBy )
 -- For details on above see note [Api annotations] in ApiAnnotation
 data RdrName
   = Unqual OccName
-        -- ^ Used for ordinary, unqualified occurrences, e.g. @x@, @y@ or @Foo@.
+        -- ^ Unqualified  name
+        --
+        -- Used for ordinary, unqualified occurrences, e.g. @x@, @y@ or @Foo@.
         -- Create such a 'RdrName' with 'mkRdrUnqual'
 
   | Qual ModuleName OccName
-        -- ^ A qualified name written by the user in
+        -- ^ Qualified name
+        --
+        -- A qualified name written by the user in
         -- /source/ code.  The module isn't necessarily
         -- the module where the thing is defined;
         -- just the one from which it is imported.
@@ -120,14 +127,18 @@ data RdrName
         -- Create such a 'RdrName' with 'mkRdrQual'
 
   | Orig Module OccName
-        -- ^ An original name; the module is the /defining/ module.
+        -- ^ Original name
+        --
+        -- An original name; the module is the /defining/ module.
         -- This is used when GHC generates code that will be fed
         -- into the renamer (e.g. from deriving clauses), but where
         -- we want to say \"Use Prelude.map dammit\". One of these
         -- can be created with 'mkOrig'
 
   | Exact Name
-        -- ^ We know exactly the 'Name'. This is used:
+        -- ^ Exact name
+        --
+        -- We know exactly the 'Name'. This is used:
         --
         --  (1) When the parser parses built-in syntax like @[]@
         --      and @(,)@, but wants a 'RdrName' from it
@@ -135,7 +146,7 @@ data RdrName
         --  (2) By Template Haskell, when TH has generated a unique name
         --
         -- Such a 'RdrName' can be created by using 'getRdrName' on a 'Name'
-  deriving (Data, Typeable)
+  deriving Data
 
 {-
 ************************************************************************
@@ -318,22 +329,22 @@ instance Ord RdrName where
 ************************************************************************
 -}
 
--- | This environment is used to store local bindings (@let@, @where@, lambda, @case@).
+-- | Local Reader Environment
+--
+-- This environment is used to store local bindings
+-- (@let@, @where@, lambda, @case@).
 -- It is keyed by OccName, because we never use it for qualified names
 -- We keep the current mapping, *and* the set of all Names in scope
 -- Reason: see Note [Splicing Exact names] in RnEnv
--- The field lre_nwcs is used to keep names of type variables that should
--- be replaced with named wildcards.
--- See Note [Renaming named wild cards] in RnTypes
 data LocalRdrEnv = LRE { lre_env      :: OccEnv Name
                        , lre_in_scope :: NameSet }
 
 instance Outputable LocalRdrEnv where
   ppr (LRE {lre_env = env, lre_in_scope = ns})
-    = hang (ptext (sLit "LocalRdrEnv {"))
-         2 (vcat [ ptext (sLit "env =") <+> pprOccEnv ppr_elt env
-                 , ptext (sLit "in_scope =")
-                    <+> braces (pprWithCommas ppr (nameSetElems ns))
+    = hang (text "LocalRdrEnv {")
+         2 (vcat [ text "env =" <+> pprOccEnv ppr_elt env
+                 , text "in_scope ="
+                    <+> pprUFM ns (braces . pprWithCommas ppr)
                  ] <+> char '}')
     where
       ppr_elt name = parens (ppr (getUnique (nameOccName name))) <+> ppr name
@@ -357,8 +368,17 @@ extendLocalRdrEnvList lre@(LRE { lre_env = env, lre_in_scope = ns }) names
         , lre_in_scope = extendNameSetList ns names }
 
 lookupLocalRdrEnv :: LocalRdrEnv -> RdrName -> Maybe Name
-lookupLocalRdrEnv (LRE { lre_env = env }) (Unqual occ) = lookupOccEnv env occ
-lookupLocalRdrEnv _                       _            = Nothing
+lookupLocalRdrEnv (LRE { lre_env = env, lre_in_scope = ns }) rdr
+  | Unqual occ <- rdr
+  = lookupOccEnv env occ
+
+  -- See Note [Local bindings with Exact Names]
+  | Exact name <- rdr
+  , name `elemNameSet` ns
+  = Just name
+
+  | otherwise
+  = Nothing
 
 lookupLocalRdrOcc :: LocalRdrEnv -> OccName -> Maybe Name
 lookupLocalRdrOcc (LRE { lre_env = env }) occ = lookupOccEnv env occ
@@ -398,6 +418,7 @@ the in-scope-name-set.
 ************************************************************************
 -}
 
+-- | Global Reader Environment
 type GlobalRdrEnv = OccEnv [GlobalRdrElt]
 -- ^ Keyed by 'OccName'; when looking up a qualified name
 -- we look up the 'OccName' part, and then check the 'Provenance'
@@ -416,14 +437,24 @@ type GlobalRdrEnv = OccEnv [GlobalRdrElt]
 --              happens only when type-checking a [d| ... |] Template
 --              Haskell quotation; see this note in RnNames
 --              Note [Top-level Names in Template Haskell decl quotes]
+--
+-- INVARIANT 3: If the GlobalRdrEnv maps [occ -> gre], then
+--                 greOccName gre = occ
+--
+--              NB: greOccName gre is usually the same as
+--                  nameOccName (gre_name gre), but not always in the
+--                  case of record seectors; see greOccName
 
--- | An element of the 'GlobalRdrEnv'
+-- | Global Reader Element
+--
+-- An element of the 'GlobalRdrEnv'
 data GlobalRdrElt
   = GRE { gre_name :: Name
         , gre_par  :: Parent
         , gre_lcl :: Bool          -- ^ True <=> the thing was defined locally
         , gre_imp :: [ImportSpec]  -- ^ In scope through these imports
-    }    -- INVARIANT: either gre_lcl = True or gre_imp is non-empty
+    } deriving Data
+         -- INVARIANT: either gre_lcl = True or gre_imp is non-empty
          -- See Note [GlobalRdrElt provenance]
 
 -- | The children of a Name are the things that are abbreviated by the ".."
@@ -433,14 +464,14 @@ data Parent = NoParent
             | FldParent { par_is :: Name, par_lbl :: Maybe FieldLabelString }
               -- ^ See Note [Parents for record fields]
             | PatternSynonym
-            deriving (Eq)
+            deriving (Eq, Data)
 
 instance Outputable Parent where
    ppr NoParent        = empty
-   ppr (ParentIs n)    = ptext (sLit "parent:") <> ppr n
-   ppr (FldParent n f) = ptext (sLit "fldparent:")
+   ppr (ParentIs n)    = text "parent:" <> ppr n
+   ppr (FldParent n f) = text "fldparent:"
                              <> ppr n <> colon <> ppr f
-   ppr (PatternSynonym) = ptext (sLit "pattern synonym")
+   ppr (PatternSynonym) = text "pattern synonym"
 
 plusParent :: Parent -> Parent -> Parent
 -- See Note [Combining parents]
@@ -595,7 +626,8 @@ gresFromAvail prov_fn avail
           Just is -> GRE { gre_name = n, gre_par = mkParent n avail
                          , gre_lcl = False, gre_imp = [is] }
 
-    mk_fld_gre (FieldLabel lbl is_overloaded n)
+    mk_fld_gre (FieldLabel { flLabel = lbl, flIsOverloaded = is_overloaded
+                           , flSelector = n })
       = case prov_fn n of  -- Nothing => bound locally
                            -- Just is => imported from 'is'
           Nothing -> GRE { gre_name = n, gre_par = FldParent (availName avail) mb_lbl
@@ -629,10 +661,10 @@ greUsedRdrName gre@GRE{ gre_name = name, gre_lcl = lcl, gre_imp = iss }
     occ = greOccName gre
 
 greRdrNames :: GlobalRdrElt -> [RdrName]
-greRdrNames GRE{ gre_name = name, gre_lcl = lcl, gre_imp = iss }
+greRdrNames gre@GRE{ gre_lcl = lcl, gre_imp = iss }
   = (if lcl then [unqual] else []) ++ concatMap do_spec (map is_decl iss)
   where
-    occ    = nameOccName name
+    occ    = greOccName gre
     unqual = Unqual occ
     do_spec decl_spec
         | is_qual decl_spec = [qual]
@@ -659,12 +691,19 @@ mkParent n (AvailTC m _ _) | n == m    = NoParent
 availFromGRE :: GlobalRdrElt -> AvailInfo
 availFromGRE (GRE { gre_name = me, gre_par = parent })
   = case parent of
+      PatternSynonym              -> patSynAvail me
       ParentIs p                  -> AvailTC p [me] []
       NoParent   | isTyConName me -> AvailTC me [me] []
                  | otherwise      -> avail   me
-      FldParent p Nothing         -> AvailTC p [] [FieldLabel (occNameFS $ nameOccName me) False me]
-      FldParent p (Just lbl)      -> AvailTC p [] [FieldLabel lbl True me]
-      PatternSynonym              -> patSynAvail me
+      FldParent p mb_lbl -> AvailTC p [] [fld]
+        where
+         fld = case mb_lbl of
+                 Nothing  -> FieldLabel { flLabel = occNameFS (nameOccName me)
+                                        , flIsOverloaded = False
+                                        , flSelector = me }
+                 Just lbl -> FieldLabel { flLabel = lbl
+                                        , flIsOverloaded = True
+                                        , flSelector = me }
 
 emptyGlobalRdrEnv :: GlobalRdrEnv
 emptyGlobalRdrEnv = emptyOccEnv
@@ -678,7 +717,7 @@ instance Outputable GlobalRdrElt where
 
 pprGlobalRdrEnv :: Bool -> GlobalRdrEnv -> SDoc
 pprGlobalRdrEnv locals_only env
-  = vcat [ ptext (sLit "GlobalRdrEnv") <+> ppWhen locals_only (ptext (sLit "(locals only)"))
+  = vcat [ text "GlobalRdrEnv" <+> ppWhen locals_only (ptext (sLit "(locals only)"))
              <+> lbrace
          , nest 2 (vcat [ pp (remove_locals gre_list) | gre_list <- occEnvElts env ]
              <+> rbrace) ]
@@ -687,7 +726,7 @@ pprGlobalRdrEnv locals_only env
                        | otherwise   = gres
     pp []   = empty
     pp gres = hang (ppr occ
-                     <+> parens (ptext (sLit "unique") <+> ppr (getUnique occ))
+                     <+> parens (text "unique" <+> ppr (getUnique occ))
                      <> colon)
                  2 (vcat (map ppr gres))
       where
@@ -708,10 +747,14 @@ lookupGRE_RdrName rdr_name env
     Nothing   -> []
     Just gres -> pickGREs rdr_name gres
 
-lookupGRE_Name :: GlobalRdrEnv -> Name -> [GlobalRdrElt]
+lookupGRE_Name :: GlobalRdrEnv -> Name -> Maybe GlobalRdrElt
 lookupGRE_Name env name
-  = [ gre | gre <- lookupGlobalRdrEnv env (nameOccName name),
-            gre_name gre == name ]
+  = case [ gre | gre <- lookupGlobalRdrEnv env (nameOccName name)
+               , gre_name gre == name ] of
+      []    -> Nothing
+      [gre] -> Just gre
+      gres  -> pprPanic "lookupGRE_Name" (ppr name $$ ppr gres)
+               -- See INVARIANT 1 on GlobalRdrEnv
 
 lookupGRE_Field_Name :: GlobalRdrEnv -> Name -> FastString -> [GlobalRdrElt]
 -- Used when looking up record fields, where the selector name and
@@ -725,8 +768,10 @@ getGRE_NameQualifier_maybes :: GlobalRdrEnv -> Name -> [Maybe [ModuleName]]
 -- Returns all the qualifiers by which 'x' is in scope
 -- Nothing means "the unqualified version is in scope"
 -- [] means the thing is not in scope at all
-getGRE_NameQualifier_maybes env
-  = map (qualifier_maybe) . lookupGRE_Name env
+getGRE_NameQualifier_maybes env name
+  = case lookupGRE_Name env name of
+      Just gre -> [qualifier_maybe gre]
+      Nothing  -> []
   where
     qualifier_maybe (GRE { gre_lcl = lcl, gre_imp = iss })
       | lcl       = Nothing
@@ -990,13 +1035,17 @@ shadowName env name
 ************************************************************************
 -}
 
--- | The 'ImportSpec' of something says how it came to be imported
+-- | Import Specification
+--
+-- The 'ImportSpec' of something says how it came to be imported
 -- It's quite elaborate so that we can give accurate unused-name warnings.
 data ImportSpec = ImpSpec { is_decl :: ImpDeclSpec,
                             is_item :: ImpItemSpec }
-                deriving( Eq, Ord )
+                deriving( Eq, Ord, Data )
 
--- | Describes a particular import declaration and is
+-- | Import Declaration Specification
+--
+-- Describes a particular import declaration and is
 -- shared among all the 'Provenance's for that decl
 data ImpDeclSpec
   = ImpDeclSpec {
@@ -1009,9 +1058,11 @@ data ImpDeclSpec
         is_as       :: ModuleName, -- ^ Import alias, e.g. from @as M@ (or @Muggle@ if there is no @as@ clause)
         is_qual     :: Bool,       -- ^ Was this import qualified?
         is_dloc     :: SrcSpan     -- ^ The location of the entire import declaration
-    }
+    } deriving Data
 
--- | Describes import info a particular Name
+-- | Import Item Specification
+--
+-- Describes import info a particular Name
 data ImpItemSpec
   = ImpAll              -- ^ The import had no import list,
                         -- or had a hiding list
@@ -1028,6 +1079,7 @@ data ImpItemSpec
         --
         -- Here the constructors of @T@ are not named explicitly;
         -- only @T@ is named explicitly.
+  deriving Data
 
 instance Eq ImpDeclSpec where
   p1 == p2 = case p1 `compare` p2 of EQ -> True; _ -> False
@@ -1094,7 +1146,7 @@ pprNameProvenance (GRE { gre_name = name, gre_lcl = lcl, gre_imp = iss })
   | otherwise          = head pp_provs
   where
     pp_provs = pp_lcl ++ map pp_is iss
-    pp_lcl = if lcl then [ptext (sLit "defined at") <+> ppr (nameSrcLoc name)]
+    pp_lcl = if lcl then [text "defined at" <+> ppr (nameSrcLoc name)]
                     else []
     pp_is is = sep [ppr is, ppr_defn_site is name]
 
@@ -1105,25 +1157,25 @@ ppr_defn_site imp_spec name
   | same_module && not (isGoodSrcSpan loc)
   = empty              -- Nothing interesting to say
   | otherwise
-  = parens $ hang (ptext (sLit "and originally defined") <+> pp_mod)
+  = parens $ hang (text "and originally defined" <+> pp_mod)
                 2 (pprLoc loc)
   where
     loc = nameSrcSpan name
-    defining_mod = nameModule name
+    defining_mod = ASSERT2( isExternalName name, ppr name ) nameModule name
     same_module = importSpecModule imp_spec == moduleName defining_mod
     pp_mod | same_module = empty
-           | otherwise   = ptext (sLit "in") <+> quotes (ppr defining_mod)
+           | otherwise   = text "in" <+> quotes (ppr defining_mod)
 
 
 instance Outputable ImportSpec where
    ppr imp_spec
-     = ptext (sLit "imported") <+> qual
-        <+> ptext (sLit "from") <+> quotes (ppr (importSpecModule imp_spec))
+     = text "imported" <+> qual
+        <+> text "from" <+> quotes (ppr (importSpecModule imp_spec))
         <+> pprLoc (importSpecLoc imp_spec)
      where
-       qual | is_qual (is_decl imp_spec) = ptext (sLit "qualified")
+       qual | is_qual (is_decl imp_spec) = text "qualified"
             | otherwise                  = empty
 
 pprLoc :: SrcSpan -> SDoc
-pprLoc (RealSrcSpan s)    = ptext (sLit "at") <+> ppr s
+pprLoc (RealSrcSpan s)    = text "at" <+> ppr s
 pprLoc (UnhelpfulSpan {}) = empty

@@ -21,7 +21,7 @@ import OccurAnal        ( occurAnalysePgm, occurAnalyseExpr )
 import IdInfo
 import CoreStats        ( coreBindsSize, coreBindsStats, exprSize )
 import CoreUtils        ( mkTicks, stripTicksTop )
-import CoreLint         ( showPass, endPass, lintPassResult, dumpPassResult,
+import CoreLint         ( endPass, lintPassResult, dumpPassResult,
                           lintAnnots )
 import Simplify         ( simplTopBinds, simplExpr, simplRules )
 import SimplUtils       ( simplEnvForGHCi, activeRule )
@@ -33,6 +33,7 @@ import FloatIn          ( floatInwards )
 import FloatOut         ( floatOutwards )
 import FamInstEnv
 import Id
+import ErrUtils         ( withTiming )
 import BasicTypes       ( CompilerPhase(..), isDefaultInlinePragma )
 import VarSet
 import VarEnv
@@ -44,19 +45,22 @@ import DmdAnal          ( dmdAnalProgram )
 import CallArity        ( callArityAnalProgram )
 import WorkWrap         ( wwTopBinds )
 import Vectorise        ( vectorise )
-import FastString
 import SrcLoc
 import Util
 import Module
 
 import Maybes
 import UniqSupply       ( UniqSupply, mkSplitUniqSupply, splitUniqSupply )
+import UniqFM
 import Outputable
 import Control.Monad
+import qualified GHC.LanguageExtensions as LangExt
 
 #ifdef GHCI
 import DynamicLoading   ( loadPlugins )
 import Plugins          ( installCoreToDos )
+#else
+import DynamicLoading   ( pluginError )
 #endif
 
 {-
@@ -128,6 +132,7 @@ getCoreToDo dflags
     rules_on      = gopt Opt_EnableRewriteRules           dflags
     eta_expand_on = gopt Opt_DoLambdaEtaExpansion         dflags
     ww_on         = gopt Opt_WorkerWrapper                dflags
+    static_ptrs   = xopt LangExt.StaticPointers           dflags
 
     maybe_rule_check phase = runMaybe rule_check (CoreDoRuleCheck phase)
 
@@ -201,8 +206,15 @@ getCoreToDo dflags
 
     core_todo =
      if opt_level == 0 then
-       [ vectorisation
-       , CoreDoSimplify max_iter
+       [ vectorisation,
+         -- Static forms are moved to the top level with the FloatOut pass.
+         -- See Note [Grand plan for static forms].
+         runWhen static_ptrs $ CoreDoFloatOutwards FloatOutSwitches {
+                                 floatOutLambdas   = Just 0,
+                                 floatOutConstants = True,
+                                 floatOutOverSatApps = False,
+                                 floatToTopLevelOnly = True },
+         CoreDoSimplify max_iter
              (base_mode { sm_phase = Phase 0
                         , sm_names = ["Non-opt simplification"] })
        ]
@@ -230,7 +242,8 @@ getCoreToDo dflags
            CoreDoFloatOutwards FloatOutSwitches {
                                  floatOutLambdas   = Just 0,
                                  floatOutConstants = True,
-                                 floatOutOverSatApps = False },
+                                 floatOutOverSatApps = False,
+                                 floatToTopLevelOnly = False },
                 -- Was: gentleFloatOutSwitches
                 --
                 -- I have no idea why, but not floating constants to
@@ -281,7 +294,8 @@ getCoreToDo dflags
            CoreDoFloatOutwards FloatOutSwitches {
                                  floatOutLambdas     = floatLamArgs dflags,
                                  floatOutConstants   = True,
-                                 floatOutOverSatApps = True },
+                                 floatOutOverSatApps = True,
+                                 floatToTopLevelOnly = False },
                 -- nofib/spectral/hartel/wang doubles in speed if you
                 -- do full laziness late in the day.  It only happens
                 -- after fusion and other stuff, so the early pass doesn't
@@ -319,6 +333,11 @@ getCoreToDo dflags
             [simpl_phase 0 ["post-late-ww"] max_iter]
           ),
 
+        -- Final run of the demand_analyser, ensures that one-shot thunks are
+        -- really really one-shot thunks. Only needed if the demand analyser
+        -- has run at all. See Note [Final Demand Analyser run] in DmdAnal
+        runWhen (strictness || late_dmd_anal) CoreDoStrictness,
+
         maybe_rule_check (Phase 0)
      ]
 
@@ -333,7 +352,11 @@ getCoreToDo dflags
 
 addPluginPasses :: [CoreToDo] -> CoreM [CoreToDo]
 #ifndef GHCI
-addPluginPasses builtin_passes = return builtin_passes
+addPluginPasses builtin_passes
+  = do { dflags <- getDynFlags
+       ; let pluginMods = pluginModNames dflags
+       ; unless (null pluginMods) (pluginError pluginMods)
+       ; return builtin_passes }
 #else
 addPluginPasses builtin_passes
   = do { hsc_env <- getHscEnv
@@ -358,10 +381,14 @@ runCorePasses passes guts
     do_pass guts CoreDoNothing = return guts
     do_pass guts (CoreDoPasses ps) = runCorePasses ps guts
     do_pass guts pass
-       = do { showPass pass
-            ; guts' <- lintAnnots (ppr pass) (doCorePass pass) guts
+       = withTiming getDynFlags
+                    (ppr pass <+> brackets (ppr mod))
+                    (const ()) $ do
+            { guts' <- lintAnnots (ppr pass) (doCorePass pass) guts
             ; endPass pass (mg_binds guts') (mg_rules guts')
             ; return guts' }
+
+    mod = mg_module guts
 
 doCorePass :: CoreToDo -> ModGuts -> CoreM ModGuts
 doCorePass pass@(CoreDoSimplify {})  = {-# SCC "Simplify" #-}
@@ -424,16 +451,18 @@ printCore dflags binds
     = Err.dumpIfSet dflags True "Print Core" (pprCoreBindings binds)
 
 ruleCheckPass :: CompilerPhase -> String -> ModGuts -> CoreM ModGuts
-ruleCheckPass current_phase pat guts = do
-    rb <- getRuleBase
-    dflags <- getDynFlags
-    vis_orphs <- getVisibleOrphanMods
-    liftIO $ Err.showPass dflags "RuleCheck"
-    liftIO $ log_action dflags dflags Err.SevDump noSrcSpan defaultDumpStyle
-                 (ruleCheckProgram current_phase pat
-                    (RuleEnv rb vis_orphs) (mg_binds guts))
-    return guts
-
+ruleCheckPass current_phase pat guts =
+    withTiming getDynFlags
+               (text "RuleCheck"<+>brackets (ppr $ mg_module guts))
+               (const ()) $ do
+    { rb <- getRuleBase
+    ; dflags <- getDynFlags
+    ; vis_orphs <- getVisibleOrphanMods
+    ; liftIO $ log_action dflags dflags NoReason Err.SevDump noSrcSpan
+                   defaultDumpStyle
+                   (ruleCheckProgram current_phase pat
+                      (RuleEnv rb vis_orphs) (mg_binds guts))
+    ; return guts }
 
 doPassDUM :: (DynFlags -> UniqSupply -> CoreProgram -> IO CoreProgram) -> ModGuts -> CoreM ModGuts
 doPassDUM do_pass = doPassM $ \binds -> do
@@ -501,9 +530,8 @@ simplifyExpr :: DynFlags -- includes spec of what core-to-core passes to do
 --
 -- Also used by Template Haskell
 simplifyExpr dflags expr
-  = do  {
-        ; Err.showPass dflags "Simplify"
-
+  = withTiming (pure dflags) (text "Simplify [expr]") (const ()) $
+    do  {
         ; us <-  mkSplitUniqSupply 's'
 
         ; let sz = exprSize expr
@@ -604,11 +632,11 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
         -- about to begin, with '1' for the first
       | iteration_no > max_iterations   -- Stop if we've run out of iterations
       = WARN( debugIsOn && (max_iterations > 2)
-            , hang (ptext (sLit "Simplifier bailing out after") <+> int max_iterations
-                    <+> ptext (sLit "iterations")
+            , hang (text "Simplifier bailing out after" <+> int max_iterations
+                    <+> text "iterations"
                     <+> (brackets $ hsep $ punctuate comma $
                          map (int . simplCountN) (reverse counts_so_far)))
-                 2 (ptext (sLit "Size =") <+> ppr (coreBindsStats binds)))
+                 2 (text "Size =" <+> ppr (coreBindsStats binds)))
 
                 -- Subtract 1 from iteration_no to get the
                 -- number of iterations we actually completed
@@ -631,10 +659,10 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
                    -- (In contrast to automatically vectorised variables, their unvectorised versions
                    -- don't depend on them.)
                  vectVars = mkVarSet $
-                              catMaybes [ fmap snd $ lookupVarEnv (vectInfoVar (mg_vect_info guts)) bndr
+                              catMaybes [ fmap snd $ lookupDVarEnv (vectInfoVar (mg_vect_info guts)) bndr
                                         | Vect bndr _ <- mg_vect_decls guts]
                               ++
-                              catMaybes [ fmap snd $ lookupVarEnv (vectInfoVar (mg_vect_info guts)) bndr
+                              catMaybes [ fmap snd $ lookupDVarEnv (vectInfoVar (mg_vect_info guts)) bndr
                                         | bndr <- bindersOfBinds binds]
                                         -- FIXME: This second comprehensions is only needed as long as we
                                         --        have vectorised bindings where we get "Could NOT call
@@ -720,10 +748,10 @@ dump_end_iteration dflags print_unqual iteration_no counts binds rules
             | otherwise                               = Nothing
             -- Show details if Opt_D_dump_simpl_iterations is on
 
-    hdr = ptext (sLit "Simplifier iteration=") <> int iteration_no
-    pp_counts = vcat [ ptext (sLit "---- Simplifier counts for") <+> hdr
+    hdr = text "Simplifier iteration=" <> int iteration_no
+    pp_counts = vcat [ text "---- Simplifier counts for" <+> hdr
                      , pprSimplCount counts
-                     , ptext (sLit "---- End of simplifier counts for") <+> hdr ]
+                     , text "---- End of simplifier counts for" <+> hdr ]
 
 {-
 ************************************************************************
@@ -880,7 +908,10 @@ shortOutIndirections binds
   where
     ind_env            = makeIndEnv binds
     -- These exported Ids are the subjects  of the indirection-elimination
-    exp_ids            = map fst $ varEnvElts ind_env
+    exp_ids            = map fst $ nonDetEltsUFM ind_env
+      -- It's OK to use nonDetEltsUFM here because we forget the ordering
+      -- by immediately converting to a set or check if all the elements
+      -- satisfy a predicate.
     exp_id_set         = mkVarSet exp_ids
     no_need_to_flatten = all (null . ruleInfoRules . idSpecialisation) exp_ids
     binds'             = concatMap zap binds
@@ -929,7 +960,7 @@ shortMeOut ind_env exported_id local_id
     then
         if hasShortableIdInfo exported_id
         then True       -- See Note [Messing up the exported Id's IdInfo]
-        else WARN( True, ptext (sLit "Not shorting out:") <+> ppr exported_id )
+        else WARN( True, text "Not shorting out:" <+> ppr exported_id )
              False
     else
         False
@@ -967,3 +998,57 @@ transferIdInfo exported_id local_id
                                (ruleInfo local_info)
         -- Remember to set the function-name field of the
         -- rules as we transfer them from one function to another
+
+
+{- Note [Grand plan for static forms]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Static forms go through the compilation phases as follows.
+Here is a running example:
+
+   f x = let k = map toUpper
+         in ...(static k)...
+
+* The renamer looks for out-of-scope names in the body of the static
+  form, as always If all names are in scope, the free variables of the
+  body are stored in AST at the location of the static form.
+
+* The typechecker verifies that all free variables occurring in the
+  static form are closed (see Note [Bindings with closed types] in
+  TcRnTypes).  In our example, 'k' is closed, even though it is bound
+  in a nested let, we are fine.
+
+* The desugarer replaces the static form with an application of the
+  data constructor 'StaticPtr' (defined in module GHC.StaticPtr of
+  base).  So we get
+
+   f x = let k = map toUpper
+         in ...(StaticPtr <fingerprint> k)...
+
+* The simplifier runs the FloatOut pass which moves the applications
+  of 'StaticPtr' to the top level. Thus the FloatOut pass is always
+  executed, even when optimizations are disabled.  So we get
+
+   k = map toUpper
+   static_ptr = StaticPtr <fingerprint> k
+   f x = ...static_ptr...
+
+  The FloatOut pass is careful to produce an /exported/ Id for a floated
+  'StaticPtr', so the binding is not removed by the simplifier (see #12207).
+  E.g. the code for `f` above might look like
+
+    static_ptr = StaticPtr <fingerprint> k
+    f x = ...(staticKey static_ptr)...
+
+  which might correctly be simplified to
+
+    f x = ...<fingerprint>...
+
+  BUT the top-level binding for static_ptr must remain, so that it can be
+  collected to populate the Static Pointer Table.
+
+* The CoreTidy pass produces a C function which inserts all the
+  floated 'StaticPtr' in the static pointer table (see the call to
+  StaticPtrTable.sptModuleInitCode in TidyPgm). CoreTidy pass also
+  exports the Ids of floated 'StaticPtr's so they can be linked with
+  the C function.
+-}

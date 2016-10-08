@@ -1,4 +1,4 @@
-{-# LANGUAGE LambdaCase, CPP #-}
+{-# LANGUAGE LambdaCase #-}
 
 module TcTypeNats
   ( typeNatTyCons
@@ -24,7 +24,7 @@ import TcRnTypes  ( Xi )
 import CoAxiom    ( CoAxiomRule(..), BuiltInSynFamily(..), Eqn )
 import Name       ( Name, BuiltInSyntax(..) )
 import TysWiredIn
-import TysPrim    ( mkTemplateTyVars )
+import TysPrim    ( mkTemplateAnonTyConBinders )
 import PrelNames  ( gHC_TYPELITS
                   , typeNatAddTyFamNameKey
                   , typeNatMulTyFamNameKey
@@ -37,10 +37,6 @@ import PrelNames  ( gHC_TYPELITS
 import FastString ( FastString, fsLit )
 import qualified Data.Map as Map
 import Data.Maybe ( isJust )
-
-#if __GLASGOW_HASKELL__ < 709
-import Data.Traversable ( traverse )
-#endif
 
 {-------------------------------------------------------------------------------
 Built-in type constructors for functions on type-level nats
@@ -104,8 +100,8 @@ typeNatExpTyCon = mkTypeNatFunTyCon2 name
 typeNatLeqTyCon :: TyCon
 typeNatLeqTyCon =
   mkFamilyTyCon name
-    (mkFunTys [ typeNatKind, typeNatKind ] boolTy)
-    (mkTemplateTyVars [ typeNatKind, typeNatKind ])
+    (mkTemplateAnonTyConBinders [ typeNatKind, typeNatKind ])
+    boolTy
     Nothing
     (BuiltInSynFamTyCon ops)
     Nothing
@@ -123,8 +119,8 @@ typeNatLeqTyCon =
 typeNatCmpTyCon :: TyCon
 typeNatCmpTyCon =
   mkFamilyTyCon name
-    (mkFunTys [ typeNatKind, typeNatKind ] orderingKind)
-    (mkTemplateTyVars [ typeNatKind, typeNatKind ])
+    (mkTemplateAnonTyConBinders [ typeNatKind, typeNatKind ])
+    orderingKind
     Nothing
     (BuiltInSynFamTyCon ops)
     Nothing
@@ -142,8 +138,8 @@ typeNatCmpTyCon =
 typeSymbolCmpTyCon :: TyCon
 typeSymbolCmpTyCon =
   mkFamilyTyCon name
-    (mkFunTys [ typeSymbolKind, typeSymbolKind ] orderingKind)
-    (mkTemplateTyVars [ typeSymbolKind, typeSymbolKind ])
+    (mkTemplateAnonTyConBinders [ typeSymbolKind, typeSymbolKind ])
+    orderingKind
     Nothing
     (BuiltInSynFamTyCon ops)
     Nothing
@@ -166,8 +162,8 @@ typeSymbolCmpTyCon =
 mkTypeNatFunTyCon2 :: Name -> BuiltInSynFamily -> TyCon
 mkTypeNatFunTyCon2 op tcb =
   mkFamilyTyCon op
-    (mkFunTys [ typeNatKind, typeNatKind ] typeNatKind)
-    (mkTemplateTyVars [ typeNatKind, typeNatKind ])
+    (mkTemplateAnonTyConBinders [ typeNatKind, typeNatKind ])
+    typeNatKind
     Nothing
     (BuiltInSynFamTyCon tcb)
     Nothing

@@ -26,6 +26,7 @@ import IfaceEnv( newInteractiveBinder )
 import Name
 import Var hiding ( varName )
 import VarSet
+import UniqFM
 import Type
 import Kind
 import GHC
@@ -99,7 +100,9 @@ pprintClosureCommand bindThings force str = do
          my_tvs       = termTyCoVars t
          tvs          = env_tvs `minusVarSet` my_tvs
          tyvarOccName = nameOccName . tyVarName
-         tidyEnv      = (initTidyOccEnv (map tyvarOccName (varSetElems tvs))
+         tidyEnv      = (initTidyOccEnv (map tyvarOccName (nonDetEltsUFM tvs))
+           -- It's OK to use nonDetEltsUFM here because initTidyOccEnv
+           -- forgets the ordering immediately by creating an env
                         , env_tvs `intersectVarSet` my_tvs)
      return$ mapTermType (snd . tidyOpenType tidyEnv) t
 
@@ -119,9 +122,9 @@ bindSuspensions t = do
       let ids = [ mkVanillaGlobal name ty
                 | (name,ty) <- zip names tys]
           new_ic = extendInteractiveContextWithIds ictxt ids
-      fhvs <- liftIO $ mapM (mkFinalizedHValue hsc_env <=< mkHValueRef) hvals
+      fhvs <- liftIO $ mapM (mkFinalizedHValue hsc_env <=< mkRemoteRef) hvals
       liftIO $ extendLinkEnv (zip names fhvs)
-      modifySession $ \_ -> hsc_env {hsc_IC = new_ic }
+      setSession hsc_env {hsc_IC = new_ic }
       return t'
      where
 
@@ -170,10 +173,10 @@ showTerm term = do
                       -- XXX: this tries to disable logging of errors
                       -- does this still do what it is intended to do
                       -- with the changed error handling and logging?
-           let noop_log _ _ _ _ _ = return ()
+           let noop_log _ _ _ _ _ _ = return ()
                expr = "show " ++ showPpr dflags bname
            _ <- GHC.setSessionDynFlags dflags{log_action=noop_log}
-           fhv <- liftIO $ mkFinalizedHValue hsc_env =<< mkHValueRef val
+           fhv <- liftIO $ mkFinalizedHValue hsc_env =<< mkRemoteRef val
            txt_ <- withExtendedLinkEnv [(bname, fhv)]
                                        (GHC.compileExpr expr)
            let myprec = 10 -- application precedence. TODO Infix constructors

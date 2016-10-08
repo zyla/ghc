@@ -49,7 +49,6 @@ import Id
 import MkId(proxyHashId)
 import Class
 import Name
-import IdInfo   ( IdDetails(..) )
 import VarSet
 import Rules
 import VarEnv
@@ -125,7 +124,9 @@ dsHsBind dflags
 dsHsBind dflags
          (FunBind { fun_id = L _ fun, fun_matches = matches
                   , fun_co_fn = co_fn, fun_tick = tick })
- = do   { (args, body) <- matchWrapper (FunRhs (idName fun)) Nothing matches
+ = do   { (args, body) <- matchWrapper
+                           (FunRhs (noLoc $ idName fun) Prefix)
+                           Nothing matches
         ; let body' = mkOptTickBox tick body
         ; rhs <- dsHsWrapper co_fn (mkLams args body')
         ; let core_binds@(id,_) = makeCorePair dflags fun False 0 rhs
@@ -142,54 +143,74 @@ dsHsBind dflags
                   , pat_ticks = (rhs_tick, var_ticks) })
   = do  { body_expr <- dsGuarded grhss ty
         ; let body' = mkOptTickBox rhs_tick body_expr
-              (is_strict,pat') = getUnBangedLPat dflags pat
-        ; (force_var,sel_binds) <-
-            mkSelectorBinds is_strict var_ticks pat' body'
+              pat'  = decideBangHood dflags pat
+        ; (force_var,sel_binds) <- mkSelectorBinds var_ticks pat body'
           -- We silently ignore inline pragmas; no makeCorePair
           -- Not so cool, but really doesn't matter
-        ; let force_var' = if is_strict
-                           then maybe [] (\v -> [v]) force_var
+        ; let force_var' = if isBangedLPat pat'
+                           then [force_var]
                            else []
         ; return (force_var', sel_binds) }
 
         -- A common case: one exported variable, only non-strict binds
         -- Non-recursive bindings come through this way
-        -- So do self-recursive bindings, and recursive bindings
-        -- that have been chopped up with type signatures
+        -- So do self-recursive bindings
+        -- Bindings with complete signatures are AbsBindsSigs, below
 dsHsBind dflags
          (AbsBinds { abs_tvs = tyvars, abs_ev_vars = dicts
                    , abs_exports = [export]
                    , abs_ev_binds = ev_binds, abs_binds = binds })
   | ABE { abe_wrap = wrap, abe_poly = global
         , abe_mono = local, abe_prags = prags } <- export
-  , not (xopt LangExt.Strict dflags)             -- handle strict binds
-  , not (anyBag (isBangedPatBind . unLoc) binds) -- in the next case
-  = -- push type constraints deeper for pattern match check
+  , not (xopt LangExt.Strict dflags)             -- Handle strict binds
+  , not (anyBag (isBangedPatBind . unLoc) binds) --        in the next case
+  = -- See Note [AbsBinds wrappers] in HsBinds
     addDictsDs (toTcTypeBag (listToBag dicts)) $
-     do { (_, bind_prs) <- ds_lhs_binds binds
-        ; let core_bind = Rec bind_prs
-        ; ds_binds <- dsTcEvBinds_s ev_binds
-        ; rhs <- dsHsWrapper wrap $  -- Usually the identity
-                 mkLams tyvars $ mkLams dicts $
-                 mkCoreLets ds_binds $
-                 Let core_bind $
-                 Var local
+         -- addDictsDs: push type constraints deeper for pattern match check
+    do { (_, bind_prs) <- ds_lhs_binds binds
+       ; let core_bind = Rec bind_prs
+       ; ds_binds <- dsTcEvBinds_s ev_binds
+       ; rhs <- dsHsWrapper wrap $  -- Usually the identity
+                mkLams tyvars $ mkLams dicts $
+                mkCoreLets ds_binds $
+                Let core_bind $
+                Var local
 
-        ; (spec_binds, rules) <- dsSpecs rhs prags
+       ; (spec_binds, rules) <- dsSpecs rhs prags
 
-        ; let   global'  = addIdSpecialisations global rules
-                main_bind = makeCorePair dflags global' (isDefaultMethod prags)
-                                         (dictArity dicts) rhs
+       ; let   global'  = addIdSpecialisations global rules
+               main_bind = makeCorePair dflags global' (isDefaultMethod prags)
+                                        (dictArity dicts) rhs
 
-        ; return ([], main_bind : fromOL spec_binds) }
+       ; return ([], main_bind : fromOL spec_binds) }
+
+        -- Another common case: no tyvars, no dicts
+        -- In this case we can have a much simpler desugaring
+dsHsBind dflags
+         (AbsBinds { abs_tvs = [], abs_ev_vars = []
+                   , abs_exports = exports
+                   , abs_ev_binds = ev_binds, abs_binds = binds })
+  = do { (force_vars, bind_prs) <- ds_lhs_binds binds
+       ; let mk_bind (ABE { abe_wrap = wrap
+                          , abe_poly = global
+                          , abe_mono = local
+                          , abe_prags = prags })
+              = do { rhs <- dsHsWrapper wrap (Var local)
+                   ; return (makeCorePair dflags global
+                                          (isDefaultMethod prags)
+                                          0 rhs) }
+       ; main_binds <- mapM mk_bind exports
+
+       ; ds_binds <- dsTcEvBinds_s ev_binds
+       ; return (force_vars, flattenBinds ds_binds ++ bind_prs ++ main_binds) }
 
 dsHsBind dflags
          (AbsBinds { abs_tvs = tyvars, abs_ev_vars = dicts
                    , abs_exports = exports, abs_ev_binds = ev_binds
                    , abs_binds = binds })
          -- See Note [Desugaring AbsBinds]
-  = -- push type constraints deeper for pattern match check
-    addDictsDs (toTcTypeBag (listToBag dicts)) $
+  = addDictsDs (toTcTypeBag (listToBag dicts)) $
+         -- addDictsDs: push type constraints deeper for pattern match check
      do { (local_force_vars, bind_prs) <- ds_lhs_binds binds
         ; let core_bind = Rec [ makeCorePair dflags (add_inline lcl_id) False 0 rhs
                               | (lcl_id, rhs) <- bind_prs ]
@@ -212,13 +233,15 @@ dsHsBind dflags
         -- Note [Desugar Strict binds]
         ; (exported_force_vars, extra_exports) <- get_exports local_force_vars
 
-        ; let mk_bind (ABE { abe_wrap = wrap, abe_poly = global
+        ; let mk_bind (ABE { abe_wrap = wrap
+                           , abe_poly = global
                            , abe_mono = local, abe_prags = spec_prags })
+                         -- See Note [AbsBinds wrappers] in HsBinds
                 = do { tup_id  <- newSysLocalDs tup_ty
                      ; rhs <- dsHsWrapper wrap $
-                                 mkLams tyvars $ mkLams dicts $
-                                 mkTupleSelector all_locals local tup_id $
-                                 mkVarApps (Var poly_tup_id) (tyvars ++ dicts)
+                              mkLams tyvars $ mkLams dicts $
+                              mkTupleSelector all_locals local tup_id $
+                              mkVarApps (Var poly_tup_id) (tyvars ++ dicts)
                      ; let rhs_for_spec = Let (NonRec poly_tup_id poly_tup_rhs) rhs
                      ; (spec_binds, rules) <- dsSpecs rhs_for_spec spec_prags
                      ; let global' = (global `setInlinePragma` defaultInlinePragma)
@@ -279,17 +302,63 @@ dsHsBind dflags
                      ,abe_wrap = WpHole
                      ,abe_prags = SpecPrags []})
 
+-- AbsBindsSig is a combination of AbsBinds and FunBind
+dsHsBind dflags (AbsBindsSig { abs_tvs = tyvars, abs_ev_vars = dicts
+                             , abs_sig_export  = global
+                             , abs_sig_prags   = prags
+                             , abs_sig_ev_bind = ev_bind
+                             , abs_sig_bind    = bind })
+  | L bind_loc FunBind { fun_matches = matches
+                       , fun_co_fn   = co_fn
+                       , fun_tick    = tick } <- bind
+  = putSrcSpanDs bind_loc $
+    addDictsDs (toTcTypeBag (listToBag dicts)) $
+             -- addDictsDs: push type constraints deeper for pattern match check
+    do { (args, body) <- matchWrapper
+                           (FunRhs (noLoc $ idName global) Prefix)
+                           Nothing matches
+       ; let body' = mkOptTickBox tick body
+       ; fun_rhs <- dsHsWrapper co_fn $
+                    mkLams args body'
+       ; let force_vars
+               | xopt LangExt.Strict dflags
+               , matchGroupArity matches == 0 -- no need to force lambdas
+               = [global]
+               | otherwise
+               = []
+
+       ; ds_binds <- dsTcEvBinds ev_bind
+       ; let rhs = mkLams tyvars $
+                   mkLams dicts $
+                   mkCoreLets ds_binds $
+                   fun_rhs
+
+       ; (spec_binds, rules) <- dsSpecs rhs prags
+       ; let global' = addIdSpecialisations global rules
+             main_bind = makeCorePair dflags global' (isDefaultMethod prags)
+                                      (dictArity dicts) rhs
+
+       ; return (force_vars, main_bind : fromOL spec_binds) }
+
+  | otherwise
+  = pprPanic "dsHsBind: AbsBindsSig" (ppr bind)
+
 dsHsBind _ (PatSynBind{}) = panic "dsHsBind: PatSynBind"
 
 
+
+-- | This is where we apply INLINE and INLINABLE pragmas. All we need to
+-- do is to attach the unfolding information to the Id.
+--
+-- Other decisions about whether to inline are made in
+-- `calcUnfoldingGuidance` but the decision about whether to then expose
+-- the unfolding in the interface file is made in `TidyPgm.addExternal`
+-- using this information.
 ------------------------
 makeCorePair :: DynFlags -> Id -> Bool -> Arity -> CoreExpr -> (Id, CoreExpr)
 makeCorePair dflags gbl_id is_default_method dict_arity rhs
   | is_default_method                 -- Default methods are *always* inlined
   = (gbl_id `setIdUnfolding` mkCompulsoryUnfolding rhs, rhs)
-
-  | DFunId is_newtype <- idDetails gbl_id
-  = (mk_dfun_w_stuff is_newtype, rhs)
 
   | otherwise
   = case inlinePragmaSpec inline_prag of
@@ -313,23 +382,6 @@ makeCorePair dflags gbl_id is_default_method dict_arity rhs
        | otherwise
        = pprTrace "makeCorePair: arity missing" (ppr gbl_id) $
          (gbl_id `setIdUnfolding` mkInlineUnfolding Nothing rhs, rhs)
-
-                -- See Note [ClassOp/DFun selection] in TcInstDcls
-                -- See Note [Single-method classes]  in TcInstDcls
-    mk_dfun_w_stuff is_newtype
-       | is_newtype
-       = gbl_id `setIdUnfolding`  mkInlineUnfolding (Just 0) rhs
-                `setInlinePragma` alwaysInlinePragma { inl_sat = Just 0 }
-       | otherwise
-       = gbl_id `setIdUnfolding`  mkDFunUnfolding dfun_bndrs dfun_constr dfun_args
-                `setInlinePragma` dfunInlinePragma
-    (dfun_bndrs, dfun_body) = collectBinders (simpleOptExpr rhs)
-    (dfun_con, dfun_args)   = collectArgs dfun_body
-    dfun_constr | Var id <- dfun_con
-                , DataConWorkId con <- idDetails id
-                = con
-                | otherwise = pprPanic "makeCorePair: dfun" (ppr rhs)
-
 
 dictArity :: [Var] -> Arity
 -- Don't count coercion variables in arity
@@ -558,16 +610,16 @@ dsSpec :: Maybe CoreExpr        -- Just rhs => RULE is for a local binding
 dsSpec mb_poly_rhs (L loc (SpecPrag poly_id spec_co spec_inl))
   | isJust (isClassOpId_maybe poly_id)
   = putSrcSpanDs loc $
-    do { warnDs (ptext (sLit "Ignoring useless SPECIALISE pragma for class method selector")
-                 <+> quotes (ppr poly_id))
+    do { warnDs NoReason (text "Ignoring useless SPECIALISE pragma for class method selector"
+                          <+> quotes (ppr poly_id))
        ; return Nothing  }  -- There is no point in trying to specialise a class op
                             -- Moreover, classops don't (currently) have an inl_sat arity set
                             -- (it would be Just 0) and that in turn makes makeCorePair bleat
 
   | no_act_spec && isNeverActive rule_act
   = putSrcSpanDs loc $
-    do { warnDs (ptext (sLit "Ignoring useless SPECIALISE pragma for NOINLINE function:")
-                 <+> quotes (ppr poly_id))
+    do { warnDs NoReason (text "Ignoring useless SPECIALISE pragma for NOINLINE function:"
+                          <+> quotes (ppr poly_id))
        ; return Nothing  }  -- Function is NOINLINE, and the specialiation inherits that
                             -- See Note [Activation pragmas for SPECIALISE]
 
@@ -579,12 +631,12 @@ dsSpec mb_poly_rhs (L loc (SpecPrag poly_id spec_co spec_inl))
              spec_name = mkInternalName uniq spec_occ (getSrcSpan poly_name)
        ; (bndrs, ds_lhs) <- liftM collectBinders
                                   (dsHsWrapper spec_co (Var poly_id))
-       ; let spec_ty = mkPiTypes bndrs (exprType ds_lhs)
-       ; -- pprTrace "dsRule" (vcat [ ptext (sLit "Id:") <+> ppr poly_id
-         --                         , ptext (sLit "spec_co:") <+> ppr spec_co
-         --                         , ptext (sLit "ds_rhs:") <+> ppr ds_lhs ]) $
+       ; let spec_ty = mkLamTypes bndrs (exprType ds_lhs)
+       ; -- pprTrace "dsRule" (vcat [ text "Id:" <+> ppr poly_id
+         --                         , text "spec_co:" <+> ppr spec_co
+         --                         , text "ds_rhs:" <+> ppr ds_lhs ]) $
          case decomposeRuleLhs bndrs ds_lhs of {
-           Left msg -> do { warnDs msg; return Nothing } ;
+           Left msg -> do { warnDs NoReason msg; return Nothing } ;
            Right (rule_bndrs, _fn, args) -> do
 
        { dflags <- getDynFlags
@@ -606,7 +658,7 @@ dsSpec mb_poly_rhs (L loc (SpecPrag poly_id spec_co spec_inl))
 
 -- Commented out: see Note [SPECIALISE on INLINE functions]
 --       ; when (isInlinePragma id_inl)
---              (warnDs $ ptext (sLit "SPECIALISE pragma on INLINE function probably won't fire:")
+--              (warnDs $ text "SPECIALISE pragma on INLINE function probably won't fire:"
 --                        <+> quotes (ppr poly_name))
 
        ; return (Just (unitOL (spec_id, spec_rhs), rule))
@@ -655,11 +707,11 @@ dsMkUserRule this_mod is_local name act fn bndrs args rhs = do
     let rule = mkRule this_mod False is_local name act fn bndrs args rhs
     dflags <- getDynFlags
     when (isOrphan (ru_orphan rule) && wopt Opt_WarnOrphans dflags) $
-        warnDs (ruleOrphWarn rule)
+        warnDs (Reason Opt_WarnOrphans) (ruleOrphWarn rule)
     return rule
 
 ruleOrphWarn :: CoreRule -> SDoc
-ruleOrphWarn rule = ptext (sLit "Orphan rule:") <+> ppr rule
+ruleOrphWarn rule = text "Orphan rule:" <+> ppr rule
 
 {- Note [SPECIALISE on INLINE functions]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -735,14 +787,14 @@ decomposeRuleLhs orig_bndrs orig_lhs
   = Left (vcat (map dead_msg unbound))
 
   | Just (fn_id, args) <- decompose fun2 args2
-  , let extra_dict_bndrs = mk_extra_dict_bndrs fn_id args
-  = -- pprTrace "decmposeRuleLhs" (vcat [ ptext (sLit "orig_bndrs:") <+> ppr orig_bndrs
-    --                                  , ptext (sLit "orig_lhs:") <+> ppr orig_lhs
-    --                                  , ptext (sLit "lhs1:")     <+> ppr lhs1
-    --                                  , ptext (sLit "extra_dict_bndrs:") <+> ppr extra_dict_bndrs
-    --                                  , ptext (sLit "fn_id:") <+> ppr fn_id
-    --                                  , ptext (sLit "args:")   <+> ppr args]) $
-    Right (orig_bndrs ++ extra_dict_bndrs, fn_id, args)
+  , let extra_bndrs = mk_extra_bndrs fn_id args
+  = -- pprTrace "decmposeRuleLhs" (vcat [ text "orig_bndrs:" <+> ppr orig_bndrs
+    --                                  , text "orig_lhs:" <+> ppr orig_lhs
+    --                                  , text "lhs1:"     <+> ppr lhs1
+    --                                  , text "extra_dict_bndrs:" <+> ppr extra_dict_bndrs
+    --                                  , text "fn_id:" <+> ppr fn_id
+    --                                  , text "args:"   <+> ppr args]) $
+    Right (orig_bndrs ++ extra_bndrs, fn_id, args)
 
   | otherwise
   = Left bad_shape_msg
@@ -756,13 +808,19 @@ decomposeRuleLhs orig_bndrs orig_lhs
 
    orig_bndr_set = mkVarSet orig_bndrs
 
-        -- Add extra dict binders: Note [Free dictionaries]
-   mk_extra_dict_bndrs fn_id args
-     = [ mkLocalId (localiseName (idName d)) (idType d)
-       | d <- varSetElems (exprsFreeVars args `delVarSetList` (fn_id : orig_bndrs))
-              -- fn_id: do not quantify over the function itself, which may
-              -- itself be a dictionary (in pathological cases, Trac #10251)
-       , isDictId d ]
+        -- Add extra tyvar binders: Note [Free tyvars in rule LHS]
+        -- and extra dict binders: Note [Free dictionaries in rule LHS]
+   mk_extra_bndrs fn_id args
+     = toposortTyVars unbound_tvs ++ unbound_dicts
+     where
+       unbound_tvs   = [ v | v <- unbound_vars, isTyVar v ]
+       unbound_dicts = [ mkLocalId (localiseName (idName d)) (idType d)
+                       | d <- unbound_vars, isDictId d ]
+       unbound_vars  = [ v | v <- exprsFreeVarsList args
+                           , not (v `elemVarSet` orig_bndr_set)
+                           , not (v == fn_id) ]
+         -- fn_id: do not quantify over the function itself, which may
+         -- itself be a dictionary (in pathological cases, Trac #10251)
 
    decompose (Var fn_id) args
       | not (fn_id `elemVarSet` orig_bndr_set)
@@ -770,18 +828,18 @@ decomposeRuleLhs orig_bndrs orig_lhs
 
    decompose _ _ = Nothing
 
-   bad_shape_msg = hang (ptext (sLit "RULE left-hand side too complicated to desugar"))
+   bad_shape_msg = hang (text "RULE left-hand side too complicated to desugar")
                       2 (vcat [ text "Optimised lhs:" <+> ppr lhs2
                               , text "Orig lhs:" <+> ppr orig_lhs])
-   dead_msg bndr = hang (sep [ ptext (sLit "Forall'd") <+> pp_bndr bndr
-                             , ptext (sLit "is not bound in RULE lhs")])
+   dead_msg bndr = hang (sep [ text "Forall'd" <+> pp_bndr bndr
+                             , text "is not bound in RULE lhs"])
                       2 (vcat [ text "Orig bndrs:" <+> ppr orig_bndrs
                               , text "Orig lhs:" <+> ppr orig_lhs
                               , text "optimised lhs:" <+> ppr lhs2 ])
    pp_bndr bndr
-    | isTyVar bndr                      = ptext (sLit "type variable") <+> quotes (ppr bndr)
-    | Just pred <- evVarPred_maybe bndr = ptext (sLit "constraint") <+> quotes (ppr pred)
-    | otherwise                         = ptext (sLit "variable") <+> quotes (ppr bndr)
+    | isTyVar bndr                      = text "type variable" <+> quotes (ppr bndr)
+    | Just pred <- evVarPred_maybe bndr = text "constraint" <+> quotes (ppr pred)
+    | otherwise                         = text "variable" <+> quotes (ppr bndr)
 
    drop_dicts :: CoreExpr -> CoreExpr
    drop_dicts e
@@ -823,6 +881,54 @@ There are several things going on here.
 * drop_dicts: see Note [Drop dictionary bindings on rule LHS]
 * simpleOptExpr: see Note [Simplify rule LHS]
 * extra_dict_bndrs: see Note [Free dictionaries]
+
+Note [Free tyvars on rule LHS]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+  data T a = C
+
+  foo :: T a -> Int
+  foo C = 1
+
+  {-# RULES "myrule"  foo C = 1 #-}
+
+After type checking the LHS becomes (foo alpha (C alpha)), where alpha
+is an unbound meta-tyvar.  The zonker in TcHsSyn is careful not to
+turn the free alpha into Any (as it usually does).  Instead it turns it
+into a skolem 'a'.  See TcHsSyn Note [Zonking the LHS of a RULE].
+
+Now we must quantify over that 'a'.  It's /really/ inconvenient to do that
+in the zonker, because the HsExpr data type is very large.  But it's /easy/
+to do it here in the desugarer.
+
+Moreover, we have to do something rather similar for dictionaries;
+see Note [Free dictionaries on rule LHS].   So that's why we look for
+type variables free on the LHS, and quantify over them.
+
+Note [Free dictionaries on rule LHS]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When the LHS of a specialisation rule, (/\as\ds. f es) has a free dict,
+which is presumably in scope at the function definition site, we can quantify
+over it too.  *Any* dict with that type will do.
+
+So for example when you have
+        f :: Eq a => a -> a
+        f = <rhs>
+        ... SPECIALISE f :: Int -> Int ...
+
+Then we get the SpecPrag
+        SpecPrag (f Int dInt)
+
+And from that we want the rule
+
+        RULE forall dInt. f Int dInt = f_spec
+        f_spec = let f = <rhs> in f Int dInt
+
+But be careful!  That dInt might be GHC.Base.$fOrdInt, which is an External
+Name, and you can't bind them in a lambda or forall without getting things
+confused.   Likewise it might have an InlineRule or something, which would be
+utterly bogus. So we really make a fresh Id, with the same unique and type
+as the old one, but with an Internal name and no IdInfo.
 
 Note [Drop dictionary bindings on rule LHS]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -923,31 +1029,6 @@ the constraint is unused.  We could bind 'd' to (error "unused")
 but it seems better to reject the program because it's almost certainly
 a mistake.  That's what the isDeadBinder call detects.
 
-Note [Free dictionaries]
-~~~~~~~~~~~~~~~~~~~~~~~~
-When the LHS of a specialisation rule, (/\as\ds. f es) has a free dict,
-which is presumably in scope at the function definition site, we can quantify
-over it too.  *Any* dict with that type will do.
-
-So for example when you have
-        f :: Eq a => a -> a
-        f = <rhs>
-        ... SPECIALISE f :: Int -> Int ...
-
-Then we get the SpecPrag
-        SpecPrag (f Int dInt)
-
-And from that we want the rule
-
-        RULE forall dInt. f Int dInt = f_spec
-        f_spec = let f = <rhs> in f Int dInt
-
-But be careful!  That dInt might be GHC.Base.$fOrdInt, which is an External
-Name, and you can't bind them in a lambda or forall without getting things
-confused.   Likewise it might have an InlineRule or something, which would be
-utterly bogus. So we really make a fresh Id, with the same unique and type
-as the old one, but with an Internal name and no IdInfo.
-
 ************************************************************************
 *                                                                      *
                 Desugaring evidence
@@ -963,10 +1044,10 @@ dsHsWrapper (WpLet ev_binds)  e = do bs <- dsTcEvBinds ev_binds
                                      return (mkCoreLets bs e)
 dsHsWrapper (WpCompose c1 c2) e = do { e1 <- dsHsWrapper c2 e
                                      ; dsHsWrapper c1 e1 }
-dsHsWrapper (WpFun c1 c2 t1 _) e = do { x <- newSysLocalDs t1
-                                      ; e1 <- dsHsWrapper c1 (Var x)
-                                      ; e2 <- dsHsWrapper c2 (mkCoreAppDs (text "dsHsWrapper") e e1)
-                                      ; return (Lam x e2) }
+dsHsWrapper (WpFun c1 c2 t1)  e = do { x <- newSysLocalDs t1
+                                     ; e1 <- dsHsWrapper c1 (Var x)
+                                     ; e2 <- dsHsWrapper c2 (mkCoreAppDs (text "dsHsWrapper") e e1)
+                                     ; return (Lam x e2) }
 dsHsWrapper (WpCast co)       e = ASSERT(coercionRole co == Representational)
                                   return $ mkCastDs e co
 dsHsWrapper (WpEvLam ev)      e = return $ Lam ev e
@@ -1026,7 +1107,7 @@ dsEvTerm (EvDelayedError ty msg) = return $ dsEvDelayedError ty msg
 
 dsEvDelayedError :: Type -> FastString -> CoreExpr
 dsEvDelayedError ty msg
-  = Var errorId `mkTyApps` [getLevity "dsEvTerm" ty, ty] `mkApps` [litMsg]
+  = Var errorId `mkTyApps` [getRuntimeRep "dsEvTerm" ty, ty] `mkApps` [litMsg]
   where
     errorId = tYPE_ERROR_ID
     litMsg  = Lit (MachStr (fastStringToByteString msg))

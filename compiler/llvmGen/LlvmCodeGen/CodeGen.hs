@@ -34,10 +34,6 @@ import Util
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Writer
 
-#if MIN_VERSION_base(4,8,0)
-#else
-import Data.Monoid ( Monoid, mappend, mempty )
-#endif
 #if __GLASGOW_HASKELL__ > 710
 import Data.Semigroup   ( Semigroup )
 import qualified Data.Semigroup as Semigroup
@@ -148,7 +144,7 @@ getInstrinct2 fname fty@(LMFunction funSig) = do
         return []
       Nothing -> do
         funInsert fname fty
-        un <- runUs getUniqueM
+        un <- getUniqueM
         let lbl = mkAsmTempLabel un
         return [CmmData (Section Data lbl) [([],[fty])]]
 
@@ -1671,7 +1667,7 @@ genLit _ CmmHighStackMark
 -- and avoids having to deal with Phi node insertion.  This is also
 -- the approach recommended by LLVM developers.
 --
--- On the other hand, this is unecessarily verbose if the register in
+-- On the other hand, this is unnecessarily verbose if the register in
 -- question is never written. Therefore we skip it where we can to
 -- save a few lines in the output and hopefully speed compilation up a
 -- bit.
@@ -1787,7 +1783,7 @@ getHsFunc' name fty
 -- | Create a new local var
 mkLocalVar :: LlvmType -> LlvmM LlvmVar
 mkLocalVar ty = do
-    un <- runUs getUniqueM
+    un <- getUniqueM
     return $ LMLocalVar un ty
 
 

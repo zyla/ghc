@@ -14,7 +14,7 @@ module Kind (
 
         classifiesTypeWithValues,
         isStarKind, isStarKindSynonymTyCon,
-        isLevityPolymorphic, isLevityPolymorphic_maybe
+        isRuntimeRepPolymorphic
        ) where
 
 #include "HsVersions.h"
@@ -23,9 +23,8 @@ import {-# SOURCE #-} Type       ( typeKind, coreViewOneStarKind )
 
 import TyCoRep
 import TyCon
-import Var
+import VarSet ( isEmptyVarSet )
 import PrelNames
-import Data.Maybe
 import Util  ( (<&&>) )
 
 {-
@@ -51,7 +50,7 @@ Constraint and *.  Indeed we can have coercions between the two. Consider
      op :: a -> a
 For this single-method class we may generate a newtype, which in turn
 generates an axiom witnessing
-    Ord a ~ (a -> a)
+    C a ~ (a -> a)
 so on the left we have Constraint, and on the right we have *.
 See Trac #7451.
 
@@ -72,25 +71,18 @@ isConstraintKind _               = False
 -- ends in @*@ and @Maybe a -> [a]@ ends in @[]@.
 returnsTyCon :: Unique -> Type -> Bool
 returnsTyCon tc_u (ForAllTy _ ty)  = returnsTyCon tc_u ty
+returnsTyCon tc_u (FunTy    _ ty)  = returnsTyCon tc_u ty
 returnsTyCon tc_u (TyConApp tc' _) = tc' `hasKey` tc_u
 returnsTyCon _  _                  = False
 
 returnsConstraintKind :: Kind -> Bool
 returnsConstraintKind = returnsTyCon constraintKindTyConKey
 
--- | Tests whether the given type looks like "TYPE v", where v is a variable.
-isLevityPolymorphic :: Kind -> Bool
-isLevityPolymorphic = isJust . isLevityPolymorphic_maybe
-
--- | Retrieves a levity variable in the given kind, if the kind is of the
--- form "TYPE v".
-isLevityPolymorphic_maybe :: Kind -> Maybe TyVar
-isLevityPolymorphic_maybe k
-  | Just k' <- coreViewOneStarKind k = isLevityPolymorphic_maybe k'
-isLevityPolymorphic_maybe (TyConApp tc [TyVarTy v])
-  | tc `hasKey` tYPETyConKey
-  = Just v
-isLevityPolymorphic_maybe _ = Nothing
+-- | Tests whether the given type (which should look like "TYPE ...") has any
+-- free variables
+isRuntimeRepPolymorphic :: Kind -> Bool
+isRuntimeRepPolymorphic k
+  = not $ isEmptyVarSet $ tyCoVarsOfType k
 
 --------------------------------------------
 --            Kinding for arrow (->)
@@ -98,7 +90,7 @@ isLevityPolymorphic_maybe _ = Nothing
 --     arg -> res
 
 okArrowArgKind, okArrowResultKind :: Kind -> Bool
-okArrowArgKind = classifiesTypeWithValues <&&> (not . isLevityPolymorphic)
+okArrowArgKind = classifiesTypeWithValues <&&> (not . isRuntimeRepPolymorphic)
 okArrowResultKind = classifiesTypeWithValues
 
 -----------------------------------------
@@ -119,8 +111,9 @@ classifiesTypeWithValues _ = False
 -- | Is this kind equivalent to *?
 isStarKind :: Kind -> Bool
 isStarKind k | Just k' <- coreViewOneStarKind k = isStarKind k'
-isStarKind (TyConApp tc [TyConApp l []]) = tc `hasKey` tYPETyConKey
-                                        && l `hasKey` liftedDataConKey
+isStarKind (TyConApp tc [TyConApp ptr_rep []])
+  =  tc      `hasKey` tYPETyConKey
+  && ptr_rep `hasKey` ptrRepLiftedDataConKey
 isStarKind _ = False
                               -- See Note [Kind Constraint and kind *]
 

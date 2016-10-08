@@ -92,7 +92,7 @@ $(error Your make does not support abspath. You need GNU make >= 3.81)
 endif
 ##################################################
 
-
+# -----------------------------------------------------------------------------
 # Catch make if it runs away into an infinite loop
 ifeq      "$(MAKE_RESTARTS)" ""
 else ifeq "$(MAKE_RESTARTS)" "1"
@@ -192,6 +192,24 @@ ifeq "$(HSCOLOUR_CMD)" ""
 $(error HSCOLOUR_SRCS=YES, but HSCOLOUR_CMD is empty. \
   Run `cabal install hscolour`, then rerun `./configure`. \
   See https://ghc.haskell.org/trac/ghc/wiki/Building/Preparation)
+endif
+endif
+
+ifeq "$(HADDOCK_DOCS)" "YES"
+ifneq "$(CrossCompiling) $(Stage1Only)" "NO NO"
+$(error Can not build haddock docs when CrossCompiling or Stage1Only. \
+  Set HADDOCK_DOCS=NO in your mk/build.mk file. \
+  See Note [No stage2 packages when CrossCompiling or Stage1Only])
+endif
+endif
+
+ifneq "$(BUILD_SPHINX_HTML) $(BUILD_SPHINX_PDF)" "NO NO"
+# The User's Guide requires mkUserGuidePart, which uses the GHC API.
+ifneq "$(CrossCompiling) $(Stage1Only)" "NO NO"
+$(error Can not build User's Guide when CrossCompiling or Stage1Only. \
+  Set BUILD_SPHINX_HTML=NO, BUILD_SPHINX_PDF=NO in your \
+  mk/build.mk file. \
+  See Note [No stage2 packages when CrossCompiling or Stage1Only])
 endif
 endif
 
@@ -412,7 +430,7 @@ else # CLEANING
 # programs such as GHC and ghc-pkg, that we do not assume the stage0
 # compiler already has installed (or up-to-date enough).
 
-PACKAGES_STAGE0 = binary Cabal/Cabal hpc ghc-boot hoopl transformers template-haskell
+PACKAGES_STAGE0 = binary Cabal/Cabal hpc ghc-boot-th ghc-boot hoopl transformers template-haskell
 ifeq "$(Windows_Host)" "NO"
 ifneq "$(HostOS_CPP)" "ios"
 PACKAGES_STAGE0 += terminfo
@@ -428,11 +446,11 @@ PACKAGES_STAGE1 += deepseq
 PACKAGES_STAGE1 += bytestring
 PACKAGES_STAGE1 += containers
 
-ifeq "$(Windows_Host)" "YES"
+ifeq "$(Windows_Target)" "YES"
 PACKAGES_STAGE1 += Win32
 endif
 PACKAGES_STAGE1 += time
-ifeq "$(Windows_Host)" "NO"
+ifeq "$(Windows_Target)" "NO"
 PACKAGES_STAGE1 += unix
 endif
 
@@ -442,10 +460,12 @@ PACKAGES_STAGE1 += hpc
 PACKAGES_STAGE1 += pretty
 PACKAGES_STAGE1 += binary
 PACKAGES_STAGE1 += Cabal/Cabal
+PACKAGES_STAGE1 += ghc-boot-th
 PACKAGES_STAGE1 += ghc-boot
 PACKAGES_STAGE1 += template-haskell
 PACKAGES_STAGE1 += hoopl
 PACKAGES_STAGE1 += transformers
+PACKAGES_STAGE1 += compact
 
 ifeq "$(HADDOCK_DOCS)" "YES"
 PACKAGES_STAGE1 += xhtml
@@ -516,7 +536,6 @@ $(foreach pkg,$(PACKAGES_STAGE1),$(eval $(call fixed_pkg_dep,$(pkg),dist-install
 # the stage1 packages, so we have to make sure those packages get configured
 # and registered before we can start with these. Note that they don't depend on
 # eachother, so we can configure them in parallel.
-utils/ghc-pwd/dist-install/package-data.mk: $(fixed_pkg_prev)
 utils/ghc-cabal/dist-install/package-data.mk: $(fixed_pkg_prev)
 utils/hpc/dist-install/package-data.mk: $(fixed_pkg_prev)
 utils/ghc-pkg/dist-install/package-data.mk: $(fixed_pkg_prev)
@@ -564,7 +583,10 @@ BOOT_PKG_CONSTRAINTS := \
             --constraint "$p == $(shell grep -i "^Version:" libraries/$d/$p.cabal | sed "s/[^0-9.]//g")"))
 
 # The actual .a and .so/.dll files: needed for dependencies.
-ALL_STAGE1_LIBS  = $(foreach lib,$(PACKAGES_STAGE1),$(libraries/$(lib)_dist-install_v_LIB))
+$(foreach way,$(GhcLibWays),$(eval ALL_STAGE1_$(way)_LIBS = $$(foreach lib,$$(PACKAGES_STAGE1),$$(libraries/$$(lib)_dist-install_$(way)_LIB))))
+
+ALL_STAGE1_LIBS = $(ALL_STAGE1_v_LIBS)
+
 ifeq "$(BuildSharedLibs)" "YES"
 ALL_STAGE1_LIBS += $(foreach lib,$(PACKAGES_STAGE1),$(libraries/$(lib)_dist-install_dyn_LIB))
 endif
@@ -660,7 +682,6 @@ BUILD_DIRS += utils/testremove
 BUILD_DIRS += utils/ghctags
 BUILD_DIRS += utils/check-api-annotations
 BUILD_DIRS += utils/dll-split
-BUILD_DIRS += utils/ghc-pwd
 BUILD_DIRS += utils/ghc-cabal
 BUILD_DIRS += utils/hpc
 BUILD_DIRS += utils/runghc
@@ -669,9 +690,7 @@ BUILD_DIRS += utils/mkUserGuidePart
 BUILD_DIRS += docs/users_guide
 BUILD_DIRS += utils/count_lines
 BUILD_DIRS += utils/compare_sizes
-ifeq "$(Windows_Host)" "NO"
 BUILD_DIRS += iserv
-endif
 
 # ----------------------------------------------
 # Actually include the sub-ghc.mk's
@@ -692,7 +711,8 @@ ifeq "$(HADDOCK_DOCS)" "NO"
 BUILD_DIRS := $(filter-out utils/haddock,$(BUILD_DIRS))
 BUILD_DIRS := $(filter-out utils/haddock/doc,$(BUILD_DIRS))
 endif
-ifeq "$(BUILD_SPHINX_HTML) $(BUILD_SPHINX_PDF)" "NO NO NO"
+ifeq "$(BUILD_SPHINX_HTML) $(BUILD_SPHINX_PDF)" "NO NO"
+BUILD_DIRS := $(filter-out docs/users_guide,$(BUILD_DIRS))
 # Don't to build this little utility if we're not building the User's Guide.
 BUILD_DIRS := $(filter-out utils/mkUserGuidePart,$(BUILD_DIRS))
 endif
@@ -712,11 +732,8 @@ endif
 ifneq "$(CrossCompiling) $(Stage1Only)" "NO NO"
 # See Note [No stage2 packages when CrossCompiling or Stage1Only].
 # See Note [Stage1Only vs stage=1] in mk/config.mk.in.
-BUILD_DIRS := $(filter-out utils/haddock,$(BUILD_DIRS))
-BUILD_DIRS := $(filter-out utils/haddock/doc,$(BUILD_DIRS))
 BUILD_DIRS := $(filter-out utils/ghctags,$(BUILD_DIRS))
 BUILD_DIRS := $(filter-out utils/check-api-annotations,$(BUILD_DIRS))
-BUILD_DIRS := $(filter-out utils/mkUserGuidePart,$(BUILD_DIRS))
 endif
 endif # CLEANING
 
@@ -936,14 +953,8 @@ ifneq "$(INSTALL_LIBRARY_DOCS)" ""
 	$(INSTALL_SCRIPT) $(INSTALL_OPTS) libraries/gen_contents_index "$(DESTDIR)$(docdir)/html/libraries/"
 endif
 ifneq "$(INSTALL_HTML_DOC_DIRS)" ""
-# We need to filter out the directories so install doesn't choke on them
 	for i in $(INSTALL_HTML_DOC_DIRS); do \
-		$(INSTALL_DIR) "$(DESTDIR)$(docdir)/html/`basename $$i`"; \
-		for f in $$i/*; do \
-			if test -f $$f; then \
-				$(INSTALL_DOC) $(INSTALL_OPTS) "$$f" "$(DESTDIR)$(docdir)/html/`basename $$i`"; \
-			fi \
-		done \
+		$(CP) -Rp $$i "$(DESTDIR)$(docdir)/html"; \
 	done
 endif
 
@@ -1020,7 +1031,6 @@ $(eval $(call bindist-list,.,\
     mk/config.mk.in \
     $(INPLACE_BIN)/mkdirhier \
     utils/ghc-cabal/dist-install/build/tmp/ghc-cabal \
-    utils/ghc-pwd/dist-install/build/tmp/ghc-pwd \
     $(BINDIST_WRAPPERS) \
     $(BINDIST_PERL_SOURCES) \
     $(BINDIST_LIBS) \
@@ -1349,6 +1359,7 @@ distclean : clean
 	$(call removeFiles,mk/project.mk)
 	$(call removeFiles,compiler/ghc.cabal)
 	$(call removeFiles,ghc/ghc-bin.cabal)
+	$(call removeFiles,libraries/ghci/ghci.cabal)
 	$(call removeFiles,utils/runghc/runghc.cabal)
 	$(call removeFiles,settings)
 	$(call removeFiles,docs/users_guide/ug-book.xml)
@@ -1364,9 +1375,6 @@ distclean : clean
 
 # Internal files generated by ./configure for itself.
 	$(call removeFiles,config.cache config.status config.log)
-
-# ./configure build ghc-pwd in utils/ghc-pwd/dist-boot, so clean it up.
-	$(call removeTrees,utils/ghc-pwd/dist-boot)
 
 # The root Makefile makes .old versions of some files that configure
 # generates, so we clean those too.

@@ -57,7 +57,6 @@ import Outputable
 import Platform
 import SrcLoc
 import Bag
-import FastString
 import Hooks
 import qualified GHC.LanguageExtensions as LangExt
 
@@ -129,11 +128,11 @@ normaliseFfiType' env ty0 = go initRecTc ty0
       | Just (tc, tys) <- splitTyConApp_maybe ty
       = go_tc_app rec_nts tc tys
 
-      | Just (bndr, inner_ty) <- splitPiTy_maybe ty
-      , Just tyvar <- binderVar_maybe bndr
+      | (bndrs, inner_ty) <- splitForAllTyVarBndrs ty
+      , not (null bndrs)
       = do (coi, nty1, gres1) <- go rec_nts inner_ty
-           return ( mkHomoForAllCos [tyvar] coi
-                  , mkForAllTy bndr nty1, gres1 )
+           return ( mkHomoForAllCos (binderVars bndrs) coi
+                  , mkForAllTys bndrs nty1, gres1 )
 
       | otherwise -- see Note [Don't recur in normaliseFfiType']
       = return (mkRepReflCo ty, ty, emptyBag)
@@ -164,7 +163,7 @@ normaliseFfiType' env ty0 = go initRecTc ty0
 
         | isFamilyTyCon tc              -- Expand open tycons
         , (co, ty) <- normaliseTcApp env Representational tc tys
-        , not (isReflCo co)
+        , not (isReflexiveCo co)
         = do (co', ty', gres) <- go rec_nts ty
              return (mkTransCo co co', ty', gres)
 
@@ -190,7 +189,7 @@ normaliseFfiType' env ty0 = go initRecTc ty0
 checkNewtypeFFI :: GlobalRdrEnv -> TyCon -> Maybe GlobalRdrElt
 checkNewtypeFFI rdr_env tc
   | Just con <- tyConSingleDataCon_maybe tc
-  , [gre] <- lookupGRE_Name rdr_env (dataConName con)
+  , Just gre <- lookupGRE_Name rdr_env (dataConName con)
   = Just gre    -- See Note [Newtype constructor usage in foreign declarations]
   | otherwise
   = Nothing
@@ -289,7 +288,7 @@ tcCheckFIType arg_tys res_ty (CImport (L lc cconv) safety mh CWrapper src) = do
                         checkForeignRes mustBeIO checkSafe (isFFIDynTy arg1_ty) res_ty
                   where
                      (arg1_tys, res1_ty) = tcSplitFunTys arg1_ty
-        _ -> addErrTc (illegalForeignTyErr Outputable.empty (ptext (sLit "One argument expected")))
+        _ -> addErrTc (illegalForeignTyErr Outputable.empty (text "One argument expected"))
     return (CImport (L lc cconv') safety mh CWrapper src)
 
 tcCheckFIType arg_tys res_ty idecl@(CImport (L lc cconv) (L ls safety) mh
@@ -299,7 +298,7 @@ tcCheckFIType arg_tys res_ty idecl@(CImport (L lc cconv) (L ls safety) mh
       cconv' <- checkCConv cconv
       case arg_tys of           -- The first arg must be Ptr or FunPtr
         []                ->
-          addErrTc (illegalForeignTyErr Outputable.empty (ptext (sLit "At least one argument expected")))
+          addErrTc (illegalForeignTyErr Outputable.empty (text "At least one argument expected"))
         (arg1_ty:arg_tys) -> do
           dflags <- getDynFlags
           let curried_res_ty = mkFunTys arg_tys res_ty
@@ -350,7 +349,8 @@ checkMissingAmpersand :: DynFlags -> [Type] -> Type -> TcM ()
 checkMissingAmpersand dflags arg_tys res_ty
   | null arg_tys && isFunPtrTy res_ty &&
     wopt Opt_WarnDodgyForeignImports dflags
-  = addWarn (ptext (sLit "possible missing & in foreign import of FunPtr"))
+  = addWarn (Reason Opt_WarnDodgyForeignImports)
+        (text "possible missing & in foreign import of FunPtr")
   | otherwise
   = return ()
 
@@ -453,7 +453,7 @@ checkForeignRes non_io_result_ok check_safe pred_res_ty ty
 
   -- Case for non-IO result type with FFI Import
   | not non_io_result_ok
-  = addErrTc $ illegalForeignTyErr result (ptext (sLit "IO result type expected"))
+  = addErrTc $ illegalForeignTyErr result (text "IO result type expected")
 
   | otherwise
   = do { dflags <- getDynFlags
@@ -473,7 +473,8 @@ checkForeignRes non_io_result_ok check_safe pred_res_ty ty
            -- success! non-IO return is fine
            _ -> return () }
   where
-    safeHsErr = ptext $ sLit "Safe Haskell is on, all FFI imports must be in the IO monad"
+    safeHsErr =
+      text "Safe Haskell is on, all FFI imports must be in the IO monad"
 
 nonIOok, mustBeIO :: Bool
 nonIOok  = True
@@ -522,7 +523,8 @@ checkCConv StdCallConv  = do dflags <- getDynFlags
                                  then return StdCallConv
                                  else do -- This is a warning, not an error. see #3336
                                          when (wopt Opt_WarnUnsupportedCallingConventions dflags) $
-                                             addWarnTc (text "the 'stdcall' calling convention is unsupported on this platform," $$ text "treating as ccall")
+                                             addWarnTc (Reason Opt_WarnUnsupportedCallingConventions)
+                                                 (text "the 'stdcall' calling convention is unsupported on this platform," $$ text "treating as ccall")
                                          return CCallConv
 checkCConv PrimCallConv = do addErrTc (text "The `prim' calling convention can only be used with `foreign import'")
                              return PrimCallConv
@@ -542,8 +544,8 @@ illegalForeignTyErr :: SDoc -> SDoc -> SDoc
 illegalForeignTyErr arg_or_res extra
   = hang msg 2 extra
   where
-    msg = hsep [ ptext (sLit "Unacceptable"), arg_or_res
-               , ptext (sLit "type in foreign declaration:")]
+    msg = hsep [ text "Unacceptable", arg_or_res
+               , text "type in foreign declaration:"]
 
 -- Used for 'arg_or_res' argument to illegalForeignTyErr
 argument, result :: SDoc
@@ -552,9 +554,9 @@ result   = text "result"
 
 badCName :: CLabelString -> MsgDoc
 badCName target
-  = sep [quotes (ppr target) <+> ptext (sLit "is not a valid C identifier")]
+  = sep [quotes (ppr target) <+> text "is not a valid C identifier"]
 
 foreignDeclCtxt :: ForeignDecl Name -> SDoc
 foreignDeclCtxt fo
-  = hang (ptext (sLit "When checking declaration:"))
+  = hang (text "When checking declaration:")
        2 (ppr fo)

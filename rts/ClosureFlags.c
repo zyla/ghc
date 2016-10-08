@@ -50,7 +50,6 @@ StgWord16 closure_flags[] = {
  [PAP]                  =  (_HNF|     _NS                                ),
  [AP_STACK]             =  (                   _THU                      ),
  [IND]                  =  (          _NS|                        _IND ),
- [IND_PERM]             =  (          _NS|                        _IND ),
  [IND_STATIC]           =  (          _NS|_STA|                   _IND ),
  [RET_BCO]              =  ( 0                                         ),
  [RET_SMALL]            =  (     _BTM|                       _SRT      ),
@@ -85,7 +84,8 @@ StgWord16 closure_flags[] = {
  [SMALL_MUT_ARR_PTRS_CLEAN]   =  (_HNF|     _NS|         _MUT|_UPT           ),
  [SMALL_MUT_ARR_PTRS_DIRTY]   =  (_HNF|     _NS|         _MUT|_UPT           ),
  [SMALL_MUT_ARR_PTRS_FROZEN0] =  (_HNF|     _NS|         _MUT|_UPT           ),
- [SMALL_MUT_ARR_PTRS_FROZEN]  =  (_HNF|     _NS|              _UPT           )
+ [SMALL_MUT_ARR_PTRS_FROZEN]  =  (_HNF|     _NS|              _UPT           ),
+ [COMPACT_NFDATA]       =  (_HNF|     _NS                              ),
 };
 
 #if N_CLOSURE_TYPES != 65
