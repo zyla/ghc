@@ -218,17 +218,29 @@ tcExpr e@(HsIPVar x) res_ty
   origin = IPOccOrigin x
 
 tcExpr e@(HsOverLabel l) res_ty  -- See Note [Type-checking overloaded labels]
-  = do { isLabelClass <- tcLookupClass isLabelClassName
-       ; alpha <- newOpenFlexiTyVarTy
-       ; let lbl = mkStrLitTy l
-             pred = mkClassPred isLabelClass [lbl, alpha]
-       ; loc <- getSrcSpanM
-       ; var <- emitWantedEvVar origin pred
-       ; tcWrapResult e (fromDict pred (HsVar (L loc var))) alpha res_ty }
+  = do { dflags <- getDynFlags
+       ; if xopt LangExt.OverloadedLabels dflags
+              then do { isLabelClass <- tcLookupClass isLabelClassName
+                      ; alpha <- newFlexiTyVarTy liftedTypeKind
+                      ; let pred = mkClassPred isLabelClass [lbl, alpha]
+                      ; loc <- getSrcSpanM
+                      ; var <- emitWantedEvVar origin pred
+                      ; tcWrapResult e (fromDict pred (HsVar (L loc var))) alpha res_ty }
+              else do { -- must be OverloadedRecordFields alone
+                        hasFieldClass <- tcLookupClass hasFieldClassName
+                      ; alpha <- newFlexiTyVarTy liftedTypeKind
+                      ; beta  <- newFlexiTyVarTy liftedTypeKind
+                      ; let pred = mkClassPred hasFieldClass [typeSymbolKind, lbl, alpha, beta]
+                      ; loc <- getSrcSpanM
+                      ; var <- emitWantedEvVar origin pred
+                      ; tcWrapResult e (fromDict pred (HsVar (L loc var))) (mkFunTy alpha beta) res_ty }
+                      }
   where
-  -- Coerces a dictionary for `IsLabel "x" t` into `t`.
+  -- Coerces a dictionary for `IsLabel "x" t` into `t`,
+  -- or `HasField "x" r a into `r -> a`.
   fromDict pred = HsWrap $ mkWpCastR $ unwrapIP pred
   origin = OverLabelOrigin l
+  lbl = mkStrLitTy l
 
 tcExpr (HsLam match) res_ty
   = do  { (match', wrap) <- tcMatchLambda herald match_ctxt match res_ty
@@ -263,18 +275,26 @@ tcExpr e@(ExprWithTySig expr sig_ty) res_ty
 {-
 Note [Type-checking overloaded labels]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Recall that (in GHC.OverloadedLabels) we have
+Recall that we have
 
-    class IsLabel (x :: Symbol) a where
+    class IsLabel (x :: Symbol) a where           -- in GHC.OverloadedLabels
       fromLabel :: a
 
-When we see an overloaded label like `#foo`, we generate a fresh
-variable `alpha` for the type and emit an `IsLabel "foo" alpha`
-constraint.  Because the `IsLabel` class has a single method, it is
-represented by a newtype, so we can coerce `IsLabel "foo" alpha` to
-`alpha` (just like for implicit parameters).
+    class HasField (x :: k) r a | x r -> a where  -- in GHC.Records
+      fromLabel :: r -> a
 
-That is, we translate `#foo` to `fromLabel @"foo"`.
+We translate `#foo` to `fromLabel @"foo"`, where we use
+
+ * `GHC.OverloadedLabels.fromLabel` if `OverloadedLabels` is enabled
+ * `GHC.Records.fromLabel` otherwise (`OverloadedRecordFields` must be enabled)
+
+In the first case, when we see an overloaded label like `#foo`, we
+generate a fresh variable `alpha` for the type and emit an
+`IsLabel "foo" alpha` constraint.  Because the `IsLabel` class has a
+single method, it is represented by a newtype, so we can coerce
+`IsLabel "foo" alpha` to `alpha` (just like for implicit parameters).
+The second case is similar, but we generate two fresh variables and
+emit a `HasField` constraint.
 -}
 
 

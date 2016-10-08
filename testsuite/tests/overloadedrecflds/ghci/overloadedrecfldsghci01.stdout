@@ -1,0 +1,5 @@
+#x :: GHC.Records.HasField "x" t2 t1 => t2 -> t1
+#foo . #bar
+  :: (HasField "foo" t1 c, HasField "bar" t2 t1) => t2 -> c
+42
+#x :: GHC.OverloadedLabels.IsLabel "x" t => t

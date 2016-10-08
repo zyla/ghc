@@ -1,0 +1,8 @@
+:set -XOverloadedRecordFields
+:t #x
+:m + GHC.Records
+:t #foo . #bar
+data T = MkT { foo :: Int }
+#foo (MkT 42)
+:set -XOverloadedLabels
+:t #x
