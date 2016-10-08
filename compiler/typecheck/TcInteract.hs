@@ -2237,7 +2237,7 @@ matchHasField dflags clas tys@[_k_ty, x_ty, r_ty, a_ty] loc
                where
                 co       = mkTcFunCo Nominal (mkTcReflCo Nominal r_ty)
                                              (evTermCoercion ev)
-                body     = mkHsWrap (mkWpCastN co <.> mkWpTyApps rep_tc_args)
+                body     = mkHsWrap (mkWpCastN co <.> mkWpTyApps (reverse rep_tc_args))
                                     (HsVar (noLoc sel_id))
                 ax       = case tcInstNewTyCon_maybe (classTyCon clas) tys of
                              Just x  -> snd x
