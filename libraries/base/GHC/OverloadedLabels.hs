@@ -1,6 +1,6 @@
-{-# LANGUAGE NoImplicitPrelude
+{-# LANGUAGE AllowAmbiguousTypes
+           , NoImplicitPrelude
            , MultiParamTypeClasses
-           , MagicHash
            , KindSignatures
            , DataKinds
   #-}
@@ -23,7 +23,7 @@
 -- The key idea is that when GHC sees an occurrence of the new
 -- overloaded label syntax @#foo@, it is replaced with
 --
--- > fromLabel (proxy# :: Proxy# "foo") :: alpha
+-- > fromLabel @"foo" :: alpha
 --
 -- plus a wanted constraint @IsLabel "foo" alpha@.
 --
@@ -42,7 +42,6 @@ module GHC.OverloadedLabels
        ) where
 
 import GHC.Base ( Symbol )
-import GHC.Exts ( Proxy# )
 
 class IsLabel (x :: Symbol) a where
-  fromLabel :: Proxy# x -> a
+  fromLabel :: a

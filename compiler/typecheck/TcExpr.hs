@@ -224,12 +224,9 @@ tcExpr e@(HsOverLabel l) res_ty  -- See Note [Type-checking overloaded labels]
              pred = mkClassPred isLabelClass [lbl, alpha]
        ; loc <- getSrcSpanM
        ; var <- emitWantedEvVar origin pred
-       ; let proxy_arg = L loc (mkHsWrap (mkWpTyApps [typeSymbolKind, lbl])
-                                         (HsVar (L loc proxyHashId)))
-             tm = L loc (fromDict pred (HsVar (L loc var))) `HsApp` proxy_arg
-       ; tcWrapResult e tm alpha res_ty }
+       ; tcWrapResult e (fromDict pred (HsVar (L loc var))) alpha res_ty }
   where
-  -- Coerces a dictionary for `IsLabel "x" t` into `Proxy# x -> t`.
+  -- Coerces a dictionary for `IsLabel "x" t` into `t`.
   fromDict pred = HsWrap $ mkWpCastR $ unwrapIP pred
   origin = OverLabelOrigin l
 
@@ -269,16 +266,15 @@ Note [Type-checking overloaded labels]
 Recall that (in GHC.OverloadedLabels) we have
 
     class IsLabel (x :: Symbol) a where
-      fromLabel :: Proxy# x -> a
+      fromLabel :: a
 
 When we see an overloaded label like `#foo`, we generate a fresh
 variable `alpha` for the type and emit an `IsLabel "foo" alpha`
 constraint.  Because the `IsLabel` class has a single method, it is
 represented by a newtype, so we can coerce `IsLabel "foo" alpha` to
-`Proxy# "foo" -> alpha` (just like for implicit parameters).  We then
-apply it to `proxy#` of type `Proxy# "foo"`.
+`alpha` (just like for implicit parameters).
 
-That is, we translate `#foo` to `fromLabel (proxy# :: Proxy# "foo")`.
+That is, we translate `#foo` to `fromLabel @"foo"`.
 -}
 
 
