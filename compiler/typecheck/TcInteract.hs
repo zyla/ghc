@@ -2166,13 +2166,21 @@ Note that
 
 so the expression we construct is
 
-    \ foo @Int |> co
+    foo @Int |> co
 
 where
 
-    co :: (T Int -> [Int]) ~# (T Int -> b)
+    co :: (T Int -> [Int]) ~# HasField "foo" (T Int) b
 
-is built from the new wanted ([Int] ~# b).
+is built from
+
+    co1 :: (T Int -> [Int]) ~# (T Int -> b)
+
+derived from the new wanted ([Int] ~# b) and
+
+    co2 :: (T Int -> b) ~# HasField "foo" (T Int) b
+
+derived from the newtype coercion.
 
 If `foo` is not in scope, higher-rank or existentially quantified then
 the constraint is not solved automatically, but may be solved by a
@@ -2233,13 +2241,12 @@ matchHasField dflags clas tys@[_k_ty, x_ty, r_ty, a_ty] loc
        ; addUsedGRE True gre
 
          -- Build evidence term as described in Note [HasField instances]
-       ; let mk_ev [ev] = EvExpr body `EvCast` mkTcSymCo ax
+       ; let mk_ev [ev] = EvSelector sel_id (reverse rep_tc_args) `EvCast` co
                where
-                co       = mkTcFunCo Nominal (mkTcReflCo Nominal r_ty)
+                co       = mkTcSubCo co1 `mkTcTransCo` mkTcSymCo co2
+                co1      = mkTcFunCo Nominal (mkTcNomReflCo r_ty)
                                              (evTermCoercion ev)
-                body     = mkHsWrap (mkWpCastN co <.> mkWpTyApps (reverse rep_tc_args))
-                                    (HsVar (noLoc sel_id))
-                ax       = case tcInstNewTyCon_maybe (classTyCon clas) tys of
+                co2      = case tcInstNewTyCon_maybe (classTyCon clas) tys of
                              Just x  -> snd x
                              Nothing -> panic "HasField not a newtype"
              mk_ev _ = panic "matchHasField.mk_ev"

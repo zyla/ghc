@@ -1086,7 +1086,6 @@ dsEvTerm (EvCallStack cs)   = dsEvCallStack cs
 dsEvTerm (EvTypeable ty ev) = dsEvTypeable ty ev
 dsEvTerm (EvLit (EvNum n))  = mkIntegerExpr n
 dsEvTerm (EvLit (EvStr s))  = mkStringExprFS s
-dsEvTerm (EvExpr e)         = dsExpr e
 
 dsEvTerm (EvCast tm co)
   = do { tm' <- dsEvTerm tm
@@ -1102,6 +1101,9 @@ dsEvTerm (EvSuperClass d n)
        ; let (cls, tys) = getClassPredTys (exprType d')
              sc_sel_id  = classSCSelId cls n    -- Zero-indexed
        ; return $ Var sc_sel_id `mkTyApps` tys `App` d' }
+
+dsEvTerm (EvSelector sel_id tys)
+  = return $ Var sel_id `mkTyApps` tys
 
 dsEvTerm (EvDelayedError ty msg) = return $ dsEvDelayedError ty msg
 
