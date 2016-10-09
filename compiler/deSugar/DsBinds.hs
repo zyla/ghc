@@ -18,7 +18,7 @@ module DsBinds ( dsTopLHsBinds, dsLHsBinds, decomposeRuleLhs, dsSpec,
 
 #include "HsVersions.h"
 
-import {-# SOURCE #-}   DsExpr( dsExpr, dsLExpr )
+import {-# SOURCE #-}   DsExpr( dsLExpr )
 import {-# SOURCE #-}   Match( matchWrapper )
 
 import DsMonad

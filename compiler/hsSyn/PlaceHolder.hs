@@ -16,7 +16,7 @@ import Coercion
 import ConLike (ConLike)
 import FieldLabel
 import SrcLoc (Located)
-import {-# SOURCE #-} TcEvidence ( HsWrapper )
+import TcEvidence ( HsWrapper )
 
 import Data.Data hiding ( Fixity )
 import BasicTypes       (Fixity)
