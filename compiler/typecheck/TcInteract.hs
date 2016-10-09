@@ -9,7 +9,7 @@ module TcInteract (
 
 #include "HsVersions.h"
 
-import BasicTypes ( infinity, IntWithInf, intGtLimit, Origin(Generated) )
+import BasicTypes ( infinity, IntWithInf, intGtLimit )
 import HsTypes ( HsIPName(..) )
 import TcCanonical
 import TcFlatten
@@ -29,7 +29,7 @@ import PrelNames ( knownNatClassName, knownSymbolClassName,
                    heqTyConKey, ipClassKey )
 import TysWiredIn ( typeNatKind, typeSymbolKind, heqDataCon,
                     coercibleDataCon )
-import TysPrim    ( eqPrimTyCon, eqReprPrimTyCon, mkProxyPrimTy )
+import TysPrim    ( eqPrimTyCon, eqReprPrimTyCon )
 import Id( idType, isNaughtyRecordSelector )
 import CoAxiom ( Eqn, CoAxiom(..), CoAxBranch(..), fromBranches )
 import Class
@@ -40,11 +40,6 @@ import FunDeps
 import FamInst
 import FamInstEnv
 import Unify ( tcUnifyTyWithTFs )
-
-import HsBinds ( emptyLocalBinds )
-import HsExpr
-import HsPat ( Pat(WildPat) )
-import HsUtils ( mkHsWrap )
 
 import TcEvidence
 import Outputable

@@ -27,7 +27,5 @@ module GHC.Records
        ( HasField(..)
        ) where
 
-import GHC.Base ( Symbol )
-
 class HasField (x :: k) r a | x r -> a where
   fromLabel :: r -> a

@@ -33,7 +33,6 @@ import TcSimplify       ( simplifyInfer, InferMode(..) )
 import FamInst          ( tcGetFamInstEnvs, tcLookupDataFamInst )
 import FamInstEnv       ( FamInstEnvs )
 import RnEnv            ( addUsedGRE, addNameClashErrRn
-                        , lookupOccRn
                         , unknownSubordinateErr )
 import TcEnv
 import TcArrows
@@ -62,7 +61,6 @@ import TysWiredIn
 import TysPrim( intPrimTy )
 import PrimOp( tagToEnumKey )
 import PrelNames
-import MkId ( proxyHashId )
 import DynFlags
 import SrcLoc
 import Util
