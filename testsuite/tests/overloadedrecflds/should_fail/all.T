@@ -36,3 +36,4 @@ test('hasfieldfail01',
      extra_clean(['HasFieldFail01_A.hi', 'HasFieldFail01_A.o']),
      multimod_compile_fail, ['hasfieldfail01', ''])
 test('hasfieldfail02', normal, compile_fail, [''])
+test('hasfieldfail03', normal, compile_fail, [''])

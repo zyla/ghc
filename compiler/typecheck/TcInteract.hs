@@ -39,7 +39,6 @@ import FieldLabel
 import FunDeps
 import FamInst
 import FamInstEnv
-import FastStringEnv ( lookupDFsEnv )
 import Unify ( tcUnifyTyWithTFs )
 
 import HsBinds ( emptyLocalBinds )
@@ -2203,7 +2202,7 @@ matchHasField dflags clas tys@[_k_ty, x_ty, r_ty, a_ty] loc
 
          -- Check that the field belongs to the tycon, and get its
          -- selector name from the FieldLabel
-       ; case lookupDFsEnv (tyConFieldLabelEnv rep_tycon) x of
+       ; case lookupTyConFieldLabel x rep_tycon of
            Nothing -> matchInstEnv dflags clas tys loc
            Just fl -> do {
 
