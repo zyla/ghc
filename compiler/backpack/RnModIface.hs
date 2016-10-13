@@ -241,6 +241,18 @@ rnIfaceGlobal n = do
             let nsubst = mkNameShape (moduleName m) (mi_exports iface)
             return (substNameShape nsubst n)
 
+-- | Rename a DFun name. Here is where we ensure that DFuns have the correct
+-- module as described in Note [Bogus DFun renamings].
+rnIfaceDFun :: Name -> ShIfM Name
+rnIfaceDFun name = do
+    hmap <- getHoleSubst
+    dflags <- getDynFlags
+    iface_semantic_mod <- fmap sh_if_semantic_module getGblEnv
+    let m = renameHoleModule dflags hmap $ nameModule name
+    -- Doublecheck that this DFun was, indeed, locally defined.
+    MASSERT2( iface_semantic_mod == m, ppr iface_semantic_mod <+> ppr m )
+    setNameModule (Just m) name
+
 -- PILES AND PILES OF BOILERPLATE
 
 -- | Rename an 'IfaceClsInst', with special handling for an associated
@@ -249,9 +261,6 @@ rnIfaceClsInst :: Rename IfaceClsInst
 rnIfaceClsInst cls_inst = do
     n <- rnIfaceGlobal (ifInstCls cls_inst)
     tys <- mapM rnMaybeIfaceTyCon (ifInstTys cls_inst)
-
-    hmap <- getHoleSubst
-    dflags <- getDynFlags
 
     -- Note [Bogus DFun renamings]
     -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -312,12 +321,7 @@ rnIfaceClsInst cls_inst = do
     --    are unique; for instantiation, the final interface never
     --    mentions DFuns since they are implicitly exported.)  The
     --    important thing is that it's consistent everywhere.
-
-    iface_semantic_mod <- fmap sh_if_semantic_module getGblEnv
-    let m = renameHoleModule dflags hmap $ nameModule (ifDFun cls_inst)
-    -- Doublecheck that this DFun was, indeed, locally defined.
-    MASSERT2( iface_semantic_mod == m, ppr iface_semantic_mod <+> ppr m )
-    dfun <- setNameModule (Just m) (ifDFun cls_inst)
+    dfun <- rnIfaceDFun (ifDFun cls_inst)
     return cls_inst { ifInstCls = n
                     , ifInstTys = tys
                     , ifDFun = dfun
@@ -339,7 +343,9 @@ rnIfaceDecl' (fp, decl) = (,) fp <$> rnIfaceDecl decl
 
 rnIfaceDecl :: Rename IfaceDecl
 rnIfaceDecl d@IfaceId{} = do
-            name <- rnIfaceGlobal (ifName d)
+            name <- case ifIdDetails d of
+                      IfDFunId -> rnIfaceDFun (ifName d)
+                      _        -> rnIfaceGlobal (ifName d)
             ty <- rnIfaceType (ifType d)
             details <- rnIfaceIdDetails (ifIdDetails d)
             info <- rnIfaceIdInfo (ifIdInfo d)
@@ -464,6 +470,7 @@ rnIfaceConDecl d = do
              , ifConEqSpec = con_eq_spec
              , ifConCtxt = con_ctxt
              , ifConArgTys = con_arg_tys
+             , ifConFields = con_fields
              , ifConStricts = con_stricts
              }
 
