@@ -154,7 +154,7 @@ lookupOrig mod occ
                 --      which does some stuff that modifies the name cache
                 -- This did happen, with tycon_mod in TcIface.tcIfaceAlt (DataAlt..)
           mod `seq` occ `seq` return ()
---      ; traceIf (text "lookup_orig" <+> ppr mod <+> ppr occ)
+        ; traceIf (text "lookup_orig" <+> ppr mod <+> ppr occ)
 
         ; updNameCache $ \name_cache ->
           case lookupOrigNameCache (nsNames name_cache) mod occ of {
