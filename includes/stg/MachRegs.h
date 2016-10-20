@@ -82,7 +82,7 @@
    Leaving SpLim out of the picture.
    -------------------------------------------------------------------------- */
 
-#if MACHREGS_i386
+#if defined(MACHREGS_i386) && MACHREGS_i386
 
 #define REG(x) __asm__("%" #x)
 
@@ -156,7 +156,7 @@
 
   --------------------------------------------------------------------------- */
 
-#elif MACHREGS_x86_64
+#elif defined(MACHREGS_x86_64) && MACHREGS_x86_64
 
 #define REG(x) __asm__("%" #x)
 
@@ -213,7 +213,7 @@ the stack. See Note [Overlapping global registers] for implications.
 #define REG_ZMM5    zmm5
 #define REG_ZMM6    zmm6
 
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 #define CALLER_SAVES_R3
 #define CALLER_SAVES_R4
 #endif
@@ -225,7 +225,7 @@ the stack. See Note [Overlapping global registers] for implications.
 #define CALLER_SAVES_F3
 #define CALLER_SAVES_F4
 #define CALLER_SAVES_F5
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 #define CALLER_SAVES_F6
 #endif
 
@@ -234,7 +234,7 @@ the stack. See Note [Overlapping global registers] for implications.
 #define CALLER_SAVES_D3
 #define CALLER_SAVES_D4
 #define CALLER_SAVES_D5
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 #define CALLER_SAVES_D6
 #endif
 
@@ -243,7 +243,7 @@ the stack. See Note [Overlapping global registers] for implications.
 #define CALLER_SAVES_XMM3
 #define CALLER_SAVES_XMM4
 #define CALLER_SAVES_XMM5
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 #define CALLER_SAVES_XMM6
 #endif
 
@@ -252,7 +252,7 @@ the stack. See Note [Overlapping global registers] for implications.
 #define CALLER_SAVES_YMM3
 #define CALLER_SAVES_YMM4
 #define CALLER_SAVES_YMM5
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 #define CALLER_SAVES_YMM6
 #endif
 
@@ -261,7 +261,7 @@ the stack. See Note [Overlapping global registers] for implications.
 #define CALLER_SAVES_ZMM3
 #define CALLER_SAVES_ZMM4
 #define CALLER_SAVES_ZMM5
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 #define CALLER_SAVES_ZMM6
 #endif
 
@@ -303,7 +303,7 @@ the stack. See Note [Overlapping global registers] for implications.
    We can do the Whole Business with callee-save registers only!
    -------------------------------------------------------------------------- */
 
-#elif MACHREGS_powerpc
+#elif defined(MACHREGS_powerpc) && MACHREGS_powerpc
 
 #define REG(x) __asm__(#x)
 
@@ -442,7 +442,7 @@ the stack. See Note [Overlapping global registers] for implications.
 
    -------------------------------------------------------------------------- */
 
-#elif MACHREGS_sparc
+#elif defined(MACHREGS_sparc) && MACHREGS_sparc
 
 #define REG(x) __asm__("%" #x)
 
@@ -521,7 +521,7 @@ the stack. See Note [Overlapping global registers] for implications.
    d16-d31/q8-q15        Argument / result/ scratch registers
    ----------------------------------------------------------------------------- */
 
-#elif MACHREGS_arm
+#elif defined(MACHREGS_arm) && MACHREGS_arm
 
 #define REG(x) __asm__(#x)
 
@@ -534,7 +534,7 @@ the stack. See Note [Overlapping global registers] for implications.
 #define REG_R4          r10
 #define REG_SpLim       r11
 
-#if !defined(arm_HOST_ARCH_PRE_ARMv6)
+#if !arm_HOST_ARCH_PRE_ARMv6
 /* d8 */
 #define REG_F1    s16
 #define REG_F2    s17
@@ -578,7 +578,7 @@ the stack. See Note [Overlapping global registers] for implications.
 
    ----------------------------------------------------------------------------- */
 
-#elif MACHREGS_aarch64
+#elif defined(MACHREGS_aarch64) && MACHREGS_aarch64
 
 #define REG(x) __asm__(#x)
 

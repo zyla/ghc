@@ -32,7 +32,7 @@
 #include "Capability.h"
 #include "Task.h"
 #include "AwaitEvent.h"
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 #include "win32/IOManager.h"
 #endif
 #include "Trace.h"
@@ -99,7 +99,7 @@ volatile StgWord sched_state = SCHED_RUNNING;
 Mutex sched_mutex;
 #endif
 
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 #define FORKPROCESS_PRIMOP_SUPPORTED
 #endif
 
@@ -301,7 +301,7 @@ schedule (Capability *initialCapability, Task *task)
     if (emptyRunQueue(cap)) continue; // look for work again
 #endif
 
-#if !defined(THREADED_RTS) && !defined(mingw32_HOST_OS)
+#if !defined(THREADED_RTS) && !mingw32_HOST_OS
     if ( emptyRunQueue(cap) ) {
         ASSERT(sched_state >= SCHED_INTERRUPTING);
     }
@@ -595,7 +595,7 @@ schedulePreLoop(void)
 {
   // initialisation for scheduler - what cannot go into initScheduler()
 
-#if defined(mingw32_HOST_OS) && !defined(USE_MINIINTERPRETER)
+#if mingw32_HOST_OS && !defined(USE_MINIINTERPRETER)
     win32AllocStack();
 #endif
 }

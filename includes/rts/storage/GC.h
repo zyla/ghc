@@ -194,7 +194,7 @@ typedef void* AdjustorExecutable;
 
 AdjustorWritable allocateExec(W_ len, AdjustorExecutable *exec_addr);
 void flushExec(W_ len, AdjustorExecutable exec_addr);
-#if defined(ios_HOST_OS)
+#if ios_HOST_OS
 AdjustorWritable execToWritable(AdjustorExecutable exec);
 #endif
 void             freeExec (AdjustorExecutable p);

@@ -112,7 +112,7 @@ vdebugBelch(const char*s, va_list ap)
 
 #define BUFSIZE 512
 
-#if defined (mingw32_HOST_OS)
+#if mingw32_HOST_OS
 static int
 isGUIApp(void)
 {
@@ -137,7 +137,7 @@ isGUIApp(void)
 void GNU_ATTRIBUTE(__noreturn__)
 rtsFatalInternalErrorFn(const char *s, va_list ap)
 {
-#if defined (mingw32_HOST_OS)
+#if mingw32_HOST_OS
   if (isGUIApp())
   {
      char title[BUFSIZE], message[BUFSIZE];
@@ -186,7 +186,7 @@ rtsFatalInternalErrorFn(const char *s, va_list ap)
 void
 rtsErrorMsgFn(const char *s, va_list ap)
 {
-#if defined (mingw32_HOST_OS)
+#if mingw32_HOST_OS
   if (isGUIApp())
   {
      char buf[BUFSIZE];
@@ -218,7 +218,7 @@ rtsSysErrorMsgFn(const char *s, va_list ap)
 {
     char *syserr;
 
-#if defined (mingw32_HOST_OS)
+#if mingw32_HOST_OS
     FormatMessage(
         FORMAT_MESSAGE_ALLOCATE_BUFFER |
         FORMAT_MESSAGE_FROM_SYSTEM |
@@ -257,7 +257,7 @@ rtsSysErrorMsgFn(const char *s, va_list ap)
         }
         vfprintf(stderr, s, ap);
         if (syserr) {
-#if defined (mingw32_HOST_OS)
+#if mingw32_HOST_OS
             // Win32 error messages have a terminating \n
             fprintf(stderr, ": %s", syserr);
 #else
@@ -268,7 +268,7 @@ rtsSysErrorMsgFn(const char *s, va_list ap)
         }
     }
 
-#if defined (mingw32_HOST_OS)
+#if mingw32_HOST_OS
     if (syserr) LocalFree(syserr);
 #endif
 }
@@ -276,7 +276,7 @@ rtsSysErrorMsgFn(const char *s, va_list ap)
 void
 rtsDebugMsgFn(const char *s, va_list ap)
 {
-#if defined (mingw32_HOST_OS)
+#if mingw32_HOST_OS
   if (isGUIApp())
   {
      char buf[BUFSIZE];

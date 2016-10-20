@@ -20,7 +20,7 @@
 // that no #ifdefs are needed around the usage of these macros.
 
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 #include "win32/veh_excn.h"
 
 #define BEGIN_WINDOWS_VEH_HANDLER __register_hs_exception_handler();

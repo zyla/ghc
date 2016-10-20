@@ -19,7 +19,7 @@
 #include "sm/Sanity.h"
 #include "Profiling.h"
 #include "Messages.h"
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 #include "win32/IOManager.h"
 #endif
 
@@ -467,7 +467,7 @@ check_target:
     case BlockedOnRead:
     case BlockedOnWrite:
     case BlockedOnDelay:
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
     case BlockedOnDoProc:
 #endif
         if ((target->flags & TSO_BLOCKEX) &&
@@ -710,11 +710,11 @@ removeFromQueues(Capability *cap, StgTSO *tso)
 #if !defined(THREADED_RTS)
   case BlockedOnRead:
   case BlockedOnWrite:
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
   case BlockedOnDoProc:
 #endif
       removeThreadFromDeQueue(cap, &blocked_queue_hd, &blocked_queue_tl, tso);
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
       /* (Cooperatively) signal that the worker thread should abort
        * the request.
        */

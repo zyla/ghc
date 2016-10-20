@@ -28,7 +28,7 @@
 #include "RtsUtils.h"
 #include "sm/OSMem.h"
 
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 #include "rts/IOManager.h" // for setIOManagerControlFd()
 #endif
 
@@ -274,7 +274,7 @@ initCapability (Capability *cap, uint32_t i)
     cap->spark_stats.converted  = 0;
     cap->spark_stats.gcd        = 0;
     cap->spark_stats.fizzled    = 0;
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
     cap->io_manager_control_wr_fd = -1;
 #endif
 #endif
@@ -1226,7 +1226,7 @@ rtsBool checkSparkCountInvariant (void)
 }
 #endif
 
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 void
 setIOManagerControlFd(uint32_t cap_no USED_IF_THREADS, int fd USED_IF_THREADS) {
 #if defined(THREADED_RTS)

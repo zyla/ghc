@@ -241,7 +241,7 @@ initEventLogging(void)
 
     prog = stgMallocBytes(strlen(prog_name) + 1, "initEventLogging");
     strcpy(prog, prog_name);
-#ifdef mingw32_HOST_OS
+#if mingw32_HOST_OS
     // on Windows, drop the .exe suffix if there is one
     {
         char *suff;

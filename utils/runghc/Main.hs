@@ -25,7 +25,7 @@ import System.Exit
 import System.FilePath
 import System.IO
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 import System.Process (rawSystem)
 import Foreign
 import Foreign.C.String
@@ -33,10 +33,10 @@ import Foreign.C.String
 import System.Posix.Process (executeFile)
 #endif
 
-#if defined(mingw32_HOST_OS)
-# if defined(i386_HOST_ARCH)
+#if mingw32_HOST_OS
+# if i386_HOST_ARCH
 #  define WINDOWS_CCONV stdcall
-# elif defined(x86_64_HOST_ARCH)
+# elif x86_64_HOST_ARCH
 #  define WINDOWS_CCONV ccall
 # else
 #  error Unknown mingw32 arch
@@ -190,7 +190,7 @@ dieProg msg = do
 -- usage = "syntax: runghc [-f GHC-PATH | --] [GHC-ARGS] [--] FILE ARG..."
 
 getExecPath :: IO (Maybe String)
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 getExecPath = try_size 2048 -- plenty, PATH_MAX is 512 under Win32.
   where
     try_size size = allocaArray (fromIntegral size) $ \buf -> do

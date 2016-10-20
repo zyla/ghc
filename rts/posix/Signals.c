@@ -18,8 +18,8 @@
 #include "Stable.h"
 #include "Libdw.h"
 
-#ifdef alpha_HOST_ARCH
-# if defined(linux_HOST_OS)
+#if alpha_HOST_ARCH
+# if linux_HOST_OS
 #  include <asm/fpu.h>
 # else
 #  include <machine/fpu.h>
@@ -706,7 +706,7 @@ initDefaultHandlers(void)
     }
 #endif
 
-#ifdef alpha_HOST_ARCH
+#if alpha_HOST_ARCH
     ieee_set_fp_control(0);
 #endif
 

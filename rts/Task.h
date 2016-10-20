@@ -269,9 +269,9 @@ extern uint32_t peakWorkerCount;
 // A thread-local-storage key that we can use to get access to the
 // current thread's Task structure.
 #if defined(THREADED_RTS)
-#if ((defined(linux_HOST_OS) && \
-     (defined(i386_HOST_ARCH) || defined(x86_64_HOST_ARCH))) || \
-    (defined(mingw32_HOST_OS) && __GNUC__ >= 4 && __GNUC_MINOR__ >= 4)) && \
+#if ((linux_HOST_OS && \
+     (i386_HOST_ARCH || x86_64_HOST_ARCH)) || \
+    (mingw32_HOST_OS && __GNUC__ >= 4 && __GNUC_MINOR__ >= 4)) && \
     (!defined(llvm_CC_FLAVOR))
 #define MYTASK_USE_TLV
 extern __thread Task *my_task;
@@ -322,7 +322,7 @@ typedef StgWord64 TaskId;
 //
 #if defined(THREADED_RTS)
 INLINE_HEADER TaskId serialiseTaskId (OSThreadId taskID) {
-#if defined(freebsd_HOST_OS) || defined(darwin_HOST_OS)
+#if freebsd_HOST_OS || darwin_HOST_OS
     // Here OSThreadId is a pthread_t and pthread_t is a pointer, but within
     // the process we can still use that pointer value as a unique id.
     return (TaskId) (size_t) taskID;

@@ -14,7 +14,7 @@
 #ifndef RTS_LINKER_H
 #define RTS_LINKER_H
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 typedef wchar_t pathchar;
 #define PATH_FMT "ls"
 #else

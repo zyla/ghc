@@ -6,7 +6,7 @@
 
 #define ITERATIONS 1000
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 #define OBJPATH L"Test.o"
 #else
 #define OBJPATH "Test.o"

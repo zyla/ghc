@@ -246,7 +246,7 @@ initProfilingLogFile(void)
 
     prog = arenaAlloc(prof_arena, strlen(prog_name) + 1);
     strcpy(prog, prog_name);
-#ifdef mingw32_HOST_OS
+#if mingw32_HOST_OS
     // on Windows, drop the .exe suffix if there is one
     {
         char *suff;

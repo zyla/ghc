@@ -6,7 +6,7 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#include "ghcplatform.h"
+#include "MachineDefines.h"
 #include "RtsSymbols.h"
 
 #include "Rts.h"
@@ -14,11 +14,11 @@
 
 #include "sm/Storage.h"
 
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 #include "posix/Signals.h"
 #endif
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 #include <sys/stat.h>
 #include <io.h>
 #include <windows.h>
@@ -43,7 +43,7 @@
       SymE_HasProto(libdwPoolRelease)           \
       SymE_HasProto(libdwPoolClear)
 
-#if !defined (mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 #define RTS_POSIX_ONLY_SYMBOLS                  \
       SymI_HasProto(__hscore_get_saved_termios) \
       SymI_HasProto(__hscore_set_saved_termios) \
@@ -55,16 +55,16 @@
       SymI_NeedsDataProto(nocldstop)
 #endif
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 #define RTS_POSIX_ONLY_SYMBOLS  /**/
 
-#if defined(i386_HOST_ARCH)
+#if i386_HOST_ARCH
 #define RTS_WIN32_ONLY(X) X
 #else
 #define RTS_WIN32_ONLY(X) /**/
 #endif
 
-#if defined(x86_64_HOST_ARCH)
+#if x86_64_HOST_ARCH
 #define RTS_WIN64_ONLY(X) X
 #else
 #define RTS_WIN64_ONLY(X) /**/
@@ -202,7 +202,7 @@
 #endif
 
 
-#if defined(darwin_HOST_OS) && HAVE_PRINTF_LDBLSTUB
+#if darwin_HOST_OS && HAVE_PRINTF_LDBLSTUB
 #define RTS_DARWIN_ONLY_SYMBOLS                             \
      SymI_NeedsProto(asprintf$LDBLStub)                     \
      SymI_NeedsProto(err$LDBLStub)                          \
@@ -252,7 +252,7 @@
 #define RTS_DARWIN_ONLY_SYMBOLS
 #endif
 
-#if defined(openbsd_HOST_OS)
+#if openbsd_HOST_OS
 #define RTS_OPENBSD_ONLY_SYMBOLS                            \
      SymE_NeedsProto(__guard_local)                         \
      SymE_NeedsProto(_DYNAMIC)
@@ -266,7 +266,7 @@
 # define MAIN_CAP_SYM
 #endif
 
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 #define RTS_USER_SIGNALS_SYMBOLS        \
    SymI_HasProto(setIOManagerControlFd) \
    SymI_HasProto(setTimerManagerControlFd) \
@@ -896,7 +896,7 @@
 #define RTS_LIBGCC_SYMBOLS
 #endif
 
-#if defined(darwin_HOST_OS) && defined(powerpc_HOST_ARCH)
+#if darwin_HOST_OS && powerpc_HOST_ARCH
       // Symbols that don't have a leading underscore
       // on Mac OS X. They have to receive special treatment,
       // see machoInitSymbolsWithoutUnderscore()
@@ -910,7 +910,7 @@
 #define SymI_NeedsDataProto(vvv)  extern StgWord vvv[];
 #if defined(COMPILING_WINDOWS_DLL)
 #define SymE_HasProto(vvv)    SymE_HasProto(vvv);
-#  if defined(x86_64_HOST_ARCH)
+#  if x86_64_HOST_ARCH
 #    define SymE_NeedsProto(vvv)    extern void __imp_ ## vvv (void);
 #    define SymE_NeedsDataProto(vvv) SymE_NeedsProto(vvv)
 #  else
@@ -980,7 +980,7 @@ RtsSymbolVal rtsSyms[] = {
       RTS_OPENBSD_ONLY_SYMBOLS
       RTS_LIBGCC_SYMBOLS
       RTS_LIBFFI_SYMBOLS
-#if defined(darwin_HOST_OS) && defined(i386_HOST_ARCH)
+#if darwin_HOST_OS && i386_HOST_ARCH
       // dyld stub code contains references to this,
       // but it should never be called because we treat
       // lazy pointers as nonlazy.

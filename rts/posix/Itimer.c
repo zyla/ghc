@@ -25,7 +25,7 @@
  * a pthreads-based implementation. It may be to do with interference with the
  * signals of the debugger. Revisit. See #7723.
  */
-#if defined(ios_HOST_OS)
+#if ios_HOST_OS
 #define USE_PTHREAD_FOR_ITIMER
 #endif
 
@@ -35,12 +35,12 @@
  * interrupting syscalls (see #10840) and the risk of being accidentally
  * modified in user code using signals.
  */
-#if defined(linux_HOST_OS) && defined(THREADED_RTS) && HAVE_SYS_TIMERFD_H
+#if linux_HOST_OS && defined(THREADED_RTS) && HAVE_SYS_TIMERFD_H
 #define USE_PTHREAD_FOR_ITIMER
 #endif
 
 
-#if defined(solaris2_HOST_OS)
+#if solaris2_HOST_OS
 /* USE_TIMER_CREATE is usually disabled for Solaris. In fact it is
    supported well on this OS, but requires additional privilege. When
    user does not have it, then the testing configure program fails

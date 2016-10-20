@@ -33,7 +33,7 @@ import CLOSURE base_ControlziExceptionziBase_nestedAtomically_closure;
 import EnterCriticalSection;
 import LeaveCriticalSection;
 import CLOSURE ghczmprim_GHCziTypes_False_closure;
-#if defined(USE_MINIINTERPRETER) || !defined(mingw32_HOST_OS)
+#if defined(USE_MINIINTERPRETER) || !mingw32_HOST_OS
 import CLOSURE sm_mutex;
 #endif
 #ifdef PROFILING
@@ -561,7 +561,7 @@ stg_atomicModifyMutVarzh ( gcptr mv, gcptr f )
          r = [stg_sel_1 z]   (max (HS + 1) MIN_UPD_SIZE)
     */
 
-#if MIN_UPD_SIZE > 1
+#if defined(MIN_UPD_SIZE) && MIN_UPD_SIZE > 1
 #define THUNK_1_SIZE (SIZEOF_StgThunkHeader + WDS(MIN_UPD_SIZE))
 #define TICK_ALLOC_THUNK_1() TICK_ALLOC_UP_THK(WDS(1),WDS(MIN_UPD_SIZE-1))
 #else
@@ -569,7 +569,7 @@ stg_atomicModifyMutVarzh ( gcptr mv, gcptr f )
 #define TICK_ALLOC_THUNK_1() TICK_ALLOC_UP_THK(WDS(1),0)
 #endif
 
-#if MIN_UPD_SIZE > 2
+#if defined(MIN_UPD_SIZE) && MIN_UPD_SIZE > 2
 #define THUNK_2_SIZE (SIZEOF_StgThunkHeader + WDS(MIN_UPD_SIZE))
 #define TICK_ALLOC_THUNK_2() TICK_ALLOC_UP_THK(WDS(2),WDS(MIN_UPD_SIZE-2))
 #else
@@ -2236,7 +2236,7 @@ stg_waitWritezh ( W_ fd )
 STRING(stg_delayzh_malloc_str, "stg_delayzh")
 stg_delayzh ( W_ us_delay )
 {
-#ifdef mingw32_HOST_OS
+#if mingw32_HOST_OS
     W_ ares;
     CInt reqID;
 #else
@@ -2250,7 +2250,7 @@ stg_delayzh ( W_ us_delay )
     ASSERT(StgTSO_why_blocked(CurrentTSO) == NotBlocked::I16);
     StgTSO_why_blocked(CurrentTSO) = BlockedOnDelay::I16;
 
-#ifdef mingw32_HOST_OS
+#if mingw32_HOST_OS
 
     /* could probably allocate this on the heap instead */
     ("ptr" ares) = ccall stgMallocBytes(SIZEOF_StgAsyncIOResult,
@@ -2298,7 +2298,7 @@ while:
 }
 
 
-#ifdef mingw32_HOST_OS
+#if mingw32_HOST_OS
 STRING(stg_asyncReadzh_malloc_str, "stg_asyncReadzh")
 stg_asyncReadzh ( W_ fd, W_ is_sock, W_ len, W_ buf )
 {

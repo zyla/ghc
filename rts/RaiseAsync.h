@@ -64,7 +64,7 @@ interruptible(StgTSO *t)
   case BlockedOnMsgThrowTo:
   case BlockedOnRead:
   case BlockedOnWrite:
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
   case BlockedOnDoProc:
 #endif
   case BlockedOnDelay:

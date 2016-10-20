@@ -4,7 +4,6 @@ for various bits of the RTS.  They are linked
 in instead of the defaults.
 */
 
-#include "../rts/PosixSource.h"
 #include "Rts.h"
 
 #include "HsFFI.h"

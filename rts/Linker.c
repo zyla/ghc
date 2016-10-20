@@ -29,7 +29,7 @@
 #include "sm/OSMem.h"
 #include "linker/M32Alloc.h"
 
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 #include "posix/Signals.h"
 #endif
 
@@ -59,30 +59,30 @@
  * displacements and therefore need jump islands contiguous with each object
  * code module.
  */
-#if defined(powerpc_HOST_ARCH)
+#if powerpc_HOST_ARCH
 #define SHORT_REL_BRANCH 1
 #endif
-#if defined(arm_HOST_ARCH)
+#if arm_HOST_ARCH
 #define SHORT_REL_BRANCH 1
 #endif
 
-#if (RTS_LINKER_USE_MMAP && defined(SHORT_REL_BRANCH) && defined(linux_HOST_OS))
+#if (RTS_LINKER_USE_MMAP && defined(SHORT_REL_BRANCH) && linux_HOST_OS)
 #define USE_CONTIGUOUS_MMAP 1
 #else
 #define USE_CONTIGUOUS_MMAP 0
 #endif
 
-#if defined(linux_HOST_OS) || defined(solaris2_HOST_OS) || defined(freebsd_HOST_OS) || defined(kfreebsdgnu_HOST_OS) || defined(dragonfly_HOST_OS) || defined(netbsd_HOST_OS) || defined(openbsd_HOST_OS) || defined(gnu_HOST_OS)
+#if linux_HOST_OS || solaris2_HOST_OS || freebsd_HOST_OS || kfreebsdgnu_HOST_OS || dragonfly_HOST_OS || netbsd_HOST_OS || openbsd_HOST_OS || gnu_HOST_OS
 #  define OBJFORMAT_ELF
 #  include <regex.h>    // regex is already used by dlopen() so this is OK
                         // to use here without requiring an additional lib
-#elif defined (mingw32_HOST_OS)
+#elif mingw32_HOST_OS
 #  define OBJFORMAT_PEi386
 #  include <windows.h>
 #  include <shfolder.h> /* SHGetFolderPathW */
 #  include <math.h>
 #  include <wchar.h>
-#elif defined(darwin_HOST_OS)
+#elif darwin_HOST_OS
 #  define OBJFORMAT_MACHO
 #  include <regex.h>
 #  include <mach/machine.h>
@@ -90,19 +90,19 @@
 #  include <mach-o/loader.h>
 #  include <mach-o/nlist.h>
 #  include <mach-o/reloc.h>
-#if defined(powerpc_HOST_ARCH)
+#if powerpc_HOST_ARCH
 #  include <mach-o/ppc/reloc.h>
 #endif
-#if defined(x86_64_HOST_ARCH)
+#if x86_64_HOST_ARCH
 #  include <mach-o/x86_64/reloc.h>
 #endif
 #endif
 
-#if defined(x86_64_HOST_ARCH) && defined(darwin_HOST_OS)
+#if x86_64_HOST_ARCH && darwin_HOST_OS
 #define ALWAYS_PIC
 #endif
 
-#if defined(dragonfly_HOST_OS)
+#if dragonfly_HOST_OS
 #include <sys/tls.h>
 #endif
 
@@ -232,7 +232,7 @@ static ObjectCode* mkOc( pathchar *path, char *image, int imageSize,
                        );
 
 // Use wchar_t for pathnames on Windows (#5697)
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 #define pathcmp wcscmp
 #define pathlen wcslen
 #define pathopen _wfopen
@@ -256,7 +256,7 @@ static ObjectCode* mkOc( pathchar *path, char *image, int imageSize,
 static pathchar* pathdup(pathchar *path)
 {
     pathchar *ret;
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
     ret = wcsdup(path);
 #else
     /* sigh, strdup() isn't a POSIX function, so do it the long way */
@@ -269,7 +269,7 @@ static pathchar* pathdup(pathchar *path)
 static pathchar* pathdir(pathchar *path)
 {
     pathchar *ret;
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
     pathchar *drive, *dirName;
     size_t memberLen = pathlen(path) + 1;
     dirName = stgMallocBytes(pathsize * memberLen, "pathdir(path)");
@@ -292,7 +292,7 @@ static pathchar* pathdir(pathchar *path)
 
 static pathchar* mkPath(char* path)
 {
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
     size_t required = mbstowcs(NULL, path, 0);
     pathchar *ret = stgMallocBytes(sizeof(pathchar) * (required + 1), "mkPath");
     if (mbstowcs(ret, path, required) == (size_t)-1)
@@ -324,7 +324,7 @@ static int ocResolve_PEi386     ( ObjectCode* oc );
 static int ocRunInit_PEi386     ( ObjectCode* oc );
 static void *lookupSymbolInDLLs ( unsigned char *lbl );
 /* See Note [mingw-w64 name decoration scheme] */
-#ifndef x86_64_HOST_ARCH
+#if !x86_64_HOST_ARCH
  static void zapTrailingAtSign   ( unsigned char *sym );
 #endif
 
@@ -339,7 +339,7 @@ static char *allocateImageAndTrampolines (
    FILE* f,
    int size,
    int isThin);
-#if defined(x86_64_HOST_ARCH)
+#if x86_64_HOST_ARCH
 static int ocAllocateSymbolExtras_PEi386 ( ObjectCode* oc );
 static size_t makeSymbolExtra_PEi386( ObjectCode* oc, size_t, char* symbol );
 #define PEi386_IMAGE_OFFSET 4
@@ -355,7 +355,7 @@ static int machoGetMisalignment( FILE * );
 #if NEED_SYMBOL_EXTRAS
 static int ocAllocateSymbolExtras_MachO ( ObjectCode* oc );
 #endif
-#ifdef powerpc_HOST_ARCH
+#if powerpc_HOST_ARCH
 static void machoInitSymbolsWithoutUnderscore( void );
 #endif
 #endif
@@ -449,7 +449,7 @@ static void freeProddableBlocks (ObjectCode *oc);
  *
  * MAP_32BIT not available on OpenBSD/amd64
  */
-#if defined(x86_64_HOST_ARCH) && defined(MAP_32BIT)
+#if x86_64_HOST_ARCH && defined(MAP_32BIT)
 #define TRY_MAP_32BIT MAP_32BIT
 #else
 #define TRY_MAP_32BIT 0
@@ -493,7 +493,7 @@ static void freeProddableBlocks (ObjectCode *oc);
  * We pick a default address based on the OS, but also make this
  * configurable via an RTS flag (+RTS -xm)
  */
-#if !defined(ALWAYS_PIC) && defined(x86_64_HOST_ARCH)
+#if !defined(ALWAYS_PIC) && x86_64_HOST_ARCH
 
 #if defined(MAP_32BIT)
 // Try to use MAP_32BIT
@@ -733,7 +733,7 @@ initLinker_ (int retain_cafs)
         }
         IF_DEBUG(linker, debugBelch("initLinker: inserting rts symbol %s, %p\n", sym->lbl, sym->addr));
     }
-#   if defined(OBJFORMAT_MACHO) && defined(powerpc_HOST_ARCH)
+#   if defined(OBJFORMAT_MACHO) && powerpc_HOST_ARCH
     machoInitSymbolsWithoutUnderscore();
 #   endif
     /* GCC defines a special symbol __dso_handle which is resolved to NULL if
@@ -783,14 +783,14 @@ initLinker_ (int retain_cafs)
     }
 #   endif
 
-#if !defined(ALWAYS_PIC) && defined(x86_64_HOST_ARCH)
+#if !defined(ALWAYS_PIC) && x86_64_HOST_ARCH
     if (RtsFlags.MiscFlags.linkerMemBase != 0) {
         // User-override for mmap_32bit_base
         mmap_32bit_base = (void*)RtsFlags.MiscFlags.linkerMemBase;
     }
 #endif
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
     /*
      * These two libraries cause problems when added to the static link,
      * but are necessary for resolving symbols in GHCi, hence we load
@@ -1359,7 +1359,7 @@ static SymbolAddr* lookupSymbol_ (SymbolName* lbl)
         SymbolAddr* sym;
 
 /* See Note [mingw-w64 name decoration scheme] */
-#ifndef x86_64_HOST_ARCH
+#if !x86_64_HOST_ARCH
          zapTrailingAtSign ( (unsigned char*)lbl );
 #endif
         sym = lookupSymbolInDLLs((unsigned char*)lbl);
@@ -1370,7 +1370,7 @@ static SymbolAddr* lookupSymbol_ (SymbolName* lbl)
         return NULL;
 #       endif
     } else {
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
             // If Windows, perform initialization of uninitialized
             // Symbols from the C runtime which was loaded above.
             // We do this on lookup to prevent the hit when
@@ -1500,7 +1500,7 @@ mmapForLinker (size_t bytes, uint32_t flags, int fd, int offset)
    IF_DEBUG(linker, debugBelch("mmapForLinker: start\n"));
    size = roundUpToPage(bytes);
 
-#if !defined(ALWAYS_PIC) && defined(x86_64_HOST_ARCH)
+#if !defined(ALWAYS_PIC) && x86_64_HOST_ARCH
 mmap_again:
 
    if (mmap_32bit_base != 0) {
@@ -1525,7 +1525,7 @@ mmap_again:
        return NULL;
    }
 
-#if !defined(ALWAYS_PIC) && defined(x86_64_HOST_ARCH)
+#if !defined(ALWAYS_PIC) && x86_64_HOST_ARCH
    if (mmap_32bit_base != 0) {
        if (result == map_addr) {
            mmap_32bit_base = (StgWord8*)map_addr + size;
@@ -1533,9 +1533,9 @@ mmap_again:
            if ((W_)result > 0x80000000) {
                // oops, we were given memory over 2Gb
                munmap(result,size);
-#if defined(freebsd_HOST_OS)  || \
-    defined(kfreebsdgnu_HOST_OS) || \
-    defined(dragonfly_HOST_OS)
+#if freebsd_HOST_OS  || \
+    kfreebsdgnu_HOST_OS || \
+    dragonfly_HOST_OS
                // Some platforms require MAP_FIXED.  This is normally
                // a bad idea, because MAP_FIXED will overwrite
                // existing mappings.
@@ -1622,7 +1622,7 @@ static void freeOcStablePtrs (ObjectCode *oc)
 static void
 freePreloadObjectFile (ObjectCode *oc)
 {
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 
     VirtualFree(oc->image - PEi386_IMAGE_OFFSET, 0, MEM_RELEASE);
 
@@ -1699,7 +1699,7 @@ void freeObjectCode (ObjectCode *oc)
 
     /* Free symbol_extras.  On x86_64 Windows, symbol_extras are allocated
      * alongside the image, so we don't need to free. */
-#if NEED_SYMBOL_EXTRAS && (!defined(x86_64_HOST_ARCH) || !defined(mingw32_HOST_OS))
+#if NEED_SYMBOL_EXTRAS && (!x86_64_HOST_ARCH || !mingw32_HOST_OS)
     if (RTS_LINKER_USE_MMAP) {
         if (!USE_CONTIGUOUS_MMAP && oc->symbol_extras != NULL) {
             m32_free(oc->symbol_extras,
@@ -1811,19 +1811,19 @@ static HsInt loadArchive_ (pathchar *path)
     char tmp[20];
     char *gnuFileIndex;
     int gnuFileIndexSize;
-#if defined(darwin_HOST_OS)
+#if darwin_HOST_OS
     int i;
     uint32_t nfat_arch, nfat_offset, cputype, cpusubtype;
-#if defined(i386_HOST_ARCH)
+#if i386_HOST_ARCH
     const uint32_t mycputype = CPU_TYPE_X86;
     const uint32_t mycpusubtype = CPU_SUBTYPE_X86_ALL;
-#elif defined(x86_64_HOST_ARCH)
+#elif x86_64_HOST_ARCH
     const uint32_t mycputype = CPU_TYPE_X86_64;
     const uint32_t mycpusubtype = CPU_SUBTYPE_X86_64_ALL;
-#elif defined(powerpc_HOST_ARCH)
+#elif powerpc_HOST_ARCH
     const uint32_t mycputype = CPU_TYPE_POWERPC;
     const uint32_t mycpusubtype = CPU_SUBTYPE_POWERPC_ALL;
-#elif defined(powerpc64_HOST_ARCH)
+#elif powerpc64_HOST_ARCH
     const uint32_t mycputype = CPU_TYPE_POWERPC64;
     const uint32_t mycpusubtype = CPU_SUBTYPE_POWERPC_ALL;
 #else
@@ -1901,7 +1901,7 @@ static HsInt loadArchive_ (pathchar *path)
     else if (strncmp(tmp, "!<thin>\n", 8) == 0) {
         isThin = 1;
     }
-#if defined(darwin_HOST_OS)
+#if darwin_HOST_OS
     /* Not a standard archive, look for a fat archive magic number: */
     else if (ntohl(*(uint32_t *)tmp) == FAT_MAGIC) {
         nfat_arch = ntohl(*(uint32_t *)(tmp + 4));
@@ -1962,7 +1962,7 @@ static HsInt loadArchive_ (pathchar *path)
             }
         }
 
-#if defined(darwin_HOST_OS)
+#if darwin_HOST_OS
         if (strncmp(fileName, "!<arch>\n", 8) == 0) {
             IF_DEBUG(linker, debugBelch("loadArchive: found the start of another archive, breaking\n"));
             break;
@@ -2139,12 +2139,12 @@ static HsInt loadArchive_ (pathchar *path)
 
             IF_DEBUG(linker, debugBelch("loadArchive: Member is an object file...loading...\n"));
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
             // TODO: We would like to use allocateExec here, but allocateExec
             //       cannot currently allocate blocks large enough.
             image = allocateImageAndTrampolines(path, fileName, f, memberSize,
                                                 isThin);
-#elif defined(darwin_HOST_OS)
+#elif darwin_HOST_OS
             if (RTS_LINKER_USE_MMAP)
                 image = mmapForLinker(memberSize, MAP_ANONYMOUS, -1, 0);
             else {
@@ -2342,7 +2342,7 @@ preloadObjectFile (pathchar *path)
    /* On many architectures malloc'd memory isn't executable, so we need to use
     * mmap. */
 
-#if defined(openbsd_HOST_OS)
+#if openbsd_HOST_OS
    fd = open(path, O_RDONLY, S_IRUSR);
 #else
    fd = open(path, O_RDONLY);
@@ -2368,7 +2368,7 @@ preloadObjectFile (pathchar *path)
        return NULL;
    }
 
-#  if defined(mingw32_HOST_OS)
+#  if mingw32_HOST_OS
 
         // TODO: We would like to use allocateExec here, but allocateExec
         //       cannot currently allocate blocks large enough.
@@ -2379,7 +2379,7 @@ preloadObjectFile (pathchar *path)
         return NULL;
     }
 
-#   elif defined(darwin_HOST_OS)
+#   elif darwin_HOST_OS
 
     // In a Mach-O .o file, all sections can and will be misaligned
     // if the total size of the headers is not a multiple of the
@@ -2394,7 +2394,7 @@ preloadObjectFile (pathchar *path)
    image = stgMallocBytes(fileSize + misalignment, "loadObj(image)");
    image += misalignment;
 
-# else /* !defined(mingw32_HOST_OS) */
+# else /* !mingw32_HOST_OS */
 
    image = stgMallocBytes(fileSize, "loadObj(image)");
 
@@ -2775,7 +2775,7 @@ addSection (Section *s, SectionKind kind, SectionAlloc alloc,
  */
 
 #if NEED_SYMBOL_EXTRAS
-#if !defined(x86_64_HOST_ARCH) || !defined(mingw32_HOST_OS)
+#if !x86_64_HOST_ARCH || !mingw32_HOST_OS
 
 /*
   ocAllocateSymbolExtras
@@ -2857,7 +2857,7 @@ static int ocAllocateSymbolExtras( ObjectCode* oc, int count, int first )
 #endif
 #endif // NEED_SYMBOL_EXTRAS
 
-#if defined(arm_HOST_ARCH)
+#if arm_HOST_ARCH
 
 static void
 ocFlushInstructionCache( ObjectCode *oc )
@@ -2880,8 +2880,8 @@ ocFlushInstructionCache( ObjectCode *oc )
 
 #endif
 
-#if defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH)
-#if !defined(x86_64_HOST_ARCH) || !defined(mingw32_HOST_OS)
+#if powerpc_HOST_ARCH || x86_64_HOST_ARCH
+#if !x86_64_HOST_ARCH || !mingw32_HOST_OS
 
 static SymbolExtra* makeSymbolExtra( ObjectCode* oc,
                                      unsigned long symbolNumber,
@@ -2894,7 +2894,7 @@ static SymbolExtra* makeSymbolExtra( ObjectCode* oc,
 
   extra = &oc->symbol_extras[symbolNumber - oc->first_symbol_extra];
 
-#ifdef powerpc_HOST_ARCH
+#if powerpc_HOST_ARCH
   // lis r12, hi16(target)
   extra->jumpIsland.lis_r12     = 0x3d80;
   extra->jumpIsland.hi_addr     = target >> 16;
@@ -2909,7 +2909,7 @@ static SymbolExtra* makeSymbolExtra( ObjectCode* oc,
   // bctr
   extra->jumpIsland.bctr        = 0x4e800420;
 #endif
-#ifdef x86_64_HOST_ARCH
+#if x86_64_HOST_ARCH
   // jmp *-14(%rip)
   static uint8_t jmp[] = { 0xFF, 0x25, 0xF2, 0xFF, 0xFF, 0xFF };
   extra->addr = target;
@@ -2920,9 +2920,9 @@ static SymbolExtra* makeSymbolExtra( ObjectCode* oc,
 }
 
 #endif
-#endif // defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH)
+#endif // powerpc_HOST_ARCH || x86_64_HOST_ARCH
 
-#ifdef arm_HOST_ARCH
+#if arm_HOST_ARCH
 static SymbolExtra* makeArmSymbolExtra( ObjectCode* oc,
                                         unsigned long symbolNumber,
                                         unsigned long target,
@@ -2991,7 +2991,7 @@ static SymbolExtra* makeArmSymbolExtra( ObjectCode* oc,
  * PowerPC specifics (instruction cache flushing)
  * ------------------------------------------------------------------------*/
 
-#ifdef powerpc_HOST_ARCH
+#if powerpc_HOST_ARCH
 /*
    ocFlushInstructionCache
 
@@ -3094,7 +3094,8 @@ allocateImageAndTrampolines (
    int isThin USED_IF_x86_64_HOST_ARCH)
 {
    char* image;
-#if defined(x86_64_HOST_ARCH)
+
+#if x86_64_HOST_ARCH
    if (!isThin)
    {
        /* PeCoff contains number of symbols right in it's header, so
@@ -3374,7 +3375,7 @@ cstring_from_section_name (UChar* name, UChar* strtab)
 }
 
 /* See Note [mingw-w64 name decoration scheme] */
-#ifndef x86_64_HOST_ARCH
+#if !x86_64_HOST_ARCH
 static void
 zapTrailingAtSign ( UChar* sym )
 {
@@ -3392,7 +3393,7 @@ zapTrailingAtSign ( UChar* sym )
 #endif
 
 /* See Note [mingw-w64 name decoration scheme] */
-#ifndef x86_64_HOST_ARCH
+#if !x86_64_HOST_ARCH
 #define STRIP_LEADING_UNDERSCORE 1
 #else
 #define STRIP_LEADING_UNDERSCORE 0
@@ -3463,12 +3464,12 @@ lookupSymbolInDLLs ( UChar *lbl )
 static int
 verifyCOFFHeader (COFF_header *hdr, pathchar *fileName)
 {
-#if defined(i386_HOST_ARCH)
+#if i386_HOST_ARCH
    if (hdr->Machine != 0x14c) {
       errorBelch("%" PATH_FMT ": Not x86 PEi386", fileName);
       return 0;
    }
-#elif defined(x86_64_HOST_ARCH)
+#elif x86_64_HOST_ARCH
    if (hdr->Machine != 0x8664) {
       errorBelch("%" PATH_FMT ": Not x86_64 PEi386", fileName);
       return 0;
@@ -3941,7 +3942,7 @@ ocGetNames_PEi386 ( ObjectCode* oc )
    return 1;
 }
 
-#if defined(x86_64_HOST_ARCH)
+#if x86_64_HOST_ARCH
 
 /* We've already reserved a room for symbol extras in loadObj,
  * so simply set correct pointer here.
@@ -4112,7 +4113,7 @@ ocResolve_PEi386 ( ObjectCode* oc )
          /* All supported relocations write at least 4 bytes */
          checkProddableBlock(oc, pP, 4);
          switch (reltab_j->Type) {
-#if defined(i386_HOST_ARCH)
+#if i386_HOST_ARCH
             case MYIMAGE_REL_I386_DIR32:
             case MYIMAGE_REL_I386_DIR32NB:
                *(UInt32 *)pP = ((UInt32)S) + A;
@@ -4145,7 +4146,7 @@ ocResolve_PEi386 ( ObjectCode* oc )
                */
                *(UInt32 *)pP = ((UInt32)S) + A - ((UInt32)(size_t)pP) - 4;
                break;
-#elif defined(x86_64_HOST_ARCH)
+#elif x86_64_HOST_ARCH
             case 1: /* R_X86_64_64 (ELF constant 1) - IMAGE_REL_AMD64_ADDR64 (PE constant 1) */
                {
                    UInt64 A;
@@ -4282,23 +4283,23 @@ ocRunInit_PEi386 ( ObjectCode *oc )
 #define FALSE 0
 #define TRUE  1
 
-#if defined(sparc_HOST_ARCH)
+#if sparc_HOST_ARCH
 #  define ELF_TARGET_SPARC  /* Used inside <elf.h> */
-#elif defined(i386_HOST_ARCH)
+#elif i386_HOST_ARCH
 #  define ELF_TARGET_386    /* Used inside <elf.h> */
-#elif defined(x86_64_HOST_ARCH)
+#elif x86_64_HOST_ARCH
 #  define ELF_TARGET_X64_64
 #  define ELF_64BIT
 #  define ELF_TARGET_AMD64 /* Used inside <elf.h> on Solaris 11 */
-#elif defined(powerpc64_HOST_ARCH) || defined(powerpc64le_HOST_ARCH)
+#elif powerpc64_HOST_ARCH || powerpc64le_HOST_ARCH
 #  define ELF_64BIT
-#elif defined(ia64_HOST_ARCH)
+#elif ia64_HOST_ARCH
 #  define ELF_64BIT
-#elif defined(aarch64_HOST_ARCH)
+#elif aarch64_HOST_ARCH
 #  define ELF_64BIT
 #endif
 
-#if !defined(openbsd_HOST_OS)
+#if !openbsd_HOST_OS
 #  include <elf.h>
 #else
 /* openbsd elf has things in different places, with diff names */
@@ -4829,7 +4830,7 @@ static int getSectionKind_ELF( Elf_Shdr *hdr, int *is_bss )
         /* .rodata-style section */
         return SECTIONKIND_CODE_OR_RODATA;
     }
-#ifndef openbsd_HOST_OS
+#if !openbsd_HOST_OS
     if (hdr->sh_type == SHT_INIT_ARRAY
         && (hdr->sh_flags & SHF_ALLOC) && (hdr->sh_flags & SHF_WRITE)) {
        /* .init_array section */
@@ -4890,7 +4891,7 @@ ocGetNames_ELF ( ObjectCode* oc )
 
 
    if (oc->imageMapped) {
-#if defined(openbsd_HOST_OS)
+#if openbsd_HOST_OS
        fd = open(oc->fileName, O_RDONLY, S_IRUSR);
 #else
        fd = open(oc->fileName, O_RDONLY);
@@ -5105,7 +5106,7 @@ end:
    return result;
 }
 
-#ifdef arm_HOST_ARCH
+#if arm_HOST_ARCH
 // TODO: These likely belong in a library somewhere
 
 // Signed extend a number to a 32-bit int.
@@ -5158,15 +5159,15 @@ do_Elf_Rel_relocations ( ObjectCode* oc, char* ehdrC,
 
       Elf_Addr  P  = ((Elf_Addr)targ) + offset;
       Elf_Word* pP = (Elf_Word*)P;
-#if defined(i386_HOST_ARCH) || defined(DEBUG)
+#if i386_HOST_ARCH || defined(DEBUG)
       Elf_Addr  A  = *pP;
 #endif
       Elf_Addr  S;
       void*     S_tmp;
-#ifdef i386_HOST_ARCH
+#if i386_HOST_ARCH
       Elf_Addr  value;
 #endif
-#ifdef arm_HOST_ARCH
+#if arm_HOST_ARCH
       int is_target_thm=0, T=0;
 #endif
 
@@ -5203,7 +5204,7 @@ do_Elf_Rel_relocations ( ObjectCode* oc, char* ehdrC,
          }
          IF_DEBUG(linker,debugBelch( "`%s' resolves to %p\n", symbol, (void*)S ));
 
-#ifdef arm_HOST_ARCH
+#if arm_HOST_ARCH
          // Thumb instructions have bit 0 of symbol's st_value set
          is_target_thm = S & 0x1;
 
@@ -5221,17 +5222,17 @@ do_Elf_Rel_relocations ( ObjectCode* oc, char* ehdrC,
                              (void*)P, (void*)S, (void*)A, reloc_type ));
       checkProddableBlock ( oc, pP, sizeof(Elf_Word) );
 
-#ifdef i386_HOST_ARCH
+#if i386_HOST_ARCH
       value = S + A;
 #endif
 
       switch (reloc_type) {
-#        ifdef i386_HOST_ARCH
+#        if i386_HOST_ARCH
          case R_386_32:   *pP = value;     break;
          case R_386_PC32: *pP = value - P; break;
 #        endif
 
-#        ifdef arm_HOST_ARCH
+#        if arm_HOST_ARCH
          case R_ARM_ABS32:
          case R_ARM_TARGET1:  // Specified by Linux ARM ABI to be equivalent to ABS32
             *(Elf32_Word *)P += S;
@@ -5455,8 +5456,8 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
 #if defined(SHN_XINDEX)
    Elf_Word* shndx_table = get_shndx_table((Elf_Ehdr*)ehdrC);
 #endif
-#if defined(DEBUG) || defined(sparc_HOST_ARCH) || defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH)
-   /* This #ifdef only serves to avoid unused-var warnings. */
+#if defined(DEBUG) || sparc_HOST_ARCH || powerpc_HOST_ARCH || x86_64_HOST_ARCH
+   /* This #if only serves to avoid unused-var warnings. */
    Elf_Addr targ = (Elf_Addr) oc->sections[target_shndx].start;
 #endif
 
@@ -5473,22 +5474,22 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
    }
 
    for (j = 0; j < nent; j++) {
-#if defined(DEBUG) || defined(sparc_HOST_ARCH) || defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH)
-      /* This #ifdef only serves to avoid unused-var warnings. */
+#if defined(DEBUG) || sparc_HOST_ARCH || powerpc_HOST_ARCH || x86_64_HOST_ARCH
+      /* This #if only serves to avoid unused-var warnings. */
       Elf_Addr  offset = rtab[j].r_offset;
       Elf_Addr  P      = targ + offset;
       Elf_Addr  A      = rtab[j].r_addend;
 #endif
-#if defined(sparc_HOST_ARCH) || defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH)
+#if sparc_HOST_ARCH || powerpc_HOST_ARCH || x86_64_HOST_ARCH
       Elf_Addr  value;
 #endif
       Elf_Addr  info   = rtab[j].r_info;
       Elf_Addr  S;
       void*     S_tmp;
-#     if defined(sparc_HOST_ARCH)
+#     if sparc_HOST_ARCH
       Elf_Word* pP = (Elf_Word*)P;
       Elf_Word  w1, w2;
-#     elif defined(powerpc_HOST_ARCH)
+#     elif powerpc_HOST_ARCH
       Elf_Sword delta;
 #     endif
 
@@ -5541,19 +5542,19 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
          IF_DEBUG(linker,debugBelch( "`%s' resolves to %p\n", symbol, (void*)S ));
       }
 
-#if defined(DEBUG) || defined(sparc_HOST_ARCH) || defined(powerpc_HOST_ARCH) \
-    || defined(x86_64_HOST_ARCH)
+#if defined(DEBUG) || sparc_HOST_ARCH || powerpc_HOST_ARCH \
+    || x86_64_HOST_ARCH
       IF_DEBUG(linker,debugBelch("Reloc: P = %p   S = %p   A = %p\n",
                                         (void*)P, (void*)S, (void*)A ));
       checkProddableBlock(oc, (void*)P, sizeof(Elf_Word));
 #endif
 
-#if defined(sparc_HOST_ARCH) || defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH)
+#if sparc_HOST_ARCH || powerpc_HOST_ARCH || x86_64_HOST_ARCH
       value = S + A;
 #endif
 
       switch (ELF_R_TYPE(info)) {
-#        if defined(sparc_HOST_ARCH)
+#        if sparc_HOST_ARCH
          case R_SPARC_WDISP30:
             w1 = *pP & 0xC0000000;
             w2 = (Elf_Word)((value - P) >> 2);
@@ -5599,7 +5600,7 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
             w2 = (Elf_Word)value;
             *pP = w2;
             break;
-#        elif defined(powerpc_HOST_ARCH)
+#        elif powerpc_HOST_ARCH
          case R_PPC_ADDR16_LO:
             *(Elf32_Half*) P = value;
             break;
@@ -5748,7 +5749,7 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
           *(Elf64_Word *)P = (Elf64_Word)off;
           break;
       }
-#if defined(dragonfly_HOST_OS)
+#if dragonfly_HOST_OS
       case R_X86_64_GOTTPOFF:
       {
 #if defined(ALWAYS_PIC)
@@ -5820,7 +5821,7 @@ ocResolve_ELF ( ObjectCode* oc )
       }
    }
 
-#if defined(powerpc_HOST_ARCH) || defined(arm_HOST_ARCH)
+#if powerpc_HOST_ARCH || arm_HOST_ARCH
    ocFlushInstructionCache( oc );
 #endif
 
@@ -5950,7 +5951,7 @@ static int ocAllocateSymbolExtras_ELF( ObjectCode *oc )
 #define nlist nlist_64
 #endif
 
-#ifdef powerpc_HOST_ARCH
+#if powerpc_HOST_ARCH
 static int
 ocAllocateSymbolExtras_MachO(ObjectCode* oc)
 {
@@ -6007,7 +6008,7 @@ ocAllocateSymbolExtras_MachO(ObjectCode* oc)
 }
 
 #endif
-#ifdef x86_64_HOST_ARCH
+#if x86_64_HOST_ARCH
 static int
 ocAllocateSymbolExtras_MachO(ObjectCode* oc)
 {
@@ -6193,7 +6194,7 @@ relocateSection(
 
     for(i = 0; i < n; i++)
     {
-#ifdef x86_64_HOST_ARCH
+#if x86_64_HOST_ARCH
         struct relocation_info *reloc = &relocs[i];
 
         char    *thingPtr = image + sect->offset + reloc->r_address;
@@ -6422,7 +6423,7 @@ relocateSection(
                                                                 scat->r_value)
                                         - scat->r_value;
                     }
-#ifdef powerpc_HOST_ARCH
+#if powerpc_HOST_ARCH
                     else if(scat->r_type == PPC_RELOC_SECTDIFF
                         || scat->r_type == PPC_RELOC_LO16_SECTDIFF
                         || scat->r_type == PPC_RELOC_HI16_SECTDIFF
@@ -6446,7 +6447,7 @@ relocateSection(
                               - relocateAddress(oc, nSections, sections, pair->r_value));
                         i++;
                     }
-#ifdef powerpc_HOST_ARCH
+#if powerpc_HOST_ARCH
                     else if(scat->r_type == PPC_RELOC_HI16
                          || scat->r_type == PPC_RELOC_LO16
                          || scat->r_type == PPC_RELOC_HA16
@@ -6499,7 +6500,7 @@ relocateSection(
                         return 0;
                      }
 
-#ifdef powerpc_HOST_ARCH
+#if powerpc_HOST_ARCH
                     if(scat->r_type == GENERIC_RELOC_VANILLA
                         || scat->r_type == PPC_RELOC_SECTDIFF)
 #else
@@ -6510,7 +6511,7 @@ relocateSection(
                     {
                         *wordPtr = word;
                     }
-#ifdef powerpc_HOST_ARCH
+#if powerpc_HOST_ARCH
                     else if (scat->r_type == PPC_RELOC_LO16_SECTDIFF
                           || scat->r_type == PPC_RELOC_LO16)
                     {
@@ -6564,7 +6565,7 @@ relocateSection(
 
             if (reloc->r_length == 2) {
                 unsigned long word = 0;
-#ifdef powerpc_HOST_ARCH
+#if powerpc_HOST_ARCH
                 unsigned long jumpIsland = 0;
                 long offsetToJumpIsland = 0xBADBAD42; // initialise to bad value
                                                       // to avoid warning and to catch
@@ -6580,7 +6581,7 @@ relocateSection(
                 if (reloc->r_type == GENERIC_RELOC_VANILLA) {
                     word = *wordPtr;
                 }
-#ifdef powerpc_HOST_ARCH
+#if powerpc_HOST_ARCH
                 else if (reloc->r_type == PPC_RELOC_LO16) {
                     word = ((unsigned short*) wordPtr)[1];
                     word |= ((unsigned long) relocs[i+1].r_address & 0xFFFF) << 16;
@@ -6626,7 +6627,7 @@ relocateSection(
                     }
 
                     if (reloc->r_pcrel) {
-#ifdef powerpc_HOST_ARCH
+#if powerpc_HOST_ARCH
                             // In the .o file, this should be a relative jump to NULL
                             // and we'll change it to a relative jump to the symbol
                         ASSERT(word + reloc->r_address == 0);
@@ -6652,7 +6653,7 @@ relocateSection(
                     *wordPtr = word;
                     continue;
                 }
-#ifdef powerpc_HOST_ARCH
+#if powerpc_HOST_ARCH
                 else if(reloc->r_type == PPC_RELOC_LO16)
                 {
                     ((unsigned short*) wordPtr)[1] = word & 0xFFFF;
@@ -6996,7 +6997,7 @@ ocResolve_MachO(ObjectCode* oc)
             return 0;
     }
 
-#if defined (powerpc_HOST_ARCH)
+#if powerpc_HOST_ARCH
     ocFlushInstructionCache( oc );
 #endif
 
@@ -7049,7 +7050,7 @@ static int ocRunInit_MachO ( ObjectCode *oc )
     return 1;
 }
 
-#ifdef powerpc_HOST_ARCH
+#if powerpc_HOST_ARCH
 /*
  * The Mach-O object format uses leading underscores. But not everywhere.
  * There is a small number of runtime support functions defined in

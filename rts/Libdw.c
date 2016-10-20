@@ -281,7 +281,7 @@ static bool memory_read(Dwfl *dwfl STG_UNUSED, Dwarf_Addr addr,
 
 static bool set_initial_registers(Dwfl_Thread *thread, void *arg);
 
-#ifdef x86_64_HOST_ARCH
+#if x86_64_HOST_ARCH
 static bool set_initial_registers(Dwfl_Thread *thread,
                                   void *arg STG_UNUSED) {
     Dwarf_Word regs[17];
@@ -309,7 +309,7 @@ static bool set_initial_registers(Dwfl_Thread *thread,
         );
     return dwfl_thread_state_registers(thread, 0, 17, regs);
 }
-#elif defined(i386_HOST_ARCH)
+#elif i386_HOST_ARCH
 static bool set_initial_registers(Dwfl_Thread *thread,
                                   void *arg STG_UNUSED) {
     Dwarf_Word regs[9];

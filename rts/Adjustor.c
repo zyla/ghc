@@ -43,13 +43,16 @@ Haskell side.
 #include "Stable.h"
 
 #if defined(USE_LIBFFI_FOR_ADJUSTORS)
+#ifndef _CALL_ELF
+#define _CALL_ELF 0
+#endif
 #include "ffi.h"
 #include <string.h>
 #endif
 
-#if defined(i386_HOST_ARCH)
+#if i386_HOST_ARCH
 extern void adjustorCode(void);
-#elif defined(powerpc_HOST_ARCH) || defined(powerpc64_HOST_ARCH)
+#elif powerpc_HOST_ARCH || powerpc64_HOST_ARCH
 // from AdjustorAsm.s
 // not declared as a function so that AIX-style
 // fundescs can never get in the way.
@@ -99,7 +102,7 @@ freeHaskellFunctionPtr(void* ptr)
 {
     ffi_closure *cl;
 
-#if defined(ios_HOST_OS)
+#if ios_HOST_OS
     cl = execToWritable(ptr);
 #else
     cl = (ffi_closure*)ptr;
@@ -152,7 +155,7 @@ createAdjustor (int cconv,
         arg_types[i] = char_to_ffi_type(typeString[i+1]);
     }
     switch (cconv) {
-#if defined(mingw32_HOST_OS) && defined(i386_HOST_ARCH)
+#if mingw32_HOST_OS && i386_HOST_ARCH
     case 0: /* stdcall */
         abi = FFI_STDCALL;
         break;
@@ -184,7 +187,7 @@ createAdjustor (int cconv,
 #include <windows.h>
 #endif
 
-#if defined(powerpc_HOST_ARCH) && defined(linux_HOST_OS)
+#if powerpc_HOST_ARCH && linux_HOST_OS
 #include <string.h>
 #endif
 
@@ -194,7 +197,7 @@ createAdjustor (int cconv,
 #define UNDERSCORE ""
 #endif
 
-#if defined(x86_64_HOST_ARCH)
+#if x86_64_HOST_ARCH
 /* 
   Now here's something obscure for you:
 
@@ -218,7 +221,7 @@ static void GNUC3_ATTRIBUTE(used) obscure_ccall_wrapper(void)
    ".globl " UNDERSCORE "obscure_ccall_ret_code\n"
    UNDERSCORE "obscure_ccall_ret_code:\n\t"
    "addq $0x8, %rsp\n\t"
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
    /* On Win64, we had to put the original return address after the
       arg 1-4 spill slots, ro now we have to move it back */
    "movq 0x20(%rsp), %rcx\n"
@@ -230,16 +233,16 @@ static void GNUC3_ATTRIBUTE(used) obscure_ccall_wrapper(void)
 extern void obscure_ccall_ret_code(void);
 #endif
 
-#if defined(alpha_HOST_ARCH)
+#if alpha_HOST_ARCH
 /* To get the definition of PAL_imb: */
-# if defined(linux_HOST_OS)
+# if linux_HOST_OS
 #  include <asm/pal.h>
 # else
 #  include <machine/pal.h>
 # endif
 #endif
 
-#if defined(ia64_HOST_ARCH)
+#if ia64_HOST_ARCH
 
 /* Layout of a function descriptor */
 typedef struct _IA64FunDesc {
@@ -269,7 +272,7 @@ stgAllocStable(size_t size_in_bytes, StgStablePtr *stable)
 }
 #endif
 
-#if defined(powerpc_HOST_ARCH) && defined(linux_HOST_OS)
+#if powerpc_HOST_ARCH && linux_HOST_OS
 __asm__("obscure_ccall_ret_code:\n\t"
         "lwz 1,0(1)\n\t"
         "lwz 0,4(1)\n\t"
@@ -278,8 +281,8 @@ __asm__("obscure_ccall_ret_code:\n\t"
 extern void obscure_ccall_ret_code(void);
 #endif
 
-#if defined(powerpc_HOST_ARCH) || defined(powerpc64_HOST_ARCH)
-#if !(defined(powerpc_HOST_ARCH) && defined(linux_HOST_OS))
+#if powerpc_HOST_ARCH || powerpc64_HOST_ARCH
+#if !(powerpc_HOST_ARCH && linux_HOST_OS)
 
 /* !!! !!! WARNING: !!! !!!
  * This structure is accessed from AdjustorAsm.s
@@ -287,14 +290,14 @@ extern void obscure_ccall_ret_code(void);
  */
 
 typedef struct AdjustorStub {
-#if defined(powerpc_HOST_ARCH) && defined(darwin_HOST_OS)
+#if powerpc_HOST_ARCH && darwin_HOST_OS
     unsigned        lis;
     unsigned        ori;
     unsigned        lwz;
     unsigned        mtctr;
     unsigned        bctr;
     StgFunPtr       code;
-#elif defined(powerpc64_HOST_ARCH) && defined(darwin_HOST_OS)
+#elif powerpc64_HOST_ARCH && darwin_HOST_OS
         /* powerpc64-darwin: just guessing that it won't use fundescs. */
     unsigned        lis;
     unsigned        ori;
@@ -322,7 +325,7 @@ typedef struct AdjustorStub {
 #endif
 #endif
 
-#if defined(i386_HOST_ARCH)
+#if i386_HOST_ARCH
 
 /* !!! !!! WARNING: !!! !!!
  * This structure is accessed from AdjustorAsm.s
@@ -338,7 +341,7 @@ typedef struct AdjustorStub {
 } AdjustorStub;
 #endif
 
-#if defined(i386_HOST_ARCH) || defined(powerpc_HOST_ARCH) || defined(powerpc64_HOST_ARCH)
+#if i386_HOST_ARCH || powerpc_HOST_ARCH || powerpc64_HOST_ARCH
 static int totalArgumentSize(char *typeString)
 {
     int sz = 0;
@@ -370,7 +373,7 @@ void*
 createAdjustor(int cconv, StgStablePtr hptr,
                StgFunPtr wptr,
                char *typeString
-#if !defined(powerpc_HOST_ARCH) && !defined(powerpc64_HOST_ARCH) && !defined(x86_64_HOST_ARCH)
+#if !powerpc_HOST_ARCH && !powerpc64_HOST_ARCH && !x86_64_HOST_ARCH
                   STG_UNUSED
 #endif
               )
@@ -381,7 +384,7 @@ createAdjustor(int cconv, StgStablePtr hptr,
   switch (cconv)
   {
   case 0: /* _stdcall */
-#if defined(i386_HOST_ARCH) && !defined(darwin_HOST_OS)
+#if i386_HOST_ARCH && !darwin_HOST_OS
     /* Magic constant computed by inspecting the code length of
        the following assembly language snippet
        (offset and machine code prefixed):
@@ -414,7 +417,7 @@ createAdjustor(int cconv, StgStablePtr hptr,
     break;
 
   case 1: /* _ccall */
-#if defined(i386_HOST_ARCH)
+#if i386_HOST_ARCH
     {
         /*
           Most of the trickiness here is due to the need to keep the
@@ -451,9 +454,9 @@ createAdjustor(int cconv, StgStablePtr hptr,
         adjustorStub->argument_size = sz;
     }
     
-#elif defined(x86_64_HOST_ARCH)
+#elif x86_64_HOST_ARCH
 
-# if defined(mingw32_HOST_OS)
+# if mingw32_HOST_OS
     /*
       stack at call:
                argn
@@ -694,7 +697,7 @@ createAdjustor(int cconv, StgStablePtr hptr,
 # endif
 
 
-#elif defined(sparc_HOST_ARCH)
+#elif sparc_HOST_ARCH
   /* Magic constant computed by inspecting the code length of the following
      assembly language snippet (offset and machine code prefixed):
 
@@ -759,7 +762,7 @@ createAdjustor(int cconv, StgStablePtr hptr,
         asm("nop");
         asm("nop");
     }
-#elif defined(alpha_HOST_ARCH)
+#elif alpha_HOST_ARCH
   /* Magic constant computed by inspecting the code length of
      the following assembly language snippet
      (offset and machine code prefixed; note that the machine code
@@ -817,7 +820,7 @@ TODO: Depending on how much allocation overhead stgMallocBytes uses for
         /* Ensure that instruction cache is consistent with our new code */
         __asm__ volatile("call_pal %0" : : "i" (PAL_imb));
     }
-#elif defined(powerpc_HOST_ARCH) && defined(linux_HOST_OS)
+#elif powerpc_HOST_ARCH && linux_HOST_OS
 
 #define OP_LO(op,lo)  ((((unsigned)(op)) << 16) | (((unsigned)(lo)) & 0xFFFF))
 #define OP_HI(op,hi)  ((((unsigned)(op)) << 16) | (((unsigned)(hi)) >> 16))
@@ -1026,7 +1029,7 @@ TODO: Depending on how much allocation overhead stgMallocBytes uses for
         }
     }
 
-#elif defined(powerpc_HOST_ARCH) || defined(powerpc64_HOST_ARCH)
+#elif powerpc_HOST_ARCH || powerpc64_HOST_ARCH
         
 #define OP_LO(op,lo)  ((((unsigned)(op)) << 16) | (((unsigned)(lo)) & 0xFFFF))
 #define OP_HI(op,hi)  ((((unsigned)(op)) << 16) | (((unsigned)(hi)) >> 16))
@@ -1074,7 +1077,7 @@ TODO: Depending on how much allocation overhead stgMallocBytes uses for
 
             // no function descriptors :-(
             // We need to do things "by hand".
-#if defined(powerpc_HOST_ARCH)
+#if powerpc_HOST_ARCH
             // lis  r2, hi(adjustorStub)
         adjustorStub->lis = OP_HI(0x3c40, adjustorStub);
             // ori  r2, r2, lo(adjustorStub)
@@ -1133,7 +1136,7 @@ TODO: Depending on how much allocation overhead stgMallocBytes uses for
         adjustorStub->extrawords_plus_one = extra_sz + 1;
     }
 
-#elif defined(ia64_HOST_ARCH)
+#elif ia64_HOST_ARCH
 /*
     Up to 8 inputs are passed in registers.  We flush the last two inputs to
     the stack, initially into the 16-byte scratch region left by the caller.
@@ -1240,7 +1243,7 @@ TODO: Depending on how much allocation overhead stgMallocBytes uses for
 void
 freeHaskellFunctionPtr(void* ptr)
 {
-#if defined(i386_HOST_ARCH)
+#if i386_HOST_ARCH
  if ( *(unsigned char*)ptr != 0xe8 &&
       *(unsigned char*)ptr != 0x58 ) {
    errorBelch("freeHaskellFunctionPtr: not for me, guv! %p\n", ptr);
@@ -1251,20 +1254,20 @@ freeHaskellFunctionPtr(void* ptr)
  } else {
     freeStablePtr(*((StgStablePtr*)((unsigned char*)ptr + 0x02)));
  }
-#elif defined(x86_64_HOST_ARCH)
+#elif x86_64_HOST_ARCH
  if ( *(StgWord16 *)ptr == 0x894d ) {
      freeStablePtr(*(StgStablePtr*)((StgWord8*)ptr+
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
                                                    0x28
 #else
                                                    0x20
 #endif
                                                        ));
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
  } else if ( *(StgWord16 *)ptr == 0x5141 ) {
      freeStablePtr(*(StgStablePtr*)((StgWord8*)ptr+0x30));
 #endif
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
  } else if ( *(StgWord16 *)ptr == 0x8348 ) {
      freeStablePtr(*(StgStablePtr*)((StgWord8*)ptr+0x48));
 #endif
@@ -1272,7 +1275,7 @@ freeHaskellFunctionPtr(void* ptr)
    errorBelch("freeHaskellFunctionPtr: not for me, guv! %p\n", ptr);
    return;
  }
-#elif defined(sparc_HOST_ARCH)
+#elif sparc_HOST_ARCH
  if ( *(unsigned long*)ptr != 0x9C23A008UL ) {
    errorBelch("freeHaskellFunctionPtr: not for me, guv! %p\n", ptr);
    return;
@@ -1280,7 +1283,7 @@ freeHaskellFunctionPtr(void* ptr)
 
  /* Free the stable pointer first..*/
  freeStablePtr(*((StgStablePtr*)((unsigned long*)ptr + 11)));
-#elif defined(alpha_HOST_ARCH)
+#elif alpha_HOST_ARCH
  if ( *(StgWord64*)ptr != 0xa77b0018a61b0010L ) {
    errorBelch("freeHaskellFunctionPtr: not for me, guv! %p\n", ptr);
    return;
@@ -1288,19 +1291,19 @@ freeHaskellFunctionPtr(void* ptr)
 
  /* Free the stable pointer first..*/
  freeStablePtr(*((StgStablePtr*)((unsigned char*)ptr + 0x10)));
-#elif defined(powerpc_HOST_ARCH) && defined(linux_HOST_OS)
+#elif powerpc_HOST_ARCH && linux_HOST_OS
  if ( *(StgWord*)ptr != 0x48000008 ) {
    errorBelch("freeHaskellFunctionPtr: not for me, guv! %p\n", ptr);
    return;
  }
  freeStablePtr(((StgStablePtr*)ptr)[1]);
-#elif defined(powerpc_HOST_ARCH) || defined(powerpc64_HOST_ARCH)
+#elif powerpc_HOST_ARCH || powerpc64_HOST_ARCH
  if ( ((AdjustorStub*)ptr)->code != (StgFunPtr) &adjustorCode ) {
    errorBelch("freeHaskellFunctionPtr: not for me, guv! %p\n", ptr);
    return;
  }
  freeStablePtr(((AdjustorStub*)ptr)->hptr);
-#elif defined(ia64_HOST_ARCH)
+#elif ia64_HOST_ARCH
  IA64FunDesc *fdesc = (IA64FunDesc *)ptr;
  StgWord64 *code = (StgWord64 *)(fdesc+1);
 

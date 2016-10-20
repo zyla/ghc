@@ -29,7 +29,7 @@
 #include "PosixSource.h"
 #include "ghcconfig.h"
 
-#if defined(sparc_HOST_ARCH) || defined(USE_MINIINTERPRETER)
+#if sparc_HOST_ARCH || defined(USE_MINIINTERPRETER)
 /* include Stg.h first because we want real machine regs in here: we
  * have to get the value of R1 back from Stg land to C land intact.
  */
@@ -98,7 +98,7 @@ StgFunPtr StgReturn(void)
 #define STG_RETURN "StgReturn"
 #endif
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 // On windows the stack has to be allocated 4k at a time, otherwise
 // we get a segfault.  The C compiler knows how to do this (it calls
 // _alloca()), so we make sure that we can allocate as much stack as
@@ -114,9 +114,9 @@ StgWord8 *win32AllocStack(void)
    x86 architecture
    -------------------------------------------------------------------------- */
 
-#ifdef i386_HOST_ARCH
+#if i386_HOST_ARCH
 
-#if defined(darwin_HOST_OS) || defined(ios_HOST_OS)
+#if darwin_HOST_OS || ios_HOST_OS
 #define STG_GLOBAL ".globl "
 #define STG_HIDDEN ".private_extern "
 #else
@@ -168,7 +168,7 @@ StgRunIsImplementedInAssembler(void)
 {
     __asm__ volatile (
         STG_GLOBAL STG_RUN "\n"
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
         STG_HIDDEN STG_RUN "\n"
 #endif
         STG_RUN ":\n\t"
@@ -241,11 +241,11 @@ StgRunIsImplementedInAssembler(void)
    enough space.  Oh well, it's not much harder this way.
    ------------------------------------------------------------------------- */
 
-#ifdef x86_64_HOST_ARCH
+#if x86_64_HOST_ARCH
 
 #define STG_GLOBAL ".globl "
 
-#if defined(darwin_HOST_OS) || defined(ios_HOST_OS)
+#if darwin_HOST_OS || ios_HOST_OS
 #define STG_HIDDEN ".private_extern "
 #else
 #define STG_HIDDEN ".hidden "
@@ -259,7 +259,7 @@ StgRunIsImplementedInAssembler(void)
          * save callee-saves registers on behalf of the STG code.
          */
         STG_GLOBAL STG_RUN "\n"
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
         STG_HIDDEN STG_RUN "\n"
 #endif
         STG_RUN ":\n\t"
@@ -272,7 +272,7 @@ StgRunIsImplementedInAssembler(void)
         "movq %%r13,24(%%rax)\n\t"
         "movq %%r14,32(%%rax)\n\t"
         "movq %%r15,40(%%rax)\n\t"
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
         "movq %%rdi,48(%%rax)\n\t"
         "movq %%rsi,56(%%rax)\n\t"
         "movq %%xmm6,64(%%rax)\n\t"
@@ -280,7 +280,7 @@ StgRunIsImplementedInAssembler(void)
         /*
          * Set BaseReg
          */
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
         "movq %%rdx,%%r13\n\t"
 #else
         "movq %%rsi,%%r13\n\t"
@@ -288,7 +288,7 @@ StgRunIsImplementedInAssembler(void)
         /*
          * grab the function argument from the stack, and jump to it.
          */
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
         "movq %%rcx,%%rax\n\t"
 #else
         "movq %%rdi,%%rax\n\t"
@@ -310,7 +310,7 @@ StgRunIsImplementedInAssembler(void)
         "movq 24(%%rsp),%%r13\n\t"
         "movq 32(%%rsp),%%r14\n\t"
         "movq 40(%%rsp),%%r15\n\t"
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
         "movq 48(%%rsp),%%rdi\n\t"
         "movq 56(%%rsp),%%rsi\n\t"
         "movq 64(%%rsp),%%xmm6\n\t"
@@ -320,7 +320,7 @@ StgRunIsImplementedInAssembler(void)
 
         :
         : "i"(RESERVED_C_STACK_BYTES),
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
           "i"(80 /*stack frame size; 8 too large to make the alignment right*/)
 #else
           "i"(48 /*stack frame size*/)
@@ -364,7 +364,7 @@ StgRunIsImplementedInAssembler(void)
    Updated info (GHC 4.08.2): not saving %i7 any more (see below).
    -------------------------------------------------------------------------- */
 
-#ifdef sparc_HOST_ARCH
+#if sparc_HOST_ARCH
 
 StgRegTable *
 StgRun(StgFunPtr f, StgRegTable *basereg) {
@@ -413,21 +413,21 @@ StgRun(StgFunPtr f, StgRegTable *basereg) {
    Everything is in assembler, so we don't have to deal with GCC...
    -------------------------------------------------------------------------- */
 
-#ifdef powerpc_HOST_ARCH
+#if powerpc_HOST_ARCH
 
 #define STG_GLOBAL ".globl "
 
-#if defined(darwin_HOST_OS)
+#if darwin_HOST_OS
 #define STG_HIDDEN ".private_extern "
 #else
 #define STG_HIDDEN ".hidden "
 #endif
 
-#if defined(aix_HOST_OS)
+#if aix_HOST_OS
 
 // implementation is in StgCRunAsm.S
 
-#elif defined(darwin_HOST_OS)
+#elif darwin_HOST_OS
 void StgRunIsImplementedInAssembler(void)
 {
 #if HAVE_SUBSECTIONS_VIA_SYMBOLS
@@ -542,9 +542,9 @@ StgRunIsImplementedInAssembler(void)
    Everything is in assembler, so we don't have to deal with GCC...
    -------------------------------------------------------------------------- */
 
-#ifdef powerpc64_HOST_ARCH
+#if powerpc64_HOST_ARCH
 
-#ifdef linux_HOST_OS
+#if linux_HOST_OS
 static void GNUC3_ATTRIBUTE(used)
 StgRunIsImplementedInAssembler(void)
 {
@@ -672,7 +672,7 @@ StgRunIsImplementedInAssembler(void)
 
 #endif
 
-#ifdef powerpc64le_HOST_ARCH
+#if powerpc64le_HOST_ARCH
 /* -----------------------------------------------------------------------------
    PowerPC 64 little endian architecture
 
@@ -684,7 +684,7 @@ StgRunIsImplementedInAssembler(void)
    ARM architecture
    -------------------------------------------------------------------------- */
 
-#ifdef arm_HOST_ARCH
+#if arm_HOST_ARCH
 
 #if defined(__thumb__)
 #define THUMB_FUNC ".thumb\n\t.thumb_func\n\t"
@@ -700,7 +700,7 @@ StgRun(StgFunPtr f, StgRegTable *basereg) {
          * save callee-saves registers on behalf of the STG code.
          */
         "stmfd sp!, {r4-r11, ip, lr}\n\t"
-#if !defined(arm_HOST_ARCH_PRE_ARMv6)
+#if !arm_HOST_ARCH_PRE_ARMv6
         "vstmdb sp!, {d8-d11}\n\t"
 #endif
         /*
@@ -720,7 +720,7 @@ StgRun(StgFunPtr f, StgRegTable *basereg) {
 
         ".globl " STG_RETURN "\n\t"
         THUMB_FUNC
-#if !defined(ios_HOST_OS)
+#if !ios_HOST_OS
         ".type " STG_RETURN ", %%function\n"
 #endif
         STG_RETURN ":\n\t"
@@ -735,7 +735,7 @@ StgRun(StgFunPtr f, StgRegTable *basereg) {
         /*
          * restore callee-saves registers.
          */
-#if !defined(arm_HOST_ARCH_PRE_ARMv6)
+#if !arm_HOST_ARCH_PRE_ARMv6
         "vldmia sp!, {d8-d11}\n\t"
 #endif
         "ldmfd sp!, {r4-r11, ip, lr}\n\t"
@@ -761,7 +761,7 @@ StgRun(StgFunPtr f, StgRegTable *basereg) {
 }
 #endif
 
-#ifdef aarch64_HOST_ARCH
+#if aarch64_HOST_ARCH
 
 StgRegTable *
 StgRun(StgFunPtr f, StgRegTable *basereg) {
@@ -803,7 +803,7 @@ StgRun(StgFunPtr f, StgRegTable *basereg) {
         "br %1\n\t"
 
         ".globl " STG_RETURN "\n\t"
-#if !defined(ios_HOST_OS)
+#if !ios_HOST_OS
         ".type " STG_RETURN ", %%function\n"
 #endif
         STG_RETURN ":\n\t"

@@ -9,11 +9,11 @@
 #ifndef RTSSIGNALS_H
 #define RTSSIGNALS_H
 
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 
 #include "posix/Signals.h"
 
-#elif defined(mingw32_HOST_OS)
+#elif mingw32_HOST_OS
 
 #include "win32/ConsoleHandler.h"
 

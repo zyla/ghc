@@ -58,7 +58,7 @@ import qualified Data.Map as Map
 
 import qualified Data.ByteString.Char8 as BS
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 -- mingw32 needs these for getExecDir
 import Foreign
 import Foreign.C
@@ -74,14 +74,14 @@ import System.Posix hiding (fdToHandle)
 import qualified System.Info(os)
 #endif
 
-#if !defined(mingw32_HOST_OS) && !defined(BOOTSTRAPPING)
+#if !mingw32_HOST_OS && !defined(BOOTSTRAPPING)
 import System.Console.Terminfo as Terminfo
 #endif
 
 #ifdef mingw32_HOST_OS
-# if defined(i386_HOST_ARCH)
+# if i386_HOST_ARCH
 #  define WINDOWS_CCONV stdcall
-# elif defined(x86_64_HOST_ARCH)
+# elif x86_64_HOST_ARCH
 #  define WINDOWS_CCONV ccall
 # else
 #  error Unknown mingw32 arch
@@ -1302,7 +1302,7 @@ listPackages verbosity my_flags mPackageName mModuleName = do
 
   if simple_output then show_simple stack else do
 
-#if defined(mingw32_HOST_OS) || defined(BOOTSTRAPPING)
+#if mingw32_HOST_OS || defined(BOOTSTRAPPING)
     mapM_ show_normal stack
 #else
     let
@@ -1935,7 +1935,7 @@ my_head _ (x : _) = x
 -----------------------------------------
 -- Cut and pasted from ghc/compiler/main/SysTools
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 subst :: Char -> Char -> String -> String
 subst a b ls = map (\ x -> if x == a then b else x) ls
 
@@ -1982,7 +1982,7 @@ installSignalHandlers = do
       interrupt = Exception.throwTo threadid
                                     (Exception.ErrorCall "interrupted")
   --
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
   _ <- installHandler sigQUIT (Catch interrupt) Nothing
   _ <- installHandler sigINT  (Catch interrupt) Nothing
   return ()

@@ -14,7 +14,7 @@
 #ifndef RTS_IOMANAGER_H
 #define RTS_IOMANAGER_H
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 
 int  rts_InstallConsoleEvent ( int action, StgStablePtr *handler );
 void rts_ConsoleHandlerDone  ( int ev );

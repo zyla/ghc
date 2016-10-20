@@ -22,7 +22,7 @@
 /* HACK: On Mac OS X 10.4 (at least), time.h doesn't declare ctime_r with
  *       _POSIX_C_SOURCE. If this is the case, we declare it ourselves.
  */
-#if HAVE_CTIME_R && !HAVE_DECL_CTIME_R
+#if defined(HAVE_CTIME_R) && !HAVE_DECL_CTIME_R
 extern char *ctime_r(const time_t *, char *);
 #endif
 
@@ -43,7 +43,7 @@ extern char *ctime_r(const time_t *, char *);
 #include <signal.h>
 #endif
 
-#if defined(THREADED_RTS) && defined(openbsd_HOST_OS) && defined(HAVE_PTHREAD_H)
+#if defined(THREADED_RTS) && openbsd_HOST_OS && defined(HAVE_PTHREAD_H)
 #include <pthread.h>
 #endif
 
@@ -171,7 +171,7 @@ time_str(void)
 
     if (now == 0) {
         time(&now);
-#if HAVE_CTIME_R
+#if defined(HAVE_CTIME_R)
         ctime_r(&now, nowstr);
 #else
         strcpy(nowstr, ctime(&now));
@@ -275,7 +275,7 @@ heapCheckFail( void )
  * genericRaise(), rather than raise(3).
  */
 int genericRaise(int sig) {
-#if defined(THREADED_RTS) && (defined(openbsd_HOST_OS) || defined(freebsd_HOST_OS) || defined(dragonfly_HOST_OS) || defined(netbsd_HOST_OS) || defined(darwin_HOST_OS))
+#if defined(THREADED_RTS) && (openbsd_HOST_OS || freebsd_HOST_OS || dragonfly_HOST_OS || netbsd_HOST_OS || darwin_HOST_OS)
         return pthread_kill(pthread_self(), sig);
 #else
         return raise(sig);
@@ -341,7 +341,7 @@ int rts_isDynamic(void)
 // Used for detecting a non-empty FPU stack on x86 (see #4914)
 void checkFPUStack(void)
 {
-#ifdef i386_HOST_ARCH
+#if i386_HOST_ARCH
     static unsigned char buf[108];
     asm("FSAVE %0":"=m" (buf));
 

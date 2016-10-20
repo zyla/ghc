@@ -78,8 +78,7 @@ extern __thread gc_thread* gct;
    x86/Linux, because we have too few registers available. In my
    tests it was worth about 5% in GC performance, but of course that
    might change as gcc improves. -- SDM 2009/04/03 */
-#elif (defined(i386_HOST_ARCH) && (defined(linux_HOST_OS) \
-                                   || defined(solaris2_HOST_OS)))
+#elif i386_HOST_ARCH && (linux_HOST_OS || solaris2_HOST_OS)
 extern __thread gc_thread* gct;
 #define SET_GCT(to) gct = (to)
 #define DECLARE_GCT __thread gc_thread* gct;
@@ -99,7 +98,7 @@ extern __thread gc_thread* gct;
     %g4     -- volatile over function calls, used by the linker
     %g5-%g7 -- reserved by the OS
 */
-#elif defined(sparc_HOST_ARCH)
+#elif sparc_HOST_ARCH
 extern __thread gc_thread* gct;
 #define SET_GCT(to) gct = (to)
 #define DECLARE_GCT __thread gc_thread* gct;
@@ -110,7 +109,7 @@ extern __thread gc_thread* gct;
    i386, then actually declare the needed register. The catch for i386
    here is that REG_Base is %ebx, but that is also used for -fPIC, so
    it can't be stolen */
-#elif defined(REG_Base) && !defined(i386_HOST_ARCH)
+#elif defined(REG_Base) && !i386_HOST_ARCH
 GCT_REG_DECL(gc_thread*, gct, REG_Base);
 #define SET_GCT(to) gct = (to)
 #define DECLARE_GCT /* nothing */

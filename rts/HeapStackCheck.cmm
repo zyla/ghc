@@ -647,7 +647,7 @@ stg_block_throwto (P_ tso, P_ exception)
     }
 }
 
-#ifdef mingw32_HOST_OS
+#if mingw32_HOST_OS
 INFO_TABLE_RET ( stg_block_async, RET_SMALL, W_ info_ptr, W_ ares )
     return ()
 {

@@ -32,12 +32,15 @@
 // When building the RTS in the non-dyn way on Windows, we don't
 //      want declspec(__dllimport__) on the front of function prototypes
 //      from libffi.
-#if defined(mingw32_HOST_OS)
-#if (defined(i386_HOST_ARCH) && !defined(__PIC__)) || defined(x86_64_HOST_ARCH)
+#if mingw32_HOST_OS
+#if (i386_HOST_ARCH && !defined(__PIC__)) || x86_64_HOST_ARCH
 # define LIBFFI_NOT_DLL
 #endif
 #endif
 
+#ifndef _CALL_ELF
+#define _CALL_ELF 0
+#endif
 #include "ffi.h"
 
 /* --------------------------------------------------------------------------

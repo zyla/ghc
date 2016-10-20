@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "Rts.h"
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 #include <malloc.h>
 #endif
 
@@ -14,7 +14,7 @@ int main (int argc, char *argv[])
 {
     testfun *f;
     int i, r;
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
     wchar_t *obj;
 #else
     char *obj;
@@ -31,7 +31,7 @@ int main (int argc, char *argv[])
         exit(1);
     }
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
     size_t len = mbstowcs(NULL, argv[1], 0) + 1;
     if (len == -1) {
         errorBelch("invalid multibyte sequence in argument %d: %s", i, argv[i]);

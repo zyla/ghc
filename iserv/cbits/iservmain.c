@@ -1,4 +1,3 @@
-#include "../rts/PosixSource.h"
 #include "Rts.h"
 
 #include "HsFFI.h"

@@ -45,7 +45,7 @@ char   *prog_name = NULL; /* 'basename' of prog_argv[0] */
 int     rts_argc = 0;  /* ditto */
 char  **rts_argv = NULL;
 int     rts_argv_size = 0;
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 // On Windows, we want to use GetCommandLineW rather than argc/argv,
 // but we need to mutate the command line arguments for withProgName and
 // friends. The System.Environment module achieves that using this bit of
@@ -418,7 +418,7 @@ usage_text[] = {
 #if defined(THREADED_RTS)
 "  -e<n>     Maximum number of outstanding local sparks (default: 4096)",
 #endif
-#if defined(x86_64_HOST_ARCH)
+#if x86_64_HOST_ARCH
 "  -xm       Base address to mmap memory in the GHCi linker",
 "            (hex; must be <80000000)",
 #endif
@@ -609,7 +609,7 @@ void setupRtsFlags (int *argc, char *argv[], RtsConfig rts_config)
  * procRtsOpts: Process rts_argv between rts_argc0 and rts_argc.
  * -------------------------------------------------------------------------- */
 
-#if defined(HAVE_UNISTD_H) && defined(HAVE_SYS_TYPES_H) && !defined(mingw32_HOST_OS)
+#if defined(HAVE_UNISTD_H) && defined(HAVE_SYS_TYPES_H) && !mingw32_HOST_OS
 static void checkSuid(RtsOptsEnabledEnum enabled)
 {
     if (enabled == RtsOptsSafeOnly) {
@@ -1303,7 +1303,7 @@ error = rtsTrue;
                     }
                     break;
 
-#if defined(x86_64_HOST_ARCH)
+#if x86_64_HOST_ARCH
                 case 'm': /* linkerMemBase */
                     OPTION_UNSAFE;
                     if (rts_argv[arg][3] != '\0') {
@@ -1932,7 +1932,7 @@ setProgName(char *argv[])
     }
 
     /* Remove directory from argv[0] -- default files in current directory */
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
     if ( (last_slash = (char *) strrchr(argv[0], '/')) != NULL ) {
         prog_name = last_slash+1;
    } else {
@@ -2008,7 +2008,7 @@ freeFullProgArgv (void)
    The Win32 argv
    ------------------------------------------------------------------------- */
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 void freeWin32ProgArgv (void);
 
 void
@@ -2077,7 +2077,7 @@ freeRtsArgv(void)
 
 void freeRtsArgs(void)
 {
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
     freeWin32ProgArgv();
 #endif
     freeFullProgArgv();

@@ -34,7 +34,7 @@ typedef StgWord32 StgThreadID;
  */
 typedef unsigned int StgThreadReturnCode;
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 /* results from an async I/O request + its request ID. */
 typedef struct {
   unsigned int reqID;
@@ -51,7 +51,7 @@ typedef union {
   struct MessageThrowTo_ *throwto;
   struct MessageWakeup_  *wakeup;
   StgInt fd;    /* StgInt instead of int, so that it's the same size as the ptrs */
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
   StgAsyncIOResult *async_result;
 #endif
 #if !defined(THREADED_RTS)

@@ -21,7 +21,7 @@
 #ifndef STGTYPES_H
 #define STGTYPES_H
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 /* Inform mingw we want the ISO rather than Windows printf format specifiers. */
 #define __USE_MINGW_ANSI_STDIO 1
 #endif

@@ -49,7 +49,7 @@ void    rts_setThreadAllocationCounter   (StgPtr tso, HsInt64 i);
 void    rts_enableThreadAllocationLimit  (StgPtr tso);
 void    rts_disableThreadAllocationLimit (StgPtr tso);
 
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 pid_t  forkProcess     (HsStablePtr *entry);
 #else
 pid_t  forkProcess     (HsStablePtr *entry)

@@ -13,7 +13,7 @@
 
 #include "BeginPrivate.h"
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 /* On Win64, if we say "printf" then gcc thinks we are going to use
    MS format specifiers like %I64d rather than %llu */
 #define PRINTF gnu_printf

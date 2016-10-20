@@ -439,7 +439,7 @@ interactiveUI config srcs maybe_exprs = do
         -- intended for the program, so unbuffer stdin.
         liftIO $ hSetBuffering stdin NoBuffering
         liftIO $ hSetBuffering stderr NoBuffering
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
         -- On Unix, stdin will use the locale encoding.  The IO library
         -- doesn't do this on Windows (yet), so for now we use UTF-8,
         -- for consistency with GHC 6.10 and to make the tests work.

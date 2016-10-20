@@ -1,6 +1,6 @@
 #include "Rts.h"
 
-#ifdef darwin_HOST_OS
+#if darwin_HOST_OS
 #define STG_GLOBAL ".globl "
 #else
 #define STG_GLOBAL ".global "
@@ -18,9 +18,9 @@ void __dummy__(void)
         STG_GLOBAL GETESP "\n"
         GETESP ":\n\t"
 
-#if defined(i386_HOST_ARCH)
+#if i386_HOST_ARCH
         "movl %%esp, %%eax\n\t"
-#elif defined(x86_64_HOST_ARCH)
+#elif x86_64_HOST_ARCH
         "movq %%rsp, %%rax\n\t"
 #else
 #error splign.c: not implemented for this architecture

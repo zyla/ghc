@@ -76,7 +76,8 @@ typedef struct ForeignExportStablePtr_ {
     struct ForeignExportStablePtr_ *next;
 } ForeignExportStablePtr;
 
-#if powerpc_HOST_ARCH || x86_64_HOST_ARCH || arm_HOST_ARCH
+#if powerpc_HOST_ARCH || x86_64_HOST_ARCH \
+        || arm_HOST_ARCH
 #define NEED_SYMBOL_EXTRAS 1
 #endif
 
@@ -84,7 +85,7 @@ typedef struct ForeignExportStablePtr_ {
  * address relocations on the PowerPC, x86_64 and ARM.
  */
 typedef struct {
-#ifdef powerpc_HOST_ARCH
+#if powerpc_HOST_ARCH
     struct {
         short lis_r12, hi_addr;
         short ori_r12_r12, lo_addr;
@@ -184,7 +185,7 @@ void exitLinker( void );
 
 void freeObjectCode (ObjectCode *oc);
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 
 typedef unsigned char          UChar;
 typedef unsigned short         UInt16;

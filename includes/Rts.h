@@ -17,6 +17,8 @@
 extern "C" {
 #endif
 
+#include "MachineDefines.h"
+
 /* We include windows.h very early, as on Win64 the CONTEXT type has
    fields "R8", "R9" and "R10", which goes bad if we've already
    #define'd those names for our own purposes (in stg/Regs.h) */
@@ -69,7 +71,7 @@ extern "C" {
 #endif
 
 /* Fix for mingw stat problem (done here so it's early enough) */
-#ifdef mingw32_HOST_OS
+#if mingw32_HOST_OS
 #define __MSVCRT__ 1
 #endif
 
@@ -243,7 +245,7 @@ DLL_IMPORT_RTS extern char **prog_argv; /* so we can get at these from Haskell *
 DLL_IMPORT_RTS extern int    prog_argc;
 DLL_IMPORT_RTS extern char  *prog_name;
 
-#ifdef mingw32_HOST_OS
+#if mingw32_HOST_OS
 // We need these two from Haskell too
 void getWin32ProgArgv(int *argc, wchar_t **argv[]);
 void setWin32ProgArgv(int argc, wchar_t *argv[]);
@@ -253,7 +255,7 @@ void stackOverflow(StgTSO* tso);
 
 void stg_exit(int n) GNU_ATTRIBUTE(__noreturn__);
 
-#ifndef mingw32_HOST_OS
+#if !mingw32_HOST_OS
 int stg_sig_install (int, int, void *);
 #endif
 

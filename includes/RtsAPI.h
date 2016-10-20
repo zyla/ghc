@@ -136,7 +136,7 @@ extern void hs_init_ghc (int *argc, char **argv[],   // program arguments
 extern void shutdownHaskellAndExit (int exitCode, int fastExit)
     GNUC3_ATTRIBUTE(__noreturn__);
 
-#ifndef mingw32_HOST_OS
+#if !mingw32_HOST_OS
 extern void shutdownHaskellAndSignal (int sig, int fastExit)
      GNUC3_ATTRIBUTE(__noreturn__);
 #endif

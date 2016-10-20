@@ -37,6 +37,8 @@
 
 #else
 
+#include "MachineDefines.h"
+
 #define MACHREGS_NO_REGS 0
 
 #define MACHREGS_i386     i386_HOST_ARCH

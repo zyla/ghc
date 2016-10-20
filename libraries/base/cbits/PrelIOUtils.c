@@ -25,7 +25,7 @@ void debugBelch2(const char*s, char *t)
 #  include <langinfo.h>
 #endif
 
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
 const char* localeEncoding(void)
 {
 #if defined(HAVE_LIBCHARSET)

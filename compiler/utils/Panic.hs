@@ -41,7 +41,7 @@ import System.Environment
 import System.Posix.Signals
 #endif
 
-#if defined(mingw32_HOST_OS)
+#if mingw32_HOST_OS
 import GHC.ConsoleHandler
 #endif
 
@@ -239,7 +239,7 @@ installSignalHandlers = do
           Nothing -> return ()
           Just t  -> throwTo t UserInterrupt
 
-#if !defined(mingw32_HOST_OS)
+#if !mingw32_HOST_OS
   _ <- installHandler sigQUIT  (Catch interrupt) Nothing
   _ <- installHandler sigINT   (Catch interrupt) Nothing
   -- see #3656; in the future we should install these automatically for

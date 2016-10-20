@@ -14,7 +14,7 @@
 #ifndef SMP_H
 #define SMP_H
 
-#if arm_HOST_ARCH && defined(arm_HOST_ARCH_PRE_ARMv6)
+#if arm_HOST_ARCH && arm_HOST_ARCH_PRE_ARMv6
 void arm_atomic_spin_lock(void);
 void arm_atomic_spin_unlock(void);
 #endif
@@ -162,7 +162,7 @@ atomic_dec(StgVolatilePtr p)
 EXTERN_INLINE void
 busy_wait_nop(void)
 {
-#if defined(i386_HOST_ARCH) || defined(x86_64_HOST_ARCH)
+#if i386_HOST_ARCH || x86_64_HOST_ARCH
     // On Intel, the busy-wait-nop instruction is called "pause",
     // which is actually represented as a nop with the rep prefix.
     // On processors before the P4 this behaves as a nop; on P4 and
@@ -189,12 +189,13 @@ write_barrier(void) {
     return;
 #elif i386_HOST_ARCH || x86_64_HOST_ARCH
     __asm__ __volatile__ ("" : : : "memory");
-#elif powerpc_HOST_ARCH || powerpc64_HOST_ARCH || powerpc64le_HOST_ARCH
+#elif powerpc_HOST_ARCH || powerpc64_HOST_ARCH \
+		|| powerpc64le_HOST_ARCH
     __asm__ __volatile__ ("lwsync" : : : "memory");
 #elif sparc_HOST_ARCH
     /* Sparc in TSO mode does not require store/store barriers. */
     __asm__ __volatile__ ("" : : : "memory");
-#elif (arm_HOST_ARCH) || aarch64_HOST_ARCH
+#elif arm_HOST_ARCH || aarch64_HOST_ARCH
     __asm__ __volatile__ ("dmb  st" : : : "memory");
 #else
 #error memory barriers unimplemented on this architecture
@@ -209,7 +210,8 @@ store_load_barrier(void) {
     __asm__ __volatile__ ("lock; addl $0,0(%%esp)" : : : "memory");
 #elif x86_64_HOST_ARCH
     __asm__ __volatile__ ("lock; addq $0,0(%%rsp)" : : : "memory");
-#elif powerpc_HOST_ARCH || powerpc64_HOST_ARCH || powerpc64le_HOST_ARCH
+#elif powerpc_HOST_ARCH || powerpc64_HOST_ARCH \
+		|| powerpc64le_HOST_ARCH
     __asm__ __volatile__ ("sync" : : : "memory");
 #elif sparc_HOST_ARCH
     __asm__ __volatile__ ("membar #StoreLoad" : : : "memory");
@@ -230,7 +232,8 @@ load_load_barrier(void) {
     __asm__ __volatile__ ("" : : : "memory");
 #elif x86_64_HOST_ARCH
     __asm__ __volatile__ ("" : : : "memory");
-#elif powerpc_HOST_ARCH || powerpc64_HOST_ARCH || powerpc64le_HOST_ARCH
+#elif powerpc_HOST_ARCH || powerpc64_HOST_ARCH \
+		|| powerpc64le_HOST_ARCH
     __asm__ __volatile__ ("lwsync" : : : "memory");
 #elif sparc_HOST_ARCH
     /* Sparc in TSO mode does not require load/load barriers. */

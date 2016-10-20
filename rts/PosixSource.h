@@ -9,7 +9,7 @@
 #ifndef POSIXSOURCE_H
 #define POSIXSOURCE_H
 
-#include <ghcplatform.h>
+#include <MachineDefines.h>
 
 /* We aim for C99 so we need to define following two defines in a consistent way
    with what POSIX/XOPEN provide for C99. Some OSes are particularly picky about
@@ -30,7 +30,7 @@
    Oracle's Solaris 11 supports only up to XPG6, hence the ifdef.
   */
 
-#if defined(solaris2_HOST_OS)
+#if solaris2_HOST_OS
 #define _POSIX_C_SOURCE 200112L
 #define _XOPEN_SOURCE   600
 #else

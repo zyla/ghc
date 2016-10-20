@@ -306,7 +306,7 @@ void osBindMBlocksToNode(
     StgWord size STG_UNUSED,
     uint32_t node STG_UNUSED)
 {
-#if HAVE_LIBNUMA
+#if USE_LIBNUMA
     int ret;
     StgWord mask = 0;
     mask |= 1 << node;
@@ -368,7 +368,7 @@ StgWord64 getPhysicalMemorySize (void)
 {
     static StgWord64 physMemSize = 0;
     if (!physMemSize) {
-#if defined(darwin_HOST_OS) || defined(ios_HOST_OS)
+#if darwin_HOST_OS || ios_HOST_OS
         /* So, darwin doesn't support _SC_PHYS_PAGES, but it does
            support getting the raw memory size in bytes through
            sysctlbyname(hw.memsize); */
@@ -564,7 +564,7 @@ void osReleaseHeapMemory(void)
 
 rtsBool osNumaAvailable(void)
 {
-#if HAVE_LIBNUMA
+#if USE_LIBNUMA
     return (numa_available() != -1);
 #else
     return rtsFalse;
@@ -573,7 +573,7 @@ rtsBool osNumaAvailable(void)
 
 uint32_t osNumaNodes(void)
 {
-#if HAVE_LIBNUMA
+#if USE_LIBNUMA
     return numa_num_configured_nodes();
 #else
     return 1;
@@ -582,7 +582,7 @@ uint32_t osNumaNodes(void)
 
 StgWord osNumaMask(void)
 {
-#if HAVE_LIBNUMA
+#if USE_LIBNUMA
     struct bitmask *mask;
     mask = numa_get_mems_allowed();
     if (mask->size > sizeof(StgWord)*8) {
