@@ -48,7 +48,9 @@ defaultsHook (void)
 void
 StackOverflowHook (StgWord stack_size)    /* in bytes */
 {
-    fprintf(stderr, "GHC stack-space overflow: current limit is %zu bytes.\nUse the `-K<size>' option to increase it.\n", (size_t)stack_size);
+    fprintf(stderr, "GHC stack-space overflow: current limit is %" FMT_Word
+        " bytes.\nUse the `-K<size>' option to increase it.\n",
+        (StgWord) stack_size);
 }
 
 int main (int argc, char *argv[])
