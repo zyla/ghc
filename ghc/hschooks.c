@@ -4,6 +4,8 @@ for various bits of the RTS.  They are linked
 in instead of the defaults.
 */
 
+#define __USE_MINGW_ANSI_STDIO 1
+
 #include "Rts.h"
 
 #include "HsFFI.h"
