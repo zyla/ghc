@@ -1509,8 +1509,10 @@ maybe_sym IsSwapped  = mkSymCo
 maybe_sym NotSwapped = id
 
 swapOverTyVars :: TcTyVar -> TcTyVar -> Bool
--- See Note [Canonical orientation for tyvar/tyvar equality constraints]
 swapOverTyVars tv1 tv2
+  | isFmvTyVar tv1 = False  -- Note [Put flatten unification variables on the left]
+  | isFmvTyVar tv2 = True
+
   | Just lvl1 <- metaTyVarTcLevel_maybe tv1
       -- If tv1 is touchable, swap only if tv2 is also
       -- touchable and it's strictly better to update the latter
@@ -1565,7 +1567,41 @@ canSolveByUnification tclvl tv xi
                        FlatSkol {} -> False
                        RuntimeUnk  -> True
 
-{-
+{- Note [Put flatten unification variables on the left]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In a tyvar/tyvar equality we put flatten-unification-variables on the
+left, even if the other variable is toucahble.
+
+Reason: unifying alpha := fmv is a Bad Idea because it commits
+alpha to an uniformative value, whereas a later constraint
+alpha ~ Int might unlock everything.  Comment:9 of #12526 gives
+a detailed example.
+
+Here is another example from IndTypesPerfMerge. From the ambiguity
+check for
+  f :: (F a ~ a) => a
+we get:
+      [G] F a ~ a
+      [W] F alpha ~ alpha, alpha ~ a
+
+    From Givens we get
+      [G] F a ~ fsk, fsk ~ a
+
+    Now if we flatten we get
+      [W] alpha ~ fmv, F alpha ~ fmv, alpha ~ a
+
+    Now, processing the first one first, if we unified
+    alpha := fmv we'd get
+      [W] F fmv ~ fmv, fmv ~ a
+
+    And now we are stuck.
+
+Solution: always put fmvs on the left, so we get
+      [W] fmv ~ alpha, F alpha ~ fmv, alpha ~ a
+
+The point is that fmvs are very uninformative, so doing alpha := fmv
+is a bad idea.  We want to use other constraints on alpha first.
+
 Note [Prevent unification with type families]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We prevent unification with type families because of an uneasy compromise.

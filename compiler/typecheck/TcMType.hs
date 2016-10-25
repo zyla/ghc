@@ -43,7 +43,7 @@ module TcMType (
   --------------------------------
   -- Creating new evidence variables
   newEvVar, newEvVars, newDict,
-  newWanted, newWanteds,
+  newWanted, newWanteds, cloneWanted, cloneWC,
   emitWanted, emitWantedEq, emitWantedEvVar, emitWantedEvVars,
   newTcEvBinds, addTcEvBind,
 
@@ -174,6 +174,24 @@ newWanted orig t_or_k pty
 
 newWanteds :: CtOrigin -> ThetaType -> TcM [CtEvidence]
 newWanteds orig = mapM (newWanted orig Nothing)
+
+cloneWanted :: Ct -> TcM CtEvidence
+cloneWanted ct
+  = newWanted (ctEvOrigin ev) Nothing (ctEvPred ev)
+  where
+    ev = ctEvidence ct
+
+cloneWC :: WantedConstraints -> TcM WantedConstraints
+cloneWC wc@(WC { wc_simple = simples, wc_impl = implics })
+  = do { simples' <- mapBagM clone_one simples
+       ; implics' <- mapBagM clone_implic implics
+       ; return (wc { wc_simple = simples', wc_impl = implics' }) }
+  where
+    clone_one ct = do { ev <- cloneWanted ct; return (mkNonCanonical ev) }
+    
+    clone_implic implic@(Implic { ic_wanted = inner_wanted })
+      = do { inner_wanted' <- cloneWC inner_wanted
+           ; return (implic { ic_wanted = inner_wanted' }) }
 
 -- | Emits a new Wanted. Deals with both equalities and non-equalities.
 emitWanted :: CtOrigin -> TcPredType -> TcM EvTerm

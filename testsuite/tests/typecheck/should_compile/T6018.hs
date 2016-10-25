@@ -8,6 +8,19 @@
 
 module T6018 where
 
+{-
+g6_use :: [Char]
+g6_use = g6_id "foo"
+
+g6_id :: G6 a -> G6 a
+g6_id x = x
+
+type family G6 a = r | r -> a
+type instance G6 [a]  = [Gi a]
+type family Gi a = r | r -> a
+type instance Gi Int = Char
+-}
+
 import T6018a -- defines G, identical to F
 
 type family F a b c = (result :: k) | result -> a b c

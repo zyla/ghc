@@ -1,0 +1,11 @@
+
+T12538.hs:37:13: error:
+    • Could not deduce: a' ~ Tagged Int a arising from a use of ‘tag’
+      from the context: (TagImpl a a', b ~ DF a')
+        bound by the instance declaration at T12538.hs:36:10-46
+      ‘a'’ is a rigid type variable bound by
+        the instance declaration at T12538.hs:36:10-46
+    • In the second argument of ‘(.)’, namely ‘tag’
+      In the expression: DF . tag
+      In an equation for ‘df’: df = DF . tag
+    • Relevant bindings include df :: a -> b (bound at T12538.hs:37:3)

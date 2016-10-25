@@ -78,10 +78,8 @@ module TcRnTypes(
         ctEvTerm, ctEvCoercion, ctEvId,
         tyCoVarsOfCt, tyCoVarsOfCts,
         tyCoVarsOfCtList, tyCoVarsOfCtsList,
-        toDerivedCt,
 
         WantedConstraints(..), insolubleWC, emptyWC, isEmptyWC,
-        toDerivedWC,
         andWC, unionsWC, mkSimpleWC, mkImplicWC,
         addInsols, getInsolubles, addSimples, addImplics,
         tyCoVarsOfWC, dropDerivedWC, dropDerivedSimples, dropDerivedInsols,
@@ -1486,7 +1484,8 @@ data Ct
       cc_tyvar  :: TcTyVar,
       cc_rhs    :: TcType,     -- Not necessarily function-free (hence not Xi)
                                -- See invariants above
-      cc_eq_rel :: EqRel
+
+      cc_eq_rel :: EqRel       -- INVARIANT: cc_eq_rel = ctEvEqRel cc_ev
     }
 
   | CFunEqCan {  -- F xis ~ fsk
@@ -1601,16 +1600,6 @@ ctOrigin = ctLocOrigin . ctLoc
 ctPred :: Ct -> PredType
 -- See Note [Ct/evidence invariant]
 ctPred ct = ctEvPred (cc_ev ct)
-
--- | Convert a Wanted to a Derived
-toDerivedCt :: Ct -> Ct
-toDerivedCt ct
-  = case ctEvidence ct of
-      CtWanted { ctev_pred = pred, ctev_loc = loc }
-        -> ct {cc_ev = CtDerived {ctev_pred = pred, ctev_loc = loc}}
-
-      CtDerived {} -> ct
-      CtGiven   {} -> pprPanic "to_derived" (ppr ct)
 
 -- | Makes a new equality predicate with the same role as the given
 -- evidence.
@@ -2051,16 +2040,6 @@ andWC (WC { wc_simple = f1, wc_impl = i1, wc_insol = n1 })
 unionsWC :: [WantedConstraints] -> WantedConstraints
 unionsWC = foldr andWC emptyWC
 
--- | Convert all Wanteds into Deriveds (ignoring insolubles)
-toDerivedWC :: WantedConstraints -> WantedConstraints
-toDerivedWC wc@(WC { wc_simple = simples, wc_impl = implics })
-  = wc { wc_simple = mapBag toDerivedCt simples
-       , wc_impl   = mapBag to_derived_implic implics }
-  where
-    to_derived_implic implic@(Implic { ic_wanted = inner_wanted })
-      = implic { ic_wanted = toDerivedWC inner_wanted }
-
-
 addSimples :: WantedConstraints -> Bag Ct -> WantedConstraints
 addSimples wc cts
   = wc { wc_simple = wc_simple wc `unionBags` cts }
@@ -2090,21 +2069,20 @@ isInsolubleStatus _            = False
 insolubleImplic :: Implication -> Bool
 insolubleImplic ic = isInsolubleStatus (ic_status ic)
 
-insolubleWC :: TcLevel -> WantedConstraints -> Bool
-insolubleWC tc_lvl (WC { wc_impl = implics, wc_insol = insols })
-  =  anyBag (trulyInsoluble tc_lvl) insols
+insolubleWC :: WantedConstraints -> Bool
+insolubleWC (WC { wc_impl = implics, wc_insol = insols })
+  =  anyBag trulyInsoluble insols
   || anyBag insolubleImplic implics
 
-trulyInsoluble :: TcLevel -> Ct -> Bool
+trulyInsoluble :: Ct -> Bool
 -- Constraints in the wc_insol set which ARE NOT
 -- treated as truly insoluble:
 --   a) type holes, arising from PartialTypeSignatures,
 --   b) "true" expression holes arising from TypedHoles
 --
 -- Out-of-scope variables masquerading as expression holes
--- ARE treated as truly insoluble.
--- Yuk!
-trulyInsoluble _tc_lvl insol
+-- ARE treated as truly insoluble. Yuk!
+trulyInsoluble insol
   | isHoleCt insol = isOutOfScopeCt insol
   | otherwise      = True
 
@@ -2523,7 +2501,7 @@ eqCanRewriteFR _                _                = False
 funEqCanDischarge :: CtEvidence -> CtEvidence -> Bool
 -- See Note [funEqCanDischarge]
 funEqCanDischarge ev1 ev2 = funEqCanDischargeFR (ctEvFlavourRole ev1)
-                                      (ctEvFlavourRole ev2)
+                                                (ctEvFlavourRole ev2)
 
 funEqCanDischargeFR :: CtFlavourRole -> CtFlavourRole -> Bool
 funEqCanDischargeFR (_, ReprEq)  (_, NomEq)   = False

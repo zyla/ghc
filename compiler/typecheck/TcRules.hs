@@ -310,15 +310,16 @@ simplifyRule :: RuleName
 simplifyRule name lhs_wanted rhs_wanted
   = do {         -- We allow ourselves to unify environment
                  -- variables: runTcS runs with topTcLevel
-       ; tc_lvl    <- getTcLevel
+       ; lhs_clone <- cloneWC lhs_wanted
+       ; rhs_clone <- cloneWC rhs_wanted
        ; insoluble <- runTcSDeriveds $
              do { -- First solve the LHS and *then* solve the RHS
                   -- See Note [Solve order for RULES]
                   -- See Note [Simplify *derived* constraints]
-                  lhs_resid <- solveWanteds $ toDerivedWC lhs_wanted
-                ; rhs_resid <- solveWanteds $ toDerivedWC rhs_wanted
-                ; return ( insolubleWC tc_lvl lhs_resid ||
-                           insolubleWC tc_lvl rhs_resid ) }
+                  lhs_resid <- solveWanteds lhs_clone
+                ; rhs_resid <- solveWanteds rhs_clone
+                ; return ( insolubleWC lhs_resid ||
+                           insolubleWC rhs_resid ) }
 
 
        ; zonked_lhs_simples <- zonkSimples (wc_simple lhs_wanted)
