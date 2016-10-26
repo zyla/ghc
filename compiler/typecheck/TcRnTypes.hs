@@ -2080,8 +2080,11 @@ trulyInsoluble :: Ct -> Bool
 --   a) type holes, arising from PartialTypeSignatures,
 --   b) "true" expression holes arising from TypedHoles
 --
--- Out-of-scope variables masquerading as expression holes
--- ARE treated as truly insoluble. Yuk!
+-- A "expression hole" or "type hole" constraint isn't really an error
+-- at all; it's a report saying "_ :: Int" here.  But an out-of-scope
+-- variable masquerading as expression holes IS treated as truly
+-- insoluble, so that it trumps other errors during error reporting.
+-- Yuk!
 trulyInsoluble insol
   | isHoleCt insol = isOutOfScopeCt insol
   | otherwise      = True

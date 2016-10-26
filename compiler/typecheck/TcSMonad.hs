@@ -920,26 +920,6 @@ inerts whenever the tyvar of a work item is "exposed", where exposed means
 not under some proper data-type constructor, like [] or Maybe. See
 isTyVarExposed in TcType. This is encoded in (K3b).
 
-Note [Stability of flattening]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The inert_eqs and inert_model, *considered separately* are each stable;
-that is, substituting using them will terminate.  Considered *together*
-they are not.  E.g.
-
-  Add: [G] a~[b] to inert set with model  [D] b~[a]
-
-  We add [G] a~[b] to inert_eqs, and emit [D] a~[b]. At this point
-  the combination of inert_eqs and inert_model is not stable.
-
-  Then we canonicalise [D] a~[b] to [D] a~[[a]], and add that to
-  insolubles as an occurs check.
-
-* When canonicalizing, the flattener respects flavours. In particular,
-  when flattening a type variable 'a':
-    * Derived:      look up 'a' in the inert_model
-    * Given/Wanted: look up 'a' in the inert_eqs
-
-
 Note [Flavours with roles]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 The system described in Note [inert_eqs: the inert equalities]
@@ -1116,7 +1096,7 @@ efficient too!
 
 Still, here's one possible reason for adding derived shadows
 for Givens.  Consider
-           work-item [G] a ~ [b], model has [D] b ~ a.
+           work-item [G] a ~ [b], inerts has [D] b ~ a.
 If we added the derived shadow (into the work list)
          [D] a ~ [b]
 When we process it, we'll rewrite to a ~ [a] and get an
@@ -1236,11 +1216,11 @@ lookupFlattenTyVar ieqs ftv
 Supppose we have an injective function F and
   inert_funeqs:   F t1 ~ fsk1
                   F t2 ~ fsk2
-  model           fsk1 ~ fsk2
+  inert_eqs:      fsk1 ~ fsk2
 
 We never rewrite the RHS (cc_fsk) of a CFunEqCan.  But we /do/ want to
 get the [D] t1 ~ t2 from the injectiveness of F.  So we look up the
-cc_fsk of CFunEqCans in the model when trying to find derived
+cc_fsk of CFunEqCans in the inert_eqs when trying to find derived
 equalities arising from injectivity.
 -}
 
@@ -1315,58 +1295,13 @@ eqTauTypeX eqs t1 t2
 
 Note [Adding an inert canonical constraint the InertCans]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-* Adding any constraint c *other* than a CTyEqCan (TcSMonad.addInertCan):
-
-    * If c can be rewritten by model, emit the shadow constraint [D] c
-      as NonCanonical.   See Note [Emitting shadow constraints]
-
-    * Reason for non-canonical: a CFunEqCan has a unique fmv on the RHS,
-      so we must not duplicate it.
-
 * Adding a *nominal* CTyEqCan (a ~N ty) to the inert set (TcSMonad.addInertEq).
+  Always (G/W/D) kick out constraints that can be rewritten
+  (respecting flavours) by the new constraint. This is done
+   by kickOutRewritable.
 
-    (A) Always (G/W/D) kick out constraints that can be rewritten
-        (respecting flavours) by the new constraint. This is done
-        by kickOutRewritable.
-
-    (B) Applies only to Nominal equalities: a ~ ty.  Four cases:
-
-        [Representational]   [G/W/D] a ~R ty:
-          Just add it to inert_eqs
-
-        [Derived Nominal]  [D] a ~N ty:
-          1. Add (a~ty) to the model
-             NB: 'a' cannot be in fv(ty), because the constraint is canonical.
-
-          2. (DShadow) Do emitDerivedShadows
-               For every inert [W] constraint c, st
-                (a) (a~ty) can rewrite c (see Note [Emitting shadow constraints]),
-                    and
-                (b) the model cannot rewrite c
-               kick out a Derived *copy*, leaving the original unchanged.
-               Reason for (b) if the model can rewrite c, then we have already
-               generated a shadow copy
-               See Note [Add derived shadows only for Wanteds]
-
-              Reason for doing this at all: class or fun-eq constraints may be
-	      rewritten and fundeps may then give rise to new equalities.
-	      An Irred constraint might be rewritten to a class constraint
-	      that has superclasses or fundeps
-
-       [Given/Wanted Nominal]  [G/W] a ~N ty:
-          1. Add it to inert_eqs
-          2. For [W], Emit [D] a~ty
-             Step (2) is needed to allow the current model to fully
-             rewrite [D] a~ty before adding it using the [Derived Nominal]
-             steps above.
-             See Note [Add derived shadows only for Wanteds]
-
-* Unifying a:=ty, is like adding [G] a~ty, but we can't make a [D]
-  a~ty, as in step (1) of the [G/W] case above.  So instead, do
-  kickOutAfterUnification:
-    - Kick out from the model any equality (b~ty2) that mentions 'a'
-      (i.e. a=b or a in ty2).  Example:
-            [G] a ~ [b],    model [D] b ~ [a]
+* Unifying a:=ty, is like adding [G] a~ty; just use kickOutRewritable
+  with Nominal, Given.  See kickOutAfterUnification
 
 Note [Kicking out CFunEqCan for fundeps]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1380,7 +1315,7 @@ The new (derived) equality certainly can't rewrite the inerts. But we
 
    New:   [W] F alpha ~ fmv1
    Inert: [W] F beta ~ fmv2
-   Model: [D] fmv1 ~ fmv2
+          [D] fmv1 ~ fmv2
 
 and now improvement will discover [D] alpha ~ beta. This is important;
 eg in Trac #9587.
@@ -1598,13 +1533,8 @@ new equality, to maintain the inert-set invariants.
     kick out constraints that mention type variables whose kinds
     contain this variable!
 
-  - We do not need to kick anything out from the model; we only
-    add [D] constraints to the model (in effect) and they are
-    fully rewritten by the model, so (K2b) holds
-
-  - A Derived equality can kick out [D] constraints in inert_dicts,
-    inert_irreds etc.  Nothing in inert_eqs because there are no
-    Derived constraints in inert_eqs (they are in the model)
+  - A Derived equality can kick out [D] constraints in inert_eqs,
+    inert_dicts, inert_irreds etc.
 
   - We don't kick out constraints from inert_solved_dicts, and
     inert_solved_funeqs optimistically. But when we lookup we have to
@@ -1900,17 +1830,10 @@ prohibitedSuperClassSolve from_loc solve_loc
 
 {- Note [Unsolved Derived equalities]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-In getUnsolvedInerts, we return a derived equality from the model
-for two possible reasons:
-
-  * Because it is a candidate for floating out of this implication.
-    We only float equalities with a meta-tyvar on the left, so we only
-    pull those out here.
-
-  * If we are only solving derived constraints (i.e. tcs_need_derived
-    is true; see Note [Solving for Derived constraints]), then we
-    those Derived constraints are effectively unsolved, and we need
-    them!
+In getUnsolvedInerts, we return a derived equality from the inert_eqs
+because it is a candidate for floating out of this implication.  We
+only float equalities with a meta-tyvar on the left, so we only pull
+those out here.
 
 Note [When does an implication have given equalities?]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

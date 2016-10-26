@@ -1348,8 +1348,6 @@ doTopReact work_item
 doTopReactFunEq :: Ct -> TcS (StopOrContinue Ct)
 doTopReactFunEq work_item@(CFunEqCan { cc_ev = old_ev, cc_fun = fam_tc
                                      , cc_tyargs = args, cc_fsk = fsk })
-  | isDerived old_ev  -- Derived CFunEqCans are there only to provoke improvement
-  = no_reduction
 
   | fsk `elemVarSet` tyCoVarsOfTypes args
   = no_reduction    -- See Note [FunEq occurs-check principle]
@@ -1377,7 +1375,7 @@ reduce_top_fun_eq old_ev fsk (ax_co, rhs_ty)
   , isTypeFamilyTyCon tc
   , tc_args `lengthIs` tyConArity tc    -- Short-cut
   = -- RHS is another type-family application
-    -- Try shortcut; see Note [Short cut for top-level reaction]
+    -- Try shortcut; see Note [Top-level reductions for type functions]
     shortCutReduction old_ev fsk ax_co tc tc_args
 
   | isGiven old_ev  -- Not shortcut
@@ -1554,15 +1552,14 @@ Here is what we do, in four cases:
     instantiate axiom: ax_co : F tys ~ rhs
 
    Then:
-      Discharge   fmv := alpha
+      Discharge   fmv := rhs
       Discharge   x := ax_co ; sym x2
-      New wanted  [W] x2 : alpha ~ rhs  (Non-canonical)
    This is *the* way that fmv's get unified; even though they are
    "untouchable".
 
-   NB: it can be the case that fmv appears in the (instantiated) rhs.
-   In that case the new Non-canonical wanted will be loopy, but that's
-   ok.  But it's good reason NOT to claim that it is canonical!
+   NB: Given Note [FunEq occurs-check principle], fmv does not appear
+   in tys, and hence does not appear in the instantiated RHS.  So
+   the unification can't make an infinite type. 
 
 * Wanteds: short cut firing rule
   Applies when the RHS of the axiom is another type-function application
