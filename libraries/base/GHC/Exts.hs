@@ -1,6 +1,7 @@
 {-# LANGUAGE Unsafe #-}
 {-# LANGUAGE MagicHash, UnboxedTuples, TypeFamilies, DeriveDataTypeable,
-             MultiParamTypeClasses, FlexibleInstances, NoImplicitPrelude #-}
+             MultiParamTypeClasses, FlexibleInstances, NoImplicitPrelude,
+             FunctionalDependencies #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -81,7 +82,11 @@ module GHC.Exts
         Any,
 
         -- * Overloaded lists
-        IsList(..)
+        IsList(..),
+
+        -- * Overloaded cons and nil
+        IsCons(..),
+        IsNil(..)
        ) where
 
 import GHC.Prim hiding ( coerce, TYPE )
@@ -207,3 +212,16 @@ instance IsList CallStack where
   type (Item CallStack) = (String, SrcLoc)
   fromList = fromCallSiteList
   toList   = getCallStack
+
+
+class IsNil l where
+  nil :: l
+
+class IsCons h t l | h t -> l, l -> h t where
+  cons :: h -> t -> l
+
+instance IsNil [a] where
+  nil = []
+
+instance IsCons a [a] [a] where
+  cons = (:)

@@ -246,15 +246,17 @@ rnExpr (HsDo do_or_lc (L l stmts) _)
         ; return ( HsDo do_or_lc (L l stmts') placeHolderType, fvs ) }
 
 rnExpr (ExplicitList _ _  exps)
-  = do  { opt_OverloadedLists <- xoptM LangExt.OverloadedLists
+  = do  { opt_OverloadedHLists <- xoptM LangExt.OverloadedHLists
+        ; opt_OverloadedLists <- xoptM LangExt.OverloadedLists
         ; (exps', fvs) <- rnExprs exps
-        ; if opt_OverloadedLists
-           then do {
-            ; (from_list_n_name, fvs') <- lookupSyntaxName fromListNName
-            ; return (ExplicitList placeHolderType (Just from_list_n_name) exps'
-                     , fvs `plusFV` fvs') }
-           else
-            return  (ExplicitList placeHolderType Nothing exps', fvs) }
+        ; if | opt_OverloadedHLists ->
+                return (rnOverloadedHList exps', fvs)
+             | opt_OverloadedLists -> do {
+                ; (from_list_n_name, fvs') <- lookupSyntaxName fromListNName
+                ; return (ExplicitList placeHolderType (Just from_list_n_name) exps'
+                         , fvs `plusFV` fvs') }
+             | otherwise ->
+                return  (ExplicitList placeHolderType Nothing exps', fvs) }
 
 rnExpr (ExplicitPArr _ exps)
   = do { (exps', fvs) <- rnExprs exps
@@ -1982,3 +1984,16 @@ badIpBinds :: Outputable a => SDoc -> a -> SDoc
 badIpBinds what binds
   = hang (text "Implicit-parameter bindings illegal in" <+> what)
          2 (ppr binds)
+
+
+rnOverloadedHList :: [LHsExpr Name] -> HsExpr Name
+
+rnOverloadedHList [] = HsVar $ noLoc overloadedNilName
+
+rnOverloadedHList (x : xs)
+  = HsApp
+     (noLoc $ HsApp (noLoc cons) x)
+     (noLoc $ rnOverloadedHList xs)
+     -- FIXME: no locations
+
+  where cons = HsVar $ noLoc overloadedConsName

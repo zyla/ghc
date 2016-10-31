@@ -3659,6 +3659,7 @@ xFlagsDeps = [
     "instead use per-instance pragmas OVERLAPPING/OVERLAPPABLE/OVERLAPS",
   flagSpec "OverloadedLabels"                 LangExt.OverloadedLabels,
   flagSpec "OverloadedLists"                  LangExt.OverloadedLists,
+  flagSpec "OverloadedHLists"                 LangExt.OverloadedHLists,
   flagSpec "OverloadedStrings"                LangExt.OverloadedStrings,
   flagSpec "PackageImports"                   LangExt.PackageImports,
   flagSpec "ParallelArrays"                   LangExt.ParallelArrays,

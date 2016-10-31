@@ -295,6 +295,10 @@ basicKnownKeyNames
         fromListNName,
         toListName,
 
+        -- Overloaded cons and nil
+        overloadedConsName,
+        overloadedNilName,
+
         -- List operations
         concatName, filterName, mapName,
         zipName, foldrName, buildName, augmentName, appendName,
@@ -1252,6 +1256,10 @@ isListClassName = clsQual gHC_EXTS (fsLit "IsList")    isListClassKey
 fromListName    = varQual gHC_EXTS (fsLit "fromList")  fromListClassOpKey
 fromListNName   = varQual gHC_EXTS (fsLit "fromListN") fromListNClassOpKey
 toListName      = varQual gHC_EXTS (fsLit "toList")    toListClassOpKey
+
+-- Overloaded cons and nil
+overloadedConsName = varQual gHC_EXTS (fsLit "cons")  consClassOpKey
+overloadedNilName  = varQual gHC_EXTS (fsLit "nil")   nilClassOpKey
 
 -- Class Show
 showClassName :: Name
@@ -2219,6 +2227,10 @@ pushCallStackKey  = mkPreludeMiscIdUnique 518
 
 fromStaticPtrClassOpKey :: Unique
 fromStaticPtrClassOpKey = mkPreludeMiscIdUnique 519
+
+consClassOpKey, nilClassOpKey :: Unique
+consClassOpKey = mkPreludeMiscIdUnique 520
+nilClassOpKey = mkPreludeMiscIdUnique 521
 
 {-
 ************************************************************************

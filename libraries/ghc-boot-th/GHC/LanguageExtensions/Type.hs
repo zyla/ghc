@@ -54,6 +54,7 @@ data Extension
    | TypeInType
    | OverloadedStrings
    | OverloadedLists
+   | OverloadedHLists
    | NumDecimals
    | DisambiguateRecordFields
    | RecordWildCards
