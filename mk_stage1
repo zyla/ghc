@@ -1,0 +1,1 @@
+make -j stage=1 all_ghc_stage1 NO_GENERATED_MAKEFILE_RULES=YES

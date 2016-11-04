@@ -610,8 +610,8 @@ can_eq_nc' _flat _rdr_env _envs ev eq_rel ty1@(LitTy l1) _ (LitTy l2) _
 can_eq_nc' _flat _rdr_env _envs ev eq_rel ty1 _ ty2 _
   | Just (tc1, tys1) <- tcRepSplitTyConApp_maybe ty1
   , Just (tc2, tys2) <- tcRepSplitTyConApp_maybe ty2
-  , not (isTypeFamilyTyCon tc1)
-  , not (isTypeFamilyTyCon tc2)
+  , not (isTypeFamilyTyCon tc1 && tyConArity tc1 <= length tys1)
+  , not (isTypeFamilyTyCon tc2 && tyConArity tc2 <= length tys2)
   = canTyConApp ev eq_rel tc1 tys1 tc2 tys2
 
 can_eq_nc' _flat _rdr_env _envs ev eq_rel

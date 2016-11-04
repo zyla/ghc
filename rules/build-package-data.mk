@@ -124,7 +124,7 @@ $1/$2/package-data.mk : $$$$(ghc-cabal_INPLACE) $$($1_$2_GHC_PKG_DEP) $1/$$($1_P
 # stage1/stage2, or we don't really care about them.
 ifneq "$3" "0"
 ifneq "$$($1_NO_CHECK)" "YES"
-	"$$(ghc-cabal_INPLACE)" check $1
+ 	"$$(ghc-cabal_INPLACE)" check $1
 endif
 endif
 	"$$(ghc-cabal_INPLACE)" configure $1 $2 "$$($1_$2_dll0_MODULES)" --with-ghc="$$($1_$2_HC_CONFIG)" --with-ghc-pkg="$$($1_$2_GHC_PKG)" $$($1_CONFIGURE_OPTS) $$($1_$2_CONFIGURE_OPTS)

@@ -1211,10 +1211,21 @@ uType_defer origin t_or_k ty1 ty2
        ; whenDOptM Opt_D_dump_tc_trace $ do
             { ctxt <- getErrCtxt
             ; doc <- mkErrInfo emptyTidyEnv ctxt
-            ; traceTc "utype_defer" (vcat [ppr co, ppr ty1,
-                                           ppr ty2, pprCtOrigin origin, doc])
+            ; traceTc "utype_defer" (vcat [ppr co,
+                                           sep [ppr ty1, text "--", text (describe ty1)],
+                                           sep [ppr ty2, text "--", text (describe ty2)],
+                                           pprCtOrigin origin, doc])
             }
        ; return co }
+
+describe (TyVarTy _) = "TyVarTy"
+describe (AppTy _ _) = "AppTy"
+describe (TyConApp _ _) = "TyConApp"
+describe (ForAllTy _ _) = "ForAllTy"
+describe (FunTy _ _) = "FunTy"
+describe (LitTy _) = "LitTy"
+describe (CastTy _ _) = "CastTy"
+describe (CoercionTy _) = "CoercionTy"
 
 --------------
 uType origin t_or_k orig_ty1 orig_ty2
@@ -1281,18 +1292,18 @@ uType origin t_or_k orig_ty1 orig_ty2
            ; co_r <- uType origin t_or_k arg1 arg2
            ; return $ mkFunCo Nominal co_l co_r }
 
-        -- Always defer if a type synonym family (type function)
-        -- is involved.  (Data families behave rigidly.)
-    go ty1@(TyConApp tc1 _) ty2
-      | isTypeFamilyTyCon tc1 = defer ty1 ty2
-    go ty1 ty2@(TyConApp tc2 _)
-      | isTypeFamilyTyCon tc2 = defer ty1 ty2
+        -- Always defer if a saturated type family application
+        -- is involved.  (Unsaturated TFs and data families behave rigidly.)
+    go ty1@(TyConApp tc1 tys) ty2
+      | isTypeFamilyTyCon tc1, tyConArity tc1 <= length tys = defer ty1 ty2
+    go ty1 ty2@(TyConApp tc2 tys)
+      | isTypeFamilyTyCon tc2, tyConArity tc2 <= length tys = defer ty1 ty2
 
     go (TyConApp tc1 tys1) (TyConApp tc2 tys2)
       -- See Note [Mismatched type lists and application decomposition]
       | tc1 == tc2, length tys1 == length tys2
-      = ASSERT2( isGenerativeTyCon tc1 Nominal, ppr tc1 )
-        do { cos <- zipWithM (uType origin t_or_k) tys1 tys2
+      , isGenerativeTyCon tc1 Nominal
+      = do { cos <- zipWithM (uType origin t_or_k) tys1 tys2
            ; return $ mkTyConAppCo Nominal tc1 cos }
 
     go (LitTy m) ty@(LitTy n)
@@ -1495,13 +1506,15 @@ uUnfilledVar2 origin t_or_k swapped tv1 ty2
            ; return (maybe_sym swapped co) }
 
       | otherwise
-      = unSwap swapped (uType_defer origin t_or_k) ty1 ty2
+      = do { traceTc "lol unfilled var defer" $ vcat [ppr ty2, text $ case metaTyVarInfo tv1 of { SigTv -> "SigTv"; _ -> "other tv" }]
+           ; unSwap swapped (uType_defer origin t_or_k) ty1 ty2 }
                -- Occurs check or an untouchable: just defer
                -- NB: occurs check isn't necessarily fatal:
                --     eg tv1 occured in type family parameter
 
     ty1 = mkTyVarTy tv1
     kind_origin = KindEqOrigin ty1 (Just ty2) origin (Just t_or_k)
+
 
 -- | apply sym iff swapped
 maybe_sym :: SwapFlag -> Coercion -> Coercion
@@ -1882,7 +1895,7 @@ metaTyVarUpdateOK :: DynFlags
 -- See Note [Refactoring hazard: checkTauTvUpdate]
 
 metaTyVarUpdateOK dflags tv ty
-  = case preCheck dflags False tv ty of
+  = case preCheck dflags True tv ty of
          -- False <=> type families not ok
          -- See Note [Prevent unification with type families]
       OC_OK _   -> Just ty

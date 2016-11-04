@@ -966,7 +966,7 @@ flatten_one ty@(TyConApp tc tys)
   -- Otherwise, it's a type function application, and we have to
   -- flatten it away as well, and generate a new given equality constraint
   -- between the application and a newly generated flattening skolem variable.
-  | isTypeFamilyTyCon tc
+  | isTypeFamilyTyCon tc && tyConArity tc <= length tys
   = flatten_fam_app tc tys
 
   -- For * a normal data type application

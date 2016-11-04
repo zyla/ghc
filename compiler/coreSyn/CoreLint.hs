@@ -1084,8 +1084,8 @@ lintType ty@(TyConApp tc tys)
   = lintType ty'   -- Expand type synonyms, so that we do not bogusly complain
                    --  about un-saturated type synonyms
 
-  | isUnliftedTyCon tc || isTypeSynonymTyCon tc || isTypeFamilyTyCon tc
-       -- Also type synonyms and type families
+  | isUnliftedTyCon tc || isTypeSynonymTyCon tc
+       -- Also type synonyms
   , length tys < tyConArity tc
   = failWithL (hang (text "Un-saturated type application") 2 (ppr ty))
 
