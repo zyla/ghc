@@ -31,6 +31,7 @@ module GHC.TypeLits
   , SomeNat(..), SomeSymbol(..)
   , someNatVal, someSymbolVal
   , sameNat, sameSymbol
+  , SymbolVal, MkSymbol
 
 
     -- * Functions on type literals
@@ -275,6 +276,11 @@ sameSymbol x y
   | otherwise                   = Nothing
 
 --------------------------------------------------------------------------------
+
+type family SymbolVal (s :: Symbol) :: [Nat]
+type family MkSymbol (chars :: [Nat]) :: Symbol
+
+--------------------------------------------------------------------------------
 -- PRIVATE:
 
 newtype SNat    (n :: Nat)    = SNat    Integer
@@ -292,3 +298,4 @@ withSNat f x y = magicDict (WrapN f) x y
 withSSymbol :: (KnownSymbol a => Proxy a -> b)
             -> SSymbol a      -> Proxy a -> b
 withSSymbol f x y = magicDict (WrapS f) x y
+

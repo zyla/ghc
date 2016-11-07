@@ -2220,6 +2220,10 @@ pushCallStackKey  = mkPreludeMiscIdUnique 518
 fromStaticPtrClassOpKey :: Unique
 fromStaticPtrClassOpKey = mkPreludeMiscIdUnique 519
 
+symbolValTyConKey, mkSymbolTyConKey :: Unique
+symbolValTyConKey = mkPreludeTyConUnique 520
+mkSymbolTyConKey = mkPreludeTyConUnique 521
+
 {-
 ************************************************************************
 *                                                                      *

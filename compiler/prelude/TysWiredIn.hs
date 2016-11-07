@@ -153,6 +153,7 @@ import FastString
 import Outputable
 import Util
 import BooleanFormula   ( mkAnd )
+import Pair             ( Pair(..) )
 
 import qualified Data.ByteString.Char8 as BS
 #if !MIN_VERSION_bytestring(0,10,8)
@@ -227,6 +228,8 @@ wiredInTyCons = [ -- Units are not treated like other tuples, because then
                 , liftedTypeKindTyCon
                 , starKindTyCon
                 , unicodeStarKindTyCon
+                , symbolValTyCon
+                , mkSymbolTyCon
                 ]
 
 mkWiredInTyConName :: BuiltInSyntax -> Module -> FastString -> Unique -> TyCon -> Name
@@ -1532,3 +1535,81 @@ promotedGTDataCon     = promoteDataCon gtDataCon
 promotedConsDataCon, promotedNilDataCon :: TyCon
 promotedConsDataCon   = promoteDataCon consDataCon
 promotedNilDataCon    = promoteDataCon nilDataCon
+
+-- Symbol <-> [Nat] conversion
+-- TODO: move this to typecheck/TcSymbolVal.hs
+
+symbolValTyConName, mkSymbolTyConName :: Name
+symbolValTyConName = mkWiredInTyConName UserSyntax gHC_TYPELITS (fsLit "SymbolVal") symbolValTyConKey symbolValTyCon
+mkSymbolTyConName  = mkWiredInTyConName UserSyntax gHC_TYPELITS (fsLit "MkSymbol")  mkSymbolTyConKey  mkSymbolTyCon
+
+
+----------------------------------------------------------------------------------------
+-- SymbolVal (sym :: Symbol) :: [Nat]
+symbolValTyCon :: TyCon
+symbolValTyCon =
+  mkFamilyTyCon symbolValTyConName
+    (mkTemplateAnonTyConBinders [ typeSymbolKind ])
+    typeListOfNatsKind
+    Nothing
+    (BuiltInSynFamTyCon synFamily)
+    Nothing
+    NotInjective -- TODO: actually is injective
+  where
+    synFamily =
+      BuiltInSynFamily
+        { sfMatchFam      = matchFamSymbolVal
+        , sfInteractTop   = \_ _ -> [] -- TODO
+        , sfInteractInert = \_ _ _ _ -> [] -- TODO
+        }
+
+matchFamSymbolVal :: [Type] -> Maybe (CoAxiomRule, [Type], Type)
+matchFamSymbolVal [s] | Just str <- isStrLitTy s
+  = Just (axiomSymbolValDef, [s], typeSymbolVal str)
+matchFamSymbolVal _ = Nothing
+
+typeSymbolVal :: FastString -> Type
+typeSymbolVal str = mkNatList $ map charToInteger $ unpackFS str
+  where
+    charToInteger :: Char -> Integer
+    charToInteger = fromIntegral . fromEnum
+
+mkNatList :: [Integer] -> Type
+mkNatList [] = mkTyConApp promotedNilDataCon [ typeNatKind ]
+mkNatList (x:xs)
+  = mkTyConApp promotedConsDataCon [ typeNatKind, mkNumLitTy x, mkNatList xs ]
+
+-- TODO: Add to typeNatCoAxiomRules
+axiomSymbolValDef :: CoAxiomRule
+axiomSymbolValDef =
+  CoAxiomRule
+    { coaxrName      = fsLit "SymbolValDef"
+    , coaxrAsmpRoles = [Nominal]
+    , coaxrRole      = Nominal
+    , coaxrProves    = \equations ->
+        do [Pair sym1 sym2] <- return equations
+           sym2' <- isStrLitTy sym2
+           return (mkTyConApp symbolValTyCon [sym1] `Pair` typeSymbolVal sym2')
+    }
+
+typeListOfNatsKind :: Kind
+typeListOfNatsKind = mkTyConApp listTyCon [ typeNatKind ]
+
+----------------------------------------------------------------------------------------
+-- MkSymbol (chars :: [Nat]) :: Symbol
+mkSymbolTyCon :: TyCon
+mkSymbolTyCon =
+  mkFamilyTyCon mkSymbolTyConName
+    (mkTemplateAnonTyConBinders [ typeListOfNatsKind ])
+    typeSymbolKind
+    Nothing
+    (BuiltInSynFamTyCon synFamily)
+    Nothing
+    NotInjective -- TODO: actually is injective
+  where
+    synFamily =
+      BuiltInSynFamily
+        { sfMatchFam      = matchFamSymbolVal -- TODO
+        , sfInteractTop   = \_ _ -> [] -- TODO
+        , sfInteractInert = \_ _ _ _ -> [] -- TODO
+        }
