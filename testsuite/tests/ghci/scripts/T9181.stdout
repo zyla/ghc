@@ -31,12 +31,16 @@ class GHC.TypeLits.KnownNat (n :: GHC.Types.Nat) where
 class GHC.TypeLits.KnownSymbol (n :: GHC.Types.Symbol) where
   GHC.TypeLits.symbolSing :: GHC.TypeLits.SSymbol n
   {-# MINIMAL symbolSing #-}
+type family GHC.TypeLits.MkSymbol (a :: [GHC.Types.Nat])
+            :: GHC.Types.Symbol
 data GHC.TypeLits.SomeNat where
   GHC.TypeLits.SomeNat :: GHC.TypeLits.KnownNat n =>
                           (Data.Proxy.Proxy n) -> GHC.TypeLits.SomeNat
 data GHC.TypeLits.SomeSymbol where
   GHC.TypeLits.SomeSymbol :: GHC.TypeLits.KnownSymbol n =>
                              (Data.Proxy.Proxy n) -> GHC.TypeLits.SomeSymbol
+type family GHC.TypeLits.SymbolVal (a :: GHC.Types.Symbol)
+            :: [GHC.Types.Nat]
 type family GHC.TypeLits.TypeError (a :: GHC.TypeLits.ErrorMessage)
             :: b
 type family (GHC.TypeLits.^) (a :: GHC.Types.Nat)
