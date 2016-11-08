@@ -30,6 +30,7 @@ module DynFlags (
         dopt, dopt_set, dopt_unset,
         gopt, gopt_set, gopt_unset, setGeneralFlag', unSetGeneralFlag',
         wopt, wopt_set, wopt_unset,
+        wopt_fatal, wopt_set_fatal,
         xopt, xopt_set, xopt_unset,
         lang_set,
         useUnicodeSyntax,
@@ -807,6 +808,7 @@ data DynFlags = DynFlags {
   dumpFlags             :: IntSet,
   generalFlags          :: IntSet,
   warningFlags          :: IntSet,
+  fatalWarningFlags     :: IntSet,
   -- Don't change this without updating extensionFlags:
   language              :: Maybe Language,
   -- | Safe Haskell mode
@@ -1563,6 +1565,7 @@ defaultDynFlags mySettings =
         dumpFlags = IntSet.empty,
         generalFlags = IntSet.fromList (map fromEnum (defaultFlags mySettings)),
         warningFlags = IntSet.fromList (map fromEnum standardWarnings),
+        fatalWarningFlags = IntSet.empty,
         ghciScripts = [],
         language = Nothing,
         safeHaskell = Sf_None,
@@ -1845,6 +1848,18 @@ wopt_set dfs f = dfs{ warningFlags = IntSet.insert (fromEnum f) (warningFlags df
 -- | Unset a 'WarningFlag'
 wopt_unset :: DynFlags -> WarningFlag -> DynFlags
 wopt_unset dfs f = dfs{ warningFlags = IntSet.delete (fromEnum f) (warningFlags dfs) }
+
+-- | Test whether a 'WarningFlag' is set as fatal
+wopt_fatal :: WarningFlag -> DynFlags -> Bool
+wopt_fatal f dflags = fromEnum f `IntSet.member` fatalWarningFlags dflags
+
+-- | Mark a 'WarningFlag' as fatal (do not set the flag)
+wopt_set_fatal :: DynFlags -> WarningFlag -> DynFlags
+wopt_set_fatal dfs f = dfs{ fatalWarningFlags = IntSet.insert (fromEnum f) (fatalWarningFlags dfs) }
+
+-- | Mark a 'WarningFlag' as not fatal
+wopt_unset_fatal :: DynFlags -> WarningFlag -> DynFlags
+wopt_unset_fatal dfs f = dfs{ fatalWarningFlags = IntSet.delete (fromEnum f) (fatalWarningFlags dfs) }
 
 -- | Test whether a 'LangExt.Extension' is set
 xopt :: LangExt.Extension -> DynFlags -> Bool
@@ -2851,8 +2866,12 @@ dynamic_flags_deps = [
 
      ------ Warning opts -------------------------------------------------
   , make_ord_flag defFlag "W"       (NoArg (mapM_ setWarningFlag minusWOpts))
-  , make_ord_flag defFlag "Werror"  (NoArg (setGeneralFlag     Opt_WarnIsError))
-  , make_ord_flag defFlag "Wwarn"   (NoArg (unSetGeneralFlag   Opt_WarnIsError))
+  , make_ord_flag defFlag "Werror"  (NoArg (do { setGeneralFlag Opt_WarnIsError
+                                               ; mapM_ setFatalWarningFlag minusWeverythingOpts }))
+  , make_ord_flag defFlag "Wwarn"   (NoArg (do { unSetGeneralFlag Opt_WarnIsError
+                                               ; mapM_ unSetFatalWarningFlag minusWeverythingOpts }))
+                                               -- Opt_WarnIsError is still needed to pass -Werror to CPP;
+                                               -- see runCpp in SysTools
   , make_dep_flag defFlag "Wnot"    (NoArg (upd (\d ->
                                               d {warningFlags = IntSet.empty})))
                                              "Use -w or -Wno-everything instead"
@@ -3047,17 +3066,22 @@ dynamic_flags_deps = [
          ------ Debugging flags ----------------------------------------------
   , make_ord_flag defGhcFlag "g"             (OptIntSuffix setDebugLevel)
  ]
- ++ map (mkFlag turnOn  ""          setGeneralFlag    ) negatableFlagsDeps
- ++ map (mkFlag turnOff "no-"       unSetGeneralFlag  ) negatableFlagsDeps
- ++ map (mkFlag turnOn  "d"         setGeneralFlag    ) dFlagsDeps
- ++ map (mkFlag turnOff "dno-"      unSetGeneralFlag  ) dFlagsDeps
- ++ map (mkFlag turnOn  "f"         setGeneralFlag    ) fFlagsDeps
- ++ map (mkFlag turnOff "fno-"      unSetGeneralFlag  ) fFlagsDeps
- ++ map (mkFlag turnOn  "W"         setWarningFlag    ) wWarningFlagsDeps
- ++ map (mkFlag turnOff "Wno-"      unSetWarningFlag  ) wWarningFlagsDeps
- ++ map (mkFlag turnOn  "fwarn-"    setWarningFlag   . hideFlag)
+ ++ map (mkFlag turnOn  ""          setGeneralFlag        ) negatableFlagsDeps
+ ++ map (mkFlag turnOff "no-"       unSetGeneralFlag      ) negatableFlagsDeps
+ ++ map (mkFlag turnOn  "d"         setGeneralFlag        ) dFlagsDeps
+ ++ map (mkFlag turnOff "dno-"      unSetGeneralFlag      ) dFlagsDeps
+ ++ map (mkFlag turnOn  "f"         setGeneralFlag        ) fFlagsDeps
+ ++ map (mkFlag turnOff "fno-"      unSetGeneralFlag      ) fFlagsDeps
+ ++ map (mkFlag turnOn  "W"         setWarningFlag        ) wWarningFlagsDeps
+ ++ map (mkFlag turnOff "Wno-"      unSetWarningFlag      ) wWarningFlagsDeps
+ ++ map (mkFlag turnOn  "Werror="   (\flag -> do {
+                                       ; setWarningFlag flag
+                                       ; setFatalWarningFlag flag }))
+                                                            wWarningFlagsDeps
+ ++ map (mkFlag turnOn  "Wwarn="    unSetFatalWarningFlag ) wWarningFlagsDeps
+ ++ map (mkFlag turnOn  "fwarn-"    setWarningFlag        . hideFlag)
     wWarningFlagsDeps
- ++ map (mkFlag turnOff "fno-warn-" unSetWarningFlag . hideFlag)
+ ++ map (mkFlag turnOff "fno-warn-" unSetWarningFlag      . hideFlag)
     wWarningFlagsDeps
  ++ [ (NotDeprecated, unrecognisedWarning "W"),
       (Deprecated,    unrecognisedWarning "fwarn-"),
@@ -4241,9 +4265,11 @@ unSetGeneralFlag' f dflags = foldr ($) (gopt_unset dflags f) deps
    --     imply further flags.
 
 --------------------------
-setWarningFlag, unSetWarningFlag :: WarningFlag -> DynP ()
-setWarningFlag   f = upd (\dfs -> wopt_set dfs f)
-unSetWarningFlag f = upd (\dfs -> wopt_unset dfs f)
+setWarningFlag, unSetWarningFlag, setFatalWarningFlag, unSetFatalWarningFlag :: WarningFlag -> DynP ()
+setWarningFlag        f = upd (\dfs -> wopt_set dfs f)
+unSetWarningFlag      f = upd (\dfs -> wopt_unset dfs f)
+setFatalWarningFlag   f = upd (\dfs -> wopt_set_fatal dfs f)
+unSetFatalWarningFlag f = upd (\dfs -> wopt_unset_fatal dfs f)
 
 --------------------------
 setExtensionFlag, unSetExtensionFlag :: LangExt.Extension -> DynP ()
