@@ -1,0 +1,21 @@
+
+hole_constraints_nested.hs:12:16: warning: [-Wtyped-holes (in -Wdefault)]
+    • Found hole: _ :: Int
+    • In the expression: _
+      In a case alternative: EqOrd -> _
+      In the expression: case d2 of { EqOrd -> _ }
+    • Relevant bindings include
+        d2 :: EqOrd a (bound at hole_constraints_nested.hs:9:6)
+        d1 :: a :~: b (bound at hole_constraints_nested.hs:9:3)
+        f :: (a :~: b) -> EqOrd a -> Int
+          (bound at hole_constraints_nested.hs:9:1)
+      Constraints include
+        Eq a
+        Ord a (from a pattern with constructor:
+                      EqOrd :: forall a. (Eq a, Ord a) => EqOrd a,
+                    in a case alternative
+               at hole_constraints_nested.hs:12:7-11)
+        b ~ a (from a pattern with constructor:
+                      Refl :: forall k (a :: k). a :~: a,
+                    in a case alternative
+               at hole_constraints_nested.hs:11:5-8)
