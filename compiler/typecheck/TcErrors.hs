@@ -55,7 +55,7 @@ import Maybes
 import qualified GHC.LanguageExtensions as LangExt
 import FV ( fvVarList, unionFV )
 
-import Control.Monad    ( when, guard )
+import Control.Monad    ( when )
 import Data.List        ( partition, mapAccumL, nub, sortBy, unfoldr )
 import qualified Data.Set as Set
 
@@ -1083,21 +1083,18 @@ mkHoleError _ ct = pprPanic "mkHoleError" (ppr ct)
 -- Constraints are grouped by the 'Implication' that introduced them.
 givenConstraintsMsg :: ReportErrCtxt -> SDoc
 givenConstraintsMsg ctxt =
-    let constraint_groups :: [([Type], SkolemInfo, RealSrcSpan)]
-        constraint_groups =
-          mapMaybe (\Implic{ ic_given = given, ic_env = env, ic_info = info } ->
-                     do { guard $ not (null given)
-                        ; Just (map varType given, info, tcl_loc env) })
-                   (cec_encl ctxt)
+    let constraints :: [(Type, RealSrcSpan)]
+        constraints =
+          do { Implic{ ic_given = given, ic_env = env } <- cec_encl ctxt
+             ; constraint <- given
+             ; return (varType constraint, tcl_loc env) }
 
-        pprConstraintGroup (constraints, info, loc) =
-          vcat (map ppr constraints) <+>
-            nest 2 (parens
-              (text "from" <+> pprSkolInfo info $+$ text "at" <+> ppr loc))
+        pprConstraint (constraint, loc) =
+          ppr constraint <+> nest 2 (parens (text "from" <+> ppr loc))
 
-    in ppUnless (null constraint_groups) $
+    in ppUnless (null constraints) $
          hang (text "Constraints include")
-            2 (vcat $ map pprConstraintGroup constraint_groups)
+            2 (vcat $ map pprConstraint constraints)
 
 pp_with_type :: OccName -> Type -> SDoc
 pp_with_type occ ty = hang (pprPrefixOcc occ) 2 (dcolon <+> pprType ty)

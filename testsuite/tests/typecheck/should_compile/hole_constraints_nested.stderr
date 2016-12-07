@@ -10,12 +10,6 @@ hole_constraints_nested.hs:12:16: warning: [-Wtyped-holes (in -Wdefault)]
         f :: (a :~: b) -> EqOrd a -> Int
           (bound at hole_constraints_nested.hs:9:1)
       Constraints include
-        Eq a
-        Ord a (from a pattern with constructor:
-                      EqOrd :: forall a. (Eq a, Ord a) => EqOrd a,
-                    in a case alternative
-               at hole_constraints_nested.hs:12:7-11)
-        b ~ a (from a pattern with constructor:
-                      Refl :: forall k (a :: k). a :~: a,
-                    in a case alternative
-               at hole_constraints_nested.hs:11:5-8)
+        Eq a (from hole_constraints_nested.hs:12:7-11)
+        Ord a (from hole_constraints_nested.hs:12:7-11)
+        b ~ a (from hole_constraints_nested.hs:11:5-8)
