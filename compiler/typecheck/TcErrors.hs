@@ -1025,11 +1025,9 @@ mkHoleError ctxt ct@(CHoleCan { cc_hole = hole })
 
        ; show_hole_constraints <- goptM Opt_ShowHoleConstraints
        ; let constraints_msg
-               | is_expr_hole, show_hole_constraints = givenConstraintsMsg ctxt
+               | isExprHoleCt ct, show_hole_constraints
+                  = givenConstraintsMsg ctxt
                | otherwise = empty
-             is_expr_hole = case hole of
-               ExprHole {} -> True
-               TypeHole {} -> False
 
        ; mkErrorMsgFromCt ctxt ct $
             important hole_msg `mappend`
