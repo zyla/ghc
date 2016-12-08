@@ -1079,8 +1079,7 @@ mkHoleError ctxt ct@(CHoleCan { cc_hole = hole })
 mkHoleError _ ct = pprPanic "mkHoleError" (ppr ct)
 
 
--- | 'givenConstraintsMsg' returns the "Constraints include ..." message.
--- Constraints are grouped by the 'Implication' that introduced them.
+-- See Note [Constraints include ...]
 givenConstraintsMsg :: ReportErrCtxt -> SDoc
 givenConstraintsMsg ctxt =
     let constraints :: [(Type, RealSrcSpan)]
@@ -1119,6 +1118,24 @@ mkIPErr ctxt cts
     (ct1:_) = cts
 
 {-
+Note [Constraints include ...]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+'givenConstraintsMsg' returns the "Constraints include ..." message enabled by
+-fshow-hole-constraints. For example, the following hole:
+
+    foo :: (Eq a, Show a) => a -> String
+    foo x = _
+
+would generate the message:
+
+    Constraints include
+      Eq a (from foo.hs:1:1-36)
+      Show a (from foo.hs:1:1-36)
+
+Constraints are displayed in order from innermost (closest to the hole) to
+outermost. There's currently no filtering or elimination of duplicates.
+
+
 Note [OutOfScope exact matches]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 When constructing an out-of-scope error message, we not only generate a list of
