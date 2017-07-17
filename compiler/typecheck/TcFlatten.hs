@@ -1148,7 +1148,8 @@ flatten_fam_app tc tys  -- Can be over-saturated
                -- cos_res :: xis_rest ~ tys_rest
          ; let ty' = mkAppTys xi1 xis_rest -- NB mkAppTys: rhs_xi might not be a type variable
                                            --    cf Trac #5655
-         ; omitTypeFamilyCoercionsEnabled <- gopt Opt_OmitTypeFamilyCoercions <$> liftTcS getDynFlags
+         ; omitTypeFamilyCoercionsEnabled <-
+             gopt Opt_OmitTypeFamilyCoercions <$> liftTcS getDynFlags
          ; if omitTypeFamilyCoercionsEnabled
              then do { orig_ty_zonked <- liftTcS $ zonkTcType $ mkTyConApp tc tys
                      ; role <- getRole
